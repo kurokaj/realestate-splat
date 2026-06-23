@@ -1,0 +1,15 @@
+training:
+  backend: splatfacto
+  nerfstudio_dir: /workspace/opt/nerfstudio
+  use_existing_colmap: true
+  method: splatfacto
+  max_steps: 5000
+  save_every: 1000
+  eval_every: 1000
+  num_downscales: 2
+  max_dataset_size: -1
+
+colmap:
+  binary: /workspace/opt/colmap-install/bin/colmap
+  mapper: global_mapper
+  use_nerfstudio_colmap: false

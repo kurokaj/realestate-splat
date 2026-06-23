@@ -1,0 +1,33 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Keep local captures and generated runs out of source control.
+data/raw/*
+!data/raw/.gitkeep
+runs/*
+!runs/.gitkeep
+
+# Avoid committing heavy generated assets even if they are created elsewhere.
+*.mp4
+*.mov
+*.m4v
+*.avi
+*.mkv
+*.db
+*.sqlite
+*.sqlite3
+*.ply
+*.splat
+*.ckpt
+*.pt
+*.pth
+*.npz
+checkpoints/
+outputs/
+nerfstudio/
+gsplat/
+colmap/
+final/
