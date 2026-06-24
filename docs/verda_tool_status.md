@@ -85,6 +85,12 @@ available in the current shell:
 
 This `PATH` change is not automatically persistent across new GPU instances unless added again or sourced from a setup script.
 
+COLMAP option namespaces vary by build. `scripts/run_colmap.py` defaults to
+`option_namespace: auto`, probes the authoritative binary's command help, and
+uses newer `FeatureExtraction` / `FeatureMatching` options when supported. Use
+`--option-namespace feature` or `--option-namespace sift` only when debugging a
+specific binary mismatch.
+
 ---
 
 ## gsplat

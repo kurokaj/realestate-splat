@@ -12,4 +12,5 @@ training:
 colmap:
   binary: /workspace/opt/colmap-install/bin/colmap
   mapper: global_mapper
+  option_namespace: auto
   use_nerfstudio_colmap: false

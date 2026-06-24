@@ -48,6 +48,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "single_camera": True,
     "use_gpu": True,
     "max_image_size": 3200,
+    "option_namespace": "auto",
     "sequential_overlap": 10,
     "export_text": True,
     "undistort": False,
@@ -66,6 +67,13 @@ class CommandResult:
     started_at: str
     finished_at: str
     duration_seconds: float
+
+
+@dataclass(frozen=True)
+class ColmapOptionNames:
+    feature_use_gpu: str
+    feature_max_image_size: str
+    matching_use_gpu: str
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -122,6 +130,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--max-image-size",
         type=int,
         help="Maximum image dimension used by SIFT extraction.",
+    )
+    parser.add_argument(
+        "--option-namespace",
+        choices=["auto", "feature", "sift"],
+        help=(
+            "COLMAP option namespace for extraction/matching GPU flags. "
+            "'feature' uses FeatureExtraction/FeatureMatching; 'sift' uses older SiftExtraction/SiftMatching."
+        ),
     )
     parser.add_argument(
         "--sequential-overlap",
@@ -323,6 +339,7 @@ def build_settings(args: argparse.Namespace) -> Dict[str, Any]:
         "single_camera": args.single_camera,
         "use_gpu": args.use_gpu,
         "max_image_size": args.max_image_size,
+        "option_namespace": args.option_namespace,
         "sequential_overlap": args.sequential_overlap,
         "vocab_tree": str(args.vocab_tree) if args.vocab_tree is not None else None,
         "export_text": args.export_text,
@@ -373,6 +390,8 @@ def validate_settings(settings: Mapping[str, Any]) -> None:
         raise SystemExit("--mode must be incremental or global.")
     if settings["matcher"] not in {"exhaustive", "sequential", "vocab_tree"}:
         raise SystemExit("--matcher must be exhaustive, sequential, or vocab_tree.")
+    if settings["option_namespace"] not in {"auto", "feature", "sift"}:
+        raise SystemExit("--option-namespace must be auto, feature, or sift.")
     if int(settings["max_image_size"]) <= 0:
         raise SystemExit("--max-image-size must be greater than zero.")
     if int(settings["sequential_overlap"]) <= 0:
@@ -418,6 +437,86 @@ def append_options(command: List[str], options: Mapping[str, Any]) -> None:
             continue
         option_name = key if str(key).startswith("--") else f"--{key}"
         command.extend([option_name, str(value)])
+
+
+def forced_option_names(namespace: str) -> ColmapOptionNames:
+    if namespace == "feature":
+        return ColmapOptionNames(
+            feature_use_gpu="--FeatureExtraction.use_gpu",
+            feature_max_image_size="--FeatureExtraction.max_image_size",
+            matching_use_gpu="--FeatureMatching.use_gpu",
+        )
+    if namespace == "sift":
+        return ColmapOptionNames(
+            feature_use_gpu="--SiftExtraction.use_gpu",
+            feature_max_image_size="--SiftExtraction.max_image_size",
+            matching_use_gpu="--SiftMatching.use_gpu",
+        )
+    raise ValueError(f"Unsupported forced COLMAP option namespace: {namespace}")
+
+
+def colmap_command_help(colmap_bin: str, command: str) -> str:
+    completed = subprocess.run(
+        [colmap_bin, command, "-h"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=20,
+    )
+    output = completed.stdout or ""
+    if completed.returncode != 0:
+        raise SystemExit(
+            f"Could not query COLMAP help for '{command}' with {colmap_bin}.\n"
+            f"Exit code: {completed.returncode}\n"
+            f"Output:\n{output}"
+        )
+    return output
+
+
+def option_supported(help_text: str, option_name: str) -> bool:
+    return option_name in help_text
+
+
+def resolve_colmap_option_names(colmap_bin: str, settings: Mapping[str, Any], dry_run: bool) -> ColmapOptionNames:
+    namespace = str(settings["option_namespace"])
+    if namespace != "auto":
+        return forced_option_names(namespace)
+    if dry_run:
+        return forced_option_names("feature")
+
+    feature_help = colmap_command_help(colmap_bin, "feature_extractor")
+    if option_supported(feature_help, "--FeatureExtraction.use_gpu"):
+        feature_use_gpu = "--FeatureExtraction.use_gpu"
+        feature_max_image_size = "--FeatureExtraction.max_image_size"
+    elif option_supported(feature_help, "--SiftExtraction.use_gpu"):
+        feature_use_gpu = "--SiftExtraction.use_gpu"
+        feature_max_image_size = "--SiftExtraction.max_image_size"
+    else:
+        raise SystemExit(
+            "Could not find a supported feature extraction GPU option in COLMAP help. "
+            "Expected --FeatureExtraction.use_gpu or --SiftExtraction.use_gpu."
+        )
+
+    if not option_supported(feature_help, feature_max_image_size):
+        raise SystemExit(f"COLMAP help did not contain expected max image size option: {feature_max_image_size}")
+
+    matcher_help = colmap_command_help(colmap_bin, f"{settings['matcher']}_matcher")
+    if option_supported(matcher_help, "--FeatureMatching.use_gpu"):
+        matching_use_gpu = "--FeatureMatching.use_gpu"
+    elif option_supported(matcher_help, "--SiftMatching.use_gpu"):
+        matching_use_gpu = "--SiftMatching.use_gpu"
+    else:
+        raise SystemExit(
+            "Could not find a supported feature matching GPU option in COLMAP help. "
+            "Expected --FeatureMatching.use_gpu or --SiftMatching.use_gpu."
+        )
+
+    return ColmapOptionNames(
+        feature_use_gpu=feature_use_gpu,
+        feature_max_image_size=feature_max_image_size,
+        matching_use_gpu=matching_use_gpu,
+    )
 
 
 def prepare_output_paths(run_dir: Path, settings: Mapping[str, Any], overwrite: bool, dry_run: bool) -> Dict[str, Path]:
@@ -480,7 +579,12 @@ def count_images(image_dir: Path) -> int:
     return sum(1 for path in image_dir.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES)
 
 
-def build_core_commands(colmap_bin: str, settings: Mapping[str, Any], paths: Mapping[str, Path]) -> List[Tuple[str, List[str]]]:
+def build_core_commands(
+    colmap_bin: str,
+    settings: Mapping[str, Any],
+    paths: Mapping[str, Path],
+    option_names: ColmapOptionNames,
+) -> List[Tuple[str, List[str]]]:
     database_path = str(paths["database_path"])
     image_dir = str(paths["image_dir"])
     sparse_dir = str(paths["sparse_dir"])
@@ -496,14 +600,14 @@ def build_core_commands(colmap_bin: str, settings: Mapping[str, Any], paths: Map
         str(settings["camera_model"]),
         "--ImageReader.single_camera",
         bool_as_colmap(settings["single_camera"]),
-        "--SiftExtraction.use_gpu",
+        option_names.feature_use_gpu,
         bool_as_colmap(settings["use_gpu"]),
-        "--SiftExtraction.max_image_size",
+        option_names.feature_max_image_size,
         str(int(settings["max_image_size"])),
     ]
     append_options(feature_command, settings.get("feature_options", {}))
 
-    matcher_command = build_matcher_command(colmap_bin, settings, database_path)
+    matcher_command = build_matcher_command(colmap_bin, settings, database_path, option_names)
 
     mapper_name = "global_mapper" if settings["mode"] == "global" else "mapper"
     mapper_command = [
@@ -525,14 +629,19 @@ def build_core_commands(colmap_bin: str, settings: Mapping[str, Any], paths: Map
     ]
 
 
-def build_matcher_command(colmap_bin: str, settings: Mapping[str, Any], database_path: str) -> List[str]:
+def build_matcher_command(
+    colmap_bin: str,
+    settings: Mapping[str, Any],
+    database_path: str,
+    option_names: ColmapOptionNames,
+) -> List[str]:
     matcher = str(settings["matcher"])
     command = [
         colmap_bin,
         f"{matcher}_matcher",
         "--database_path",
         database_path,
-        "--SiftMatching.use_gpu",
+        option_names.matching_use_gpu,
         bool_as_colmap(settings["use_gpu"]),
     ]
     if matcher == "sequential":
@@ -674,6 +783,7 @@ def build_report(
     paths: Mapping[str, Path],
     image_count: int,
     colmap_bin: str,
+    option_names: Optional[ColmapOptionNames],
     commands: Sequence[CommandResult],
     status: str,
     started_at: str,
@@ -708,6 +818,7 @@ def build_report(
             "platform": platform.platform(),
             "colmap_bin": colmap_bin,
             "colmap_help_header": colmap_version(colmap_bin, dry_run),
+            "colmap_option_names": asdict(option_names) if option_names is not None else None,
         },
         "outputs": outputs,
         "selected_sparse_model": relative_to(selected_model, run_dir) if selected_model else None,
@@ -745,7 +856,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit(f"No supported images found in {paths['image_dir']}")
 
     colmap_bin = resolve_colmap_bin(settings, args.dry_run)
-    core_commands = build_core_commands(colmap_bin, settings, paths)
+    option_names = resolve_colmap_option_names(colmap_bin, settings, args.dry_run)
+    core_commands = build_core_commands(colmap_bin, settings, paths, option_names)
 
     if args.dry_run:
         print_dry_run(core_commands, paths, settings)
@@ -780,6 +892,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             paths=paths,
             image_count=image_count,
             colmap_bin=colmap_bin,
+            option_names=option_names,
             commands=command_results,
             status=status,
             started_at=started_at,
@@ -798,6 +911,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         paths=paths,
         image_count=image_count,
         colmap_bin=colmap_bin,
+        option_names=option_names,
         commands=command_results,
         status=status,
         started_at=started_at,
