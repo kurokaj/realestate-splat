@@ -65,7 +65,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--save-every", type=int, help="Checkpoint interval.")
     parser.add_argument("--eval-every", type=int, help="Eval interval.")
     parser.add_argument("--num-downscales", type=int, help="Nerfstudio downscale levels to generate.")
-    parser.add_argument("--max-dataset-size", type=int, help="-1 keeps all selected frames.")
+    parser.add_argument(
+        "--max-dataset-size",
+        type=int,
+        help="Reserved frame-limit setting for backends that support it; splatfacto images data prep keeps all selected frames.",
+    )
     parser.add_argument(
         "--skip-data-prepare",
         action="store_true",

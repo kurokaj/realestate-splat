@@ -45,8 +45,6 @@ def build_process_data_command(settings: Mapping[str, Any]) -> List[str]:
         colmap_model_path_for_process_data(data_dir, colmap_model_dir),
         "--num-downscales",
         str(num_downscales),
-        "--max-dataset-size",
-        str(settings["max_dataset_size"]),
         "--colmap-cmd",
         str(settings["colmap_binary"]),
     ]
