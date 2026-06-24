@@ -137,9 +137,9 @@ def resolve_load_config(run_dir: Path, cli_value: Optional[Path], dry_run: bool)
 def build_export_command(pixi_bin: str, nerfstudio_dir: Path, load_config: Path, export_dir: Path) -> List[str]:
     return [
         pixi_bin,
+        "run",
         "--manifest-path",
         str(nerfstudio_dir / "pixi.toml"),
-        "run",
         "ns-export",
         "gaussian-splat",
         "--load-config",

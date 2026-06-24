@@ -19,9 +19,9 @@ def colmap_model_path_for_process_data(data_dir: Path, colmap_model_dir: Path) -
 def pixi_command(pixi_bin: str, nerfstudio_dir: Path, args: List[str]) -> List[str]:
     return [
         pixi_bin,
+        "run",
         "--manifest-path",
         str(nerfstudio_dir / "pixi.toml"),
-        "run",
         *args,
     ]
 
