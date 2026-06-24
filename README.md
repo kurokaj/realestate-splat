@@ -108,6 +108,7 @@ The scripts write:
 runs/parkkihalli_dome_gap_aware/
   colmap/
     database.db
+    database_global.db
     sparse/
     sparse_txt/
     logs/
@@ -128,5 +129,8 @@ runs/parkkihalli_dome_gap_aware/
 ```
 
 Use `--dry-run` locally to inspect commands without writing outputs.
+For `global_mapper`, the COLMAP script copies `database.db` to
+`database_global.db`, runs `view_graph_calibrator` on the copy, and maps from
+the calibrated database.
 PLY is the first canonical export. A viewer-specific `.splat` or SuperSplat /
 PlayCanvas-compatible file should be added after the browser viewer choice is fixed.

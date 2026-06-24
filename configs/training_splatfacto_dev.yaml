@@ -13,4 +13,5 @@ colmap:
   binary: /workspace/opt/colmap-install/bin/colmap
   mapper: global_mapper
   option_namespace: auto
+  view_graph_calibrator: true
   use_nerfstudio_colmap: false

@@ -49,11 +49,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "use_gpu": True,
     "max_image_size": 3200,
     "option_namespace": "auto",
+    "view_graph_calibrator": True,
     "sequential_overlap": 10,
     "export_text": True,
     "undistort": False,
     "feature_options": {},
     "matcher_options": {},
+    "view_graph_calibrator_options": {},
     "mapper_options": {},
 }
 
@@ -140,6 +142,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--view-graph-calibrator",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="For global_mapper, copy the database and run view_graph_calibrator before mapping.",
+    )
+    parser.add_argument(
         "--sequential-overlap",
         type=int,
         help="Sequential matcher overlap when --matcher sequential is used.",
@@ -174,6 +182,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=[],
         metavar="KEY=VALUE",
         help="Additional COLMAP matcher option. Can be repeated.",
+    )
+    parser.add_argument(
+        "--view-graph-calibrator-option",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Additional COLMAP view_graph_calibrator option. Can be repeated.",
     )
     parser.add_argument(
         "--mapper-option",
@@ -340,6 +355,7 @@ def build_settings(args: argparse.Namespace) -> Dict[str, Any]:
         "use_gpu": args.use_gpu,
         "max_image_size": args.max_image_size,
         "option_namespace": args.option_namespace,
+        "view_graph_calibrator": args.view_graph_calibrator,
         "sequential_overlap": args.sequential_overlap,
         "vocab_tree": str(args.vocab_tree) if args.vocab_tree is not None else None,
         "export_text": args.export_text,
@@ -351,6 +367,11 @@ def build_settings(args: argparse.Namespace) -> Dict[str, Any]:
 
     merge_option_map(settings, "feature_options", parse_option_pairs(args.feature_option, "--feature-option"))
     merge_option_map(settings, "matcher_options", parse_option_pairs(args.matcher_option, "--matcher-option"))
+    merge_option_map(
+        settings,
+        "view_graph_calibrator_options",
+        parse_option_pairs(args.view_graph_calibrator_option, "--view-graph-calibrator-option"),
+    )
     merge_option_map(settings, "mapper_options", parse_option_pairs(args.mapper_option, "--mapper-option"))
 
     validate_settings(settings)
@@ -398,6 +419,10 @@ def validate_settings(settings: Mapping[str, Any]) -> None:
         raise SystemExit("--sequential-overlap must be greater than zero.")
     if settings["matcher"] == "vocab_tree" and not settings.get("vocab_tree"):
         raise SystemExit("--vocab-tree is required when --matcher vocab_tree is used.")
+
+
+def should_run_view_graph_calibrator(settings: Mapping[str, Any]) -> bool:
+    return settings["mode"] == "global" and bool(settings.get("view_graph_calibrator"))
 
 
 def resolve_colmap_bin(settings: Mapping[str, Any], dry_run: bool) -> str:
@@ -533,6 +558,7 @@ def prepare_output_paths(run_dir: Path, settings: Mapping[str, Any], overwrite: 
 
     colmap_dir = run_dir / "colmap"
     database_path = colmap_dir / str(settings["database_name"])
+    database_global_path = colmap_dir / "database_global.db"
     sparse_dir = colmap_dir / "sparse"
     sparse_text_dir = colmap_dir / "sparse_txt"
     dense_dir = colmap_dir / "dense"
@@ -542,7 +568,7 @@ def prepare_output_paths(run_dir: Path, settings: Mapping[str, Any], overwrite: 
     if not dry_run:
         existing_outputs = [
             path
-            for path in [database_path, sparse_dir, sparse_text_dir, dense_dir]
+            for path in [database_path, database_global_path, sparse_dir, sparse_text_dir, dense_dir]
             if path.exists()
         ]
         if existing_outputs and not overwrite:
@@ -567,6 +593,7 @@ def prepare_output_paths(run_dir: Path, settings: Mapping[str, Any], overwrite: 
         "image_dir": image_dir,
         "colmap_dir": colmap_dir,
         "database_path": database_path,
+        "database_global_path": database_global_path,
         "sparse_dir": sparse_dir,
         "sparse_text_dir": sparse_text_dir,
         "dense_dir": dense_dir,
@@ -586,6 +613,7 @@ def build_core_commands(
     option_names: ColmapOptionNames,
 ) -> List[Tuple[str, List[str]]]:
     database_path = str(paths["database_path"])
+    mapper_database_path = str(paths["database_global_path"] if should_run_view_graph_calibrator(settings) else paths["database_path"])
     image_dir = str(paths["image_dir"])
     sparse_dir = str(paths["sparse_dir"])
 
@@ -609,12 +637,37 @@ def build_core_commands(
 
     matcher_command = build_matcher_command(colmap_bin, settings, database_path, option_names)
 
+    commands: List[Tuple[str, List[str]]] = [
+        ("feature_extractor", feature_command),
+        (f"{settings['matcher']}_matcher", matcher_command),
+    ]
+
+    if should_run_view_graph_calibrator(settings):
+        commands.append(
+            (
+                "copy_database_for_global_mapper",
+                [
+                    "cp",
+                    database_path,
+                    mapper_database_path,
+                ],
+            )
+        )
+        view_graph_calibrator_command = [
+            colmap_bin,
+            "view_graph_calibrator",
+            "--database_path",
+            mapper_database_path,
+        ]
+        append_options(view_graph_calibrator_command, settings.get("view_graph_calibrator_options", {}))
+        commands.append(("view_graph_calibrator", view_graph_calibrator_command))
+
     mapper_name = "global_mapper" if settings["mode"] == "global" else "mapper"
     mapper_command = [
         colmap_bin,
         mapper_name,
         "--database_path",
-        database_path,
+        mapper_database_path,
         "--image_path",
         image_dir,
         "--output_path",
@@ -622,11 +675,8 @@ def build_core_commands(
     ]
     append_options(mapper_command, settings.get("mapper_options", {}))
 
-    return [
-        ("feature_extractor", feature_command),
-        (f"{settings['matcher']}_matcher", matcher_command),
-        (mapper_name, mapper_command),
-    ]
+    commands.append((mapper_name, mapper_command))
+    return commands
 
 
 def build_matcher_command(
@@ -794,6 +844,7 @@ def build_report(
 ) -> Dict[str, Any]:
     outputs = {
         "database": relative_to(paths["database_path"], run_dir),
+        "database_global": relative_to(paths["database_global_path"], run_dir),
         "sparse": relative_to(paths["sparse_dir"], run_dir),
         "sparse_text": relative_to(paths["sparse_text_dir"], run_dir),
         "dense": relative_to(paths["dense_dir"], run_dir),

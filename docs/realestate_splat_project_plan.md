@@ -269,6 +269,19 @@ Pipeline scripts should call this binary by absolute path. Nerfstudio's Pixi
 environment may contain its own COLMAP dependency, but that dependency must not
 own the reconstruction stage.
 
+When using `global_mapper`, run `view_graph_calibrator` on a copy of the
+database before mapping:
+
+```text
+database.db
+  -> database_global.db
+  -> view_graph_calibrator
+  -> global_mapper
+```
+
+This preserves the original feature/match database for debugging or an
+incremental retry while giving global SfM calibrated focal-length priors.
+
 Primary reconstruction modes:
 
 ```text

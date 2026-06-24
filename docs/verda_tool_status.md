@@ -91,6 +91,11 @@ uses newer `FeatureExtraction` / `FeatureMatching` options when supported. Use
 `--option-namespace feature` or `--option-namespace sift` only when debugging a
 specific binary mismatch.
 
+For `global_mapper`, the pipeline copies `database.db` to `database_global.db`,
+runs `view_graph_calibrator` on the copy, and then maps from that calibrated
+database. This avoids relying on missing EXIF focal-length priors from
+video-extracted frames.
+
 ---
 
 ## gsplat
