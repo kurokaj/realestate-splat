@@ -116,6 +116,17 @@ Training scripts should run only after activating the environment.
 
 Each time a new GPU instance is started:
 
+    # Single-command project runtime init from the Verda repo checkout
+    cd /workspace/repo/realestate-splat
+    source verda/init_runtime.sh
+
+This runs the project Verda initialization scripts, installs/copies
+`/workspace/setup_env.sh`, sources the environment for the current shell, and
+prints verification for `/workspace`, micromamba, Pixi, COLMAP, and the
+`/workspace/envs/splat-dev` environment.
+
+Manual checklist equivalent:
+
     # 1. Attach the existing Verda block volume in the UI
 
     # 2. SSH into the instance
