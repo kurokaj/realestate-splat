@@ -121,23 +121,17 @@ Each time a new GPU instance is started:
     # 2. SSH into the instance
     ssh root@YOUR_INSTANCE_IP
 
-    # 3. Bootstrap /workspace manually because the repo lives on the volume
-    mkdir -p /mnt/GaussianSplatVolume
-    mount /dev/vdb /mnt/GaussianSplatVolume
-    rm -rf /workspace
-    ln -s /mnt/GaussianSplatVolume/workspace /workspace
-    df -h /workspace
-
-    # 4. Run project runtime init from the Verda repo checkout
+    # 3. Run project runtime init from the Verda repo checkout
     cd /workspace/repo/realestate-splat
     source verda/init_runtime.sh
 
-The manual mount bootstrap is needed because `verda/init_runtime.sh` lives in
-the repo under `/workspace`, and `/workspace` does not exist until the block
-volume is mounted. After that, the init script installs runtime dependencies,
-copies `/workspace/setup_env.sh`, sources the environment for the current shell,
-and prints verification for `/workspace`, micromamba, Pixi, COLMAP, and
-`/workspace/envs/splat-dev`.
+The init script only orchestrates the three Verda scripts:
+
+1. `verda/start_up_script.sh` mounts `/dev/vdb` when needed, prepares
+   `/workspace`, and adds micromamba/COLMAP to `PATH`.
+2. `verda/install_colmap_runtime_deps.sh` installs COLMAP/Nerfstudio runtime
+   apt dependencies.
+3. `verda/setup_pixi_env.sh` adds Pixi/COLMAP paths and CUDA build variables.
 
 If runtime apt dependencies are already installed:
 

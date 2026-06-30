@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-# to run : source /workspace/setup_env.sh
+# Run from the repository root on Verda:
+#   source verda/setup_pixi_env.sh
 
 export PATH=/workspace/bin:$PATH
 export PATH=/workspace/pixi/bin:$PATH
