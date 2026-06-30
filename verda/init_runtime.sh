@@ -25,6 +25,7 @@
 # Optional:
 #
 #   SKIP_APT=1 source verda/init_runtime.sh
+#   micromamba activate /workspace/envs/splat-dev
 #
 # `SKIP_APT=1` skips step 2 when apt dependencies are already installed.
 
