@@ -175,6 +175,9 @@ remotely and rsyncs one return bundle into:
 runs/<run>/cloud_artifacts/
 ```
 
+Use `--skip-upload` to resume after a successful upload/unpack when the remote
+run inputs are already present.
+
 Preflight policy is intentionally conservative:
 
 - Hopeless captures fail locally before cloud spend starts.

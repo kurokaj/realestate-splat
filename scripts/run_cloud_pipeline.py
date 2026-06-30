@@ -78,6 +78,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--remote-run", type=Path, help="Remote run directory. Defaults to remote-run-root/local-run-name.")
     parser.add_argument("--remote-env", default=DEFAULT_REMOTE_ENV, help="Micromamba environment path on Verda.")
     parser.add_argument("--remote-config", default=DEFAULT_REMOTE_CONFIG, help="Config path on Verda, relative to remote repo unless absolute.")
+    parser.add_argument("--quiet-rsync", action="store_true", help="Disable rsync progress output.")
     parser.add_argument(
         "--approval-mode",
         choices=["require_clean", "approve_warnings", "strict"],
@@ -91,6 +92,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--backend", choices=["splatfacto", "raw_gsplat"], help="Training backend.")
     parser.add_argument("--overwrite-remote", action="store_true", help="Replace remote generated outputs for this run.")
     parser.add_argument("--overwrite-local", action="store_true", help="Pass --overwrite to local preprocessing.")
+    parser.add_argument(
+        "--skip-upload",
+        action="store_true",
+        help="Resume from an already-unpacked remote run; skip upload bundle creation, rsync, and remote unpack.",
+    )
     parser.add_argument("--skip-colmap", action="store_true", help="Skip remote COLMAP.")
     parser.add_argument("--skip-training", action="store_true", help="Skip remote training.")
     parser.add_argument("--skip-export", action="store_true", help="Skip remote export.")
@@ -109,7 +115,9 @@ def ssh_base(args: argparse.Namespace) -> List[str]:
 
 
 def rsync_base(args: argparse.Namespace) -> List[str]:
-    command = ["rsync", "-az", "--info=progress2"]
+    command = ["rsync", "-az"]
+    if not args.quiet_rsync:
+        command.append("--progress")
     if args.ssh_option:
         ssh_parts = ["ssh"]
         for option in args.ssh_option:
@@ -134,7 +142,7 @@ def remote_env_prefix(args: argparse.Namespace) -> str:
         [
             "set -euo pipefail",
             f"cd {shlex.quote(str(args.remote_repo))}",
-            "source ~/.bashrc",
+            "source verda/setup_pixi_env.sh",
             f"micromamba activate {shlex.quote(args.remote_env)}",
         ]
     )
@@ -481,12 +489,16 @@ def print_dry_run(
     print("Dry run. No files will be created, uploaded, or executed.\n")
     print(f"# local run: {local_run}")
     print(f"# remote run: {remote_run}")
-    print(f"# upload bundle: {bundle_path}")
+    if args.skip_upload:
+        print("# upload skipped; assuming remote run inputs already exist")
+    else:
+        print(f"# upload bundle: {bundle_path}")
     print(f"# preflight: {asdict(decision)}")
     print("# pause for operator approval after local capture report")
     prepare_script = "set -euo pipefail\nmkdir -p " + shlex.quote(str(remote_run))
     print(f"$ {shlex.join(ssh_base(args) + [remote_shell_command(prepare_script)])}")
-    print(f"$ {shlex.join(rsync_base(args) + [str(bundle_path), f'{args.host}:{remote_run / bundle_path.name}'])}")
+    if not args.skip_upload:
+        print(f"$ {shlex.join(rsync_base(args) + [str(bundle_path), f'{args.host}:{remote_run / bundle_path.name}'])}")
     for name, script_name, skip in [
         ("remote_colmap", "run_colmap.py", args.skip_colmap),
         ("remote_training", "run_training.py", args.skip_training),
@@ -507,7 +519,7 @@ def build_pipeline_report(
     *,
     local_run: Path,
     remote_run: Path,
-    bundle_path: Path,
+    bundle_path: Optional[Path],
     decision: PreflightDecision,
     commands: Sequence[CommandResult],
     status: str,
@@ -525,7 +537,7 @@ def build_pipeline_report(
         "finished_at": finished_at,
         "local_run": str(local_run),
         "remote_run": str(remote_run),
-        "upload_bundle": relative_to(bundle_path, local_run),
+        "upload_bundle": relative_to(bundle_path, local_run) if bundle_path is not None else None,
         "preflight": asdict(decision),
         "commands": command_results_to_json(commands),
         "error": error,
@@ -567,16 +579,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     args.yes_to_prompts,
                 )
         remote_run = remote_run_dir(args, local_run)
-        bundle_path = work_dir / f"{local_run.name}_upload_bundle.zip"
+        bundle_path: Optional[Path] = None if args.skip_upload else work_dir / f"{local_run.name}_upload_bundle.zip"
 
         if args.dry_run:
             print_dry_run(args, local_run, remote_run, bundle_path, decision)
             return 0
 
-        bundle_path = build_upload_bundle(local_run, work_dir)
         commands.append(make_remote_run(args, remote_run, logs_dir))
-        commands.append(upload_bundle(args, bundle_path, remote_run, logs_dir))
-        commands.append(unpack_remote_bundle(args, bundle_path, remote_run, logs_dir))
+        if args.skip_upload:
+            print("Skipping upload/unpack. Assuming remote inputs are ready at: {}".format(remote_run))
+        else:
+            bundle_path = build_upload_bundle(local_run, work_dir)
+            commands.append(upload_bundle(args, bundle_path, remote_run, logs_dir))
+            commands.append(unpack_remote_bundle(args, bundle_path, remote_run, logs_dir))
 
         if not args.skip_colmap:
             commands.append(run_remote_stage(args, "remote_colmap", "run_colmap.py", remote_run, logs_dir))
@@ -597,7 +612,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             report = build_pipeline_report(
                 local_run=initial_run,
                 remote_run=remote_run_dir(args, initial_run),
-                bundle_path=work_dir / f"{initial_run.name}_upload_bundle.zip",
+                bundle_path=None if args.skip_upload else work_dir / f"{initial_run.name}_upload_bundle.zip",
                 decision=evaluate_preflight(initial_run) if (initial_run / "reports" / "capture_report.json").exists() else PreflightDecision("unknown", [], [], [], 0, 0),
                 commands=commands,
                 status=status,

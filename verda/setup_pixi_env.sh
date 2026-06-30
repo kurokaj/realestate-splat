@@ -13,14 +13,20 @@ fi
 
 export PATH=/workspace/opt/colmap-install/bin:$PATH
 
-# CUDA extension build settings for RTX 6000 Ada + Nerfstudio/Pixi CUDA 11.8
+# CUDA extension build settings for Nerfstudio/Pixi CUDA 11.8
 if [ -x /usr/bin/gcc-11 ] && [ -x /usr/bin/g++-11 ]; then
   export CC=/usr/bin/gcc-11
   export CXX=/usr/bin/g++-11
   export CUDAHOSTCXX=/usr/bin/g++-11
 fi
 
-export TCNN_CUDA_ARCHITECTURES=89
-export TORCH_CUDA_ARCH_LIST="8.9"
+# Old setting for RTX 6000 Ada / compute capability 8.9:
+# export TCNN_CUDA_ARCHITECTURES=89
+# export TORCH_CUDA_ARCH_LIST="8.9"
+
+# Current setting for RTX A6000 / Ampere / compute capability 8.6:
+export TCNN_CUDA_ARCHITECTURES=86
+export TORCH_CUDA_ARCH_LIST="8.6"
+
 export MAX_JOBS=2
 export CMAKE_BUILD_PARALLEL_LEVEL=2
