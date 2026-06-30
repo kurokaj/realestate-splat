@@ -47,6 +47,7 @@ fi
 df -h "$WORKSPACE"
 
 export PATH=/workspace/bin:$PATH
+export MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-/workspace}"
 
 if [ -x /workspace/bin/micromamba ]; then
   eval "$(/workspace/bin/micromamba shell hook -s bash)"
