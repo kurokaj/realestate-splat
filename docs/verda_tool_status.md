@@ -180,25 +180,66 @@ Example:
 
 ### Medium term: local script connects over SSH
 
-Once the manual flow is stable, create a local orchestration script that does:
+Once the manual flow is stable, use `scripts/run_cloud_pipeline.py` from the
+local Mac. It does:
 
-    local preprocess
+    local preprocess and capture preflight gate
       ↓
-    rsync selected frames to Verda
+    zip selected run inputs and rsync one bundle to Verda
       ↓
-    ssh command to run remote COLMAP
+    ssh command to run remote COLMAP and write reconstruction report
       ↓
-    ssh command to run remote gsplat
+    ssh command to run remote gsplat training/export
       ↓
-    rsync final artifacts back
+    zip final artifacts/reports/logs and rsync one bundle back
 
-Example future command:
+The pipeline should **fail locally** when preprocessing shows a hopeless
+capture, such as zero selected frames, frame count far below the target minimum,
+or coverage windows below minimum for a large part of the camera path. Every
+non-fatal capture should keep a human in the loop before cloud spend starts:
+the default CLI prints the local capture report path and waits for the operator
+to type `yes`. Warning cases show their review reasons in that prompt. Use
+`--yes-to-prompts` only for intentionally non-interactive runs.
+
+Selected frames should be transferred as a single archive, not as many small
+image files. The orchestrator creates one upload zip containing
+`frames_selected/`, local capture reports, and `run_config.json`, rsyncs that
+bundle to Verda, and unpacks it inside the remote run directory.
+
+The remote COLMAP step should generate a succinct HTML report in addition to
+JSON. The JSON remains the machine-readable contract; the HTML is for the
+operator to decide quickly whether to continue, retry, or change COLMAP
+settings. The report should include parsed `model_analyzer` metrics such as
+registered images, point count, observation count, mean track length,
+observations per image, and mean reprojection error. `scripts/run_colmap.py`
+writes:
+
+    reports/reconstruction_report.json
+    reports/reconstruction_report.html
+
+The orchestrator downloads those COLMAP reports and `colmap/logs/model_analyzer.log`
+back to:
+
+    runs/<run>/cloud_artifacts/colmap_review/
+
+before starting training. It then waits for the operator to type `yes`.
+
+Example command:
 
     python scripts/run_cloud_pipeline.py \
       --run runs/house_001 \
       --host verda-a6000
 
-This script should use SSH internally, but only after the individual remote scripts are stable.
+To run preprocessing first:
+
+    python scripts/run_cloud_pipeline.py \
+      --input-dir data/raw/house_001 \
+      --out runs/house_001 \
+      --profile indoor_house \
+      --host verda-a6000
+
+Use `--dry-run` for high-level verification. It prints the planned local,
+rsync, and SSH commands without connecting or writing new outputs.
 
 ---
 

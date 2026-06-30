@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import html
 import json
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -37,6 +39,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 DEFAULT_VERDA_COLMAP = Path("/workspace/opt/colmap-install/bin/colmap")
 REPORT_NAME = "reconstruction_report.json"
+REPORT_HTML_NAME = "reconstruction_report.html"
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "binary": str(DEFAULT_VERDA_COLMAP),
@@ -826,6 +829,33 @@ def colmap_version(colmap_bin: str, dry_run: bool) -> Optional[str]:
     return first_line[0] if first_line else None
 
 
+def parse_model_analyzer_metrics(log_path: Path) -> Dict[str, Any]:
+    if not log_path.exists():
+        return {}
+
+    patterns = {
+        "rigs": (r"\bRigs:\s+(\d+)", int),
+        "cameras": (r"\bCameras:\s+(\d+)", int),
+        "frames": (r"\bFrames:\s+(\d+)", int),
+        "registered_frames": (r"\bRegistered frames:\s+(\d+)", int),
+        "images": (r"\bImages:\s+(\d+)", int),
+        "registered_images": (r"\bRegistered images:\s+(\d+)", int),
+        "points": (r"\bPoints:\s+(\d+)", int),
+        "observations": (r"\bObservations:\s+(\d+)", int),
+        "mean_track_length": (r"\bMean track length:\s+([0-9.eE+-]+)", float),
+        "mean_observations_per_image": (r"\bMean observations per image:\s+([0-9.eE+-]+)", float),
+        "mean_reprojection_error_px": (r"\bMean reprojection error:\s+([0-9.eE+-]+)px", float),
+    }
+
+    text = log_path.read_text(encoding="utf-8", errors="replace")
+    metrics: Dict[str, Any] = {}
+    for key, (pattern, caster) in patterns.items():
+        match = re.search(pattern, text)
+        if match:
+            metrics[key] = caster(match.group(1))
+    return metrics
+
+
 def build_report(
     *,
     run_dir: Path,
@@ -842,6 +872,7 @@ def build_report(
     error: Optional[str],
     dry_run: bool,
 ) -> Dict[str, Any]:
+    reconstruction_metrics = parse_model_analyzer_metrics(paths["logs_dir"] / "model_analyzer.log")
     outputs = {
         "database": relative_to(paths["database_path"], run_dir),
         "database_global": relative_to(paths["database_global_path"], run_dir),
@@ -850,6 +881,7 @@ def build_report(
         "dense": relative_to(paths["dense_dir"], run_dir),
         "logs": relative_to(paths["logs_dir"], run_dir),
         "reconstruction_report_json": relative_to(paths["reports_dir"] / REPORT_NAME, run_dir),
+        "reconstruction_report_html": relative_to(paths["reports_dir"] / REPORT_HTML_NAME, run_dir),
     }
     return {
         "schema_version": 1,
@@ -872,6 +904,7 @@ def build_report(
             "colmap_option_names": asdict(option_names) if option_names is not None else None,
         },
         "outputs": outputs,
+        "reconstruction_metrics": reconstruction_metrics,
         "selected_sparse_model": relative_to(selected_model, run_dir) if selected_model else None,
         "commands": [asdict(command) for command in commands],
         "error": error,
@@ -882,6 +915,191 @@ def write_report(reports_dir: Path, report: Mapping[str, Any]) -> Path:
     reports_dir.mkdir(parents=True, exist_ok=True)
     output_path = reports_dir / REPORT_NAME
     output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return output_path
+
+
+def table_rows(mapping: Mapping[str, Any]) -> str:
+    rows = []
+    for key, value in mapping.items():
+        rows.append(
+            "<tr><th>{key}</th><td>{value}</td></tr>".format(
+                key=html.escape(str(key).replace("_", " ")),
+                value=html.escape(str(value)),
+            )
+        )
+    return "\n".join(rows)
+
+
+def command_rows(commands: Sequence[Mapping[str, Any]]) -> str:
+    rows = []
+    for command in commands:
+        rows.append(
+            "<tr><td>{name}</td><td>{returncode}</td><td>{duration}</td><td><code>{log}</code></td></tr>".format(
+                name=html.escape(str(command.get("name"))),
+                returncode=html.escape(str(command.get("returncode"))),
+                duration=html.escape(str(command.get("duration_seconds"))),
+                log=html.escape(str(command.get("log_path"))),
+            )
+        )
+    return "\n".join(rows)
+
+
+def metric_rows(metrics: Mapping[str, Any]) -> str:
+    if not metrics:
+        return '<tr><td colspan="2">No model analyzer metrics found.</td></tr>'
+    preferred_order = [
+        "rigs",
+        "cameras",
+        "frames",
+        "registered_frames",
+        "images",
+        "registered_images",
+        "points",
+        "observations",
+        "mean_track_length",
+        "mean_observations_per_image",
+        "mean_reprojection_error_px",
+    ]
+    rows = []
+    for key in preferred_order:
+        if key not in metrics:
+            continue
+        rows.append(
+            "<tr><th>{key}</th><td>{value}</td></tr>".format(
+                key=html.escape(key.replace("_", " ")),
+                value=html.escape(str(metrics[key])),
+            )
+        )
+    return "\n".join(rows)
+
+
+def write_html_report(reports_dir: Path, report: Mapping[str, Any]) -> Path:
+    output_path = reports_dir / REPORT_HTML_NAME
+    settings = report.get("settings", {})
+    outputs = report.get("outputs", {})
+    error = report.get("error")
+    error_html = (
+        "<p><strong>Error:</strong> {}</p>".format(html.escape(str(error)))
+        if error
+        else "<p>No reconstruction error recorded.</p>"
+    )
+    document = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reconstruction Report</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --ink: #1c2430;
+      --muted: #657080;
+      --line: #d8dee7;
+      --panel: #f6f8fb;
+    }}
+    body {{
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: white;
+      line-height: 1.45;
+    }}
+    main {{
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }}
+    h1, h2 {{
+      line-height: 1.15;
+      margin: 0 0 14px;
+    }}
+    h1 {{ font-size: 30px; }}
+    h2 {{
+      font-size: 20px;
+      margin-top: 30px;
+    }}
+    .meta {{ color: var(--muted); }}
+    table {{
+      border-collapse: collapse;
+      width: 100%;
+      margin: 10px 0 18px;
+      font-size: 14px;
+    }}
+    th, td {{
+      border: 1px solid var(--line);
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: top;
+    }}
+    th {{
+      background: var(--panel);
+      font-weight: 650;
+    }}
+    code {{
+      background: var(--panel);
+      padding: 1px 5px;
+      border-radius: 4px;
+    }}
+  </style>
+</head>
+<body>
+<main>
+  <h1>Reconstruction Report</h1>
+  <div class="meta">Generated {created_at}</div>
+
+  <h2>Summary</h2>
+  <table>{summary_rows}</table>
+
+  <h2>Settings</h2>
+  <table>{settings_rows}</table>
+
+  <h2>Outputs</h2>
+  <table>{outputs_rows}</table>
+
+  <h2>Model Analyzer</h2>
+  <table>{metrics_rows}</table>
+
+  <h2>Commands</h2>
+  <table>
+    <tr><th>Name</th><th>Exit Code</th><th>Duration (s)</th><th>Log</th></tr>
+    {command_rows}
+  </table>
+
+  <h2>Status Detail</h2>
+  {error_html}
+</main>
+</body>
+</html>
+""".format(
+        created_at=html.escape(str(report.get("created_at"))),
+        summary_rows=table_rows(
+            {
+                "status": report.get("status"),
+                "run": report.get("run"),
+                "image_dir": (report.get("input") or {}).get("image_dir"),
+                "image_count": (report.get("input") or {}).get("image_count"),
+                "selected_sparse_model": report.get("selected_sparse_model"),
+                "started_at": report.get("started_at"),
+                "finished_at": report.get("finished_at"),
+            }
+        ),
+        settings_rows=table_rows(
+            {
+                "mode": settings.get("mode"),
+                "matcher": settings.get("matcher"),
+                "camera_model": settings.get("camera_model"),
+                "single_camera": settings.get("single_camera"),
+                "use_gpu": settings.get("use_gpu"),
+                "max_image_size": settings.get("max_image_size"),
+                "view_graph_calibrator": settings.get("view_graph_calibrator"),
+            }
+        ),
+        outputs_rows=table_rows(outputs),
+        metrics_rows=metric_rows(report.get("reconstruction_metrics") or {}),
+        command_rows=command_rows(report.get("commands") or []),
+        error_html=error_html,
+    )
+    output_path.write_text(document, encoding="utf-8")
     return output_path
 
 
@@ -953,7 +1171,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             dry_run=False,
         )
         report_path = write_report(paths["reports_dir"], report)
-        raise SystemExit(f"{error}\nWrote failure report: {report_path}") from exc
+        html_report_path = write_html_report(paths["reports_dir"], report)
+        raise SystemExit(f"{error}\nWrote failure report: {report_path}\nHTML report: {html_report_path}") from exc
 
     finished_at = utc_now()
     report = build_report(
@@ -972,7 +1191,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         dry_run=False,
     )
     report_path = write_report(paths["reports_dir"], report)
+    html_report_path = write_html_report(paths["reports_dir"], report)
     print(f"\nCOLMAP reconstruction complete. Report: {report_path}")
+    print(f"HTML report: {html_report_path}")
     return 0
 
 

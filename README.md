@@ -4,10 +4,13 @@ Script-first tooling for turning real estate capture video into selected frames 
 
 ## Milestone 1: local preprocessing
 
-Put future source videos in:
+Put future source videos in a project folder:
 
 ```text
-data/raw/
+data/raw/<splat_project_name>/
+  kitchen.mp4
+  living_room.mp4
+  bedroom.mp4
 ```
 
 Install the local dependencies with conda:
@@ -28,31 +31,37 @@ Run preprocessing:
 
 ```bash
 python scripts/preprocess_video.py \
-  --video data/raw/room_001.mp4 \
-  --out runs/room_001 \
-  --profile indoor_room
+  --input-dir data/raw/apartment_001 \
+  --profile small_apartment
 ```
 
 The script writes:
 
 ```text
-runs/room_001/
+runs/apartment_001/
   frames_selected/
+    kitchen_frame_000001.jpg
+    living_room_frame_000001.jpg
+    bedroom_frame_000001.jpg
   reports/
     capture_report.json
     capture_report.html
-    frame_contact_sheet.jpg
     gpu_recommendation.json
   run_config.json
 ```
 
 It does not create a raw frame cache. Only final selected frames are written.
+All selected frames from the project videos go into one `frames_selected/`
+folder for a single downstream COLMAP and splatfacto run. The HTML report
+summarizes each source video and the combined selected-frame count. Use
+`--out runs/custom_name` to override the inferred run directory. Selection
+settings such as `--target-max` apply per source video.
 
 For the current toy parking-garage capture, use:
 
 ```bash
 /opt/homebrew/bin/conda run -n splat-dev-locat python scripts/preprocess_video.py \
-  --video data/raw/parkkihalli.mp4 \
+  --input-dir data/raw/parkkihalli_dome_gap_aware \
   --out runs/parkkihalli_dome_gap_aware \
   --profile indoor_room \
   --candidate-fps 3.0 \
@@ -134,3 +143,50 @@ For `global_mapper`, the COLMAP script copies `database.db` to
 the calibrated database.
 PLY is the first canonical export. A viewer-specific `.splat` or SuperSplat /
 PlayCanvas-compatible file should be added after the browser viewer choice is fixed.
+
+## Milestone 3: local cloud orchestration
+
+Once a Verda host is reachable over SSH, run the scripted cloud pipeline from
+the Mac:
+
+```bash
+python scripts/run_cloud_pipeline.py \
+  --run runs/parkkihalli_dome_gap_aware \
+  --host verda-a6000 \
+  --approval-mode approve_warnings
+```
+
+Or preprocess first and then upload/run remotely:
+
+```bash
+python scripts/run_cloud_pipeline.py \
+  --input-dir data/raw/apartment_001 \
+  --out runs/apartment_001 \
+  --profile small_apartment \
+  --host verda-a6000
+```
+
+The pipeline zips `frames_selected/`, local capture reports, and `run_config.json`,
+rsyncs that one bundle to Verda, unpacks it into `/workspace/runs/<run>/`, runs
+remote COLMAP, training, and export over SSH, then zips final artifacts/reports/logs
+remotely and rsyncs one return bundle into:
+
+```text
+runs/<run>/cloud_artifacts/
+```
+
+Preflight policy is intentionally conservative:
+
+- Hopeless captures fail locally before cloud spend starts.
+- All non-fatal captures pause for operator approval after `reports/capture_report.html` is written.
+- Warning-level captures show their review reasons in the prompt.
+- After remote COLMAP finishes, `reconstruction_report.html/json` and `model_analyzer.log` are downloaded locally before training starts.
+- The pipeline pauses again so the operator can review COLMAP metrics and decide whether to start training.
+- Use `--yes-to-prompts` only for an intentionally non-interactive run.
+- Use `--dry-run` to print the planned SSH/rsync commands without connecting.
+
+Remote COLMAP now writes both `reports/reconstruction_report.json` and
+`reports/reconstruction_report.html` so reconstruction quality can be reviewed
+without reading raw logs first. The HTML/JSON include the parsed COLMAP
+`model_analyzer` summary, such as registered images, point count, observation
+count, mean track length, observations per image, and mean reprojection error.

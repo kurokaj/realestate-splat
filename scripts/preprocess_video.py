@@ -13,6 +13,7 @@ import datetime as dt
 import html
 import json
 import math
+import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -115,9 +116,11 @@ PROFILE_DEFAULTS: Dict[str, Dict[str, Any]] = {
 REPORT_FILENAMES = {
     "capture_json": "capture_report.json",
     "capture_html": "capture_report.html",
-    "contact_sheet": "frame_contact_sheet.jpg",
     "gpu_json": "gpu_recommendation.json",
 }
+
+VIDEO_SUFFIXES = {".avi", ".m4v", ".mkv", ".mov", ".mp4"}
+PROGRESS_PERCENT_STEP = 10
 
 
 @dataclass
@@ -137,6 +140,8 @@ class FrameRecord:
     hash_distance_to_previous_selected: Optional[int] = None
     pixel_difference_to_previous_selected: Optional[float] = None
     output_file: Optional[str] = None
+    source_id: Optional[str] = None
+    source_video: Optional[str] = None
 
 
 @dataclass
@@ -147,6 +152,23 @@ class VideoInfo:
     duration_seconds: Optional[float]
     width: int
     height: int
+
+
+@dataclass
+class VideoSource:
+    source_id: str
+    path: Path
+
+
+@dataclass
+class VideoRunResult:
+    source: VideoSource
+    video_info: VideoInfo
+    records: List[FrameRecord]
+    selected_initial_count: int
+    selected_final: List[FrameRecord]
+    saved_count: int
+    warnings: List[str]
 
 
 def require_dependencies() -> None:
@@ -165,11 +187,20 @@ def require_dependencies() -> None:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Select reconstruction-friendly frames from a real estate capture video.",
+        description="Select reconstruction-friendly frames from a project folder of videos.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--video", required=True, type=Path, help="Source video file.")
-    parser.add_argument("--out", required=True, type=Path, help="Output run directory.")
+    parser.add_argument(
+        "--input-dir",
+        required=True,
+        type=Path,
+        help="Project source directory containing videos, e.g. data/raw/apartment_001/.",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        help="Output run directory. Defaults to runs/<input_dir_name>.",
+    )
     parser.add_argument(
         "--profile",
         choices=sorted(PROFILE_DEFAULTS),
@@ -240,17 +271,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=float,
         help="Optional processing duration from --start-seconds.",
     )
-    parser.add_argument(
-        "--contact-sheet-frames",
-        type=int,
-        default=48,
-        help="Maximum selected frames to include in the contact sheet.",
-    )
     parser.add_argument("--jpeg-quality", type=int, default=92, help="JPEG quality for selected frames.")
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Replace existing generated frame_*.jpg files in frames_selected/.",
+        help="Replace existing generated JPEG frames in frames_selected/.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_false",
+        dest="progress",
+        default=True,
+        help="Disable per-video preprocessing progress output.",
     )
     return parser.parse_args(argv)
 
@@ -285,16 +317,16 @@ def build_settings(args: argparse.Namespace) -> Dict[str, Any]:
     settings["profile"] = args.profile
     settings["start_seconds"] = args.start_seconds
     settings["duration_seconds"] = args.duration_seconds
-    settings["contact_sheet_frames"] = args.contact_sheet_frames
     settings["jpeg_quality"] = args.jpeg_quality
+    settings["progress"] = args.progress
     return settings
 
 
 def validate_args(args: argparse.Namespace, settings: Dict[str, Any]) -> None:
-    if not args.video.exists():
-        raise SystemExit(f"Video file does not exist: {args.video}")
-    if not args.video.is_file():
-        raise SystemExit(f"Video path is not a file: {args.video}")
+    if not args.input_dir.exists():
+        raise SystemExit(f"Input directory does not exist: {args.input_dir}")
+    if not args.input_dir.is_dir():
+        raise SystemExit(f"Input path is not a directory: {args.input_dir}")
     if settings["candidate_fps"] <= 0:
         raise SystemExit("--candidate-fps must be greater than zero.")
     if settings["target_min"] < 0:
@@ -319,6 +351,41 @@ def validate_args(args: argparse.Namespace, settings: Dict[str, Any]) -> None:
         raise SystemExit("--coverage-hard-min-brightness cannot exceed --coverage-hard-max-brightness.")
 
 
+def sanitize_source_id(stem: str) -> str:
+    source_id = re.sub(r"[^A-Za-z0-9]+", "_", stem.lower()).strip("_")
+    return source_id or "video"
+
+
+def discover_video_sources(args: argparse.Namespace) -> List[VideoSource]:
+    video_paths = sorted(
+        path
+        for path in args.input_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES
+    )
+    if not video_paths:
+        suffixes = ", ".join(sorted(VIDEO_SUFFIXES))
+        raise SystemExit(f"No videos found in {args.input_dir}. Expected one of: {suffixes}")
+
+    sources = [VideoSource(source_id=sanitize_source_id(path.stem), path=path) for path in video_paths]
+    seen: Dict[str, Path] = {}
+    for source in sources:
+        previous_path = seen.get(source.source_id)
+        if previous_path is not None:
+            raise SystemExit(
+                "Video filenames must produce unique source ids. "
+                f"Both {previous_path} and {source.path} map to '{source.source_id}'."
+            )
+        seen[source.source_id] = source.path
+    return sources
+
+
+def resolve_output_dir(args: argparse.Namespace, sources: Sequence[VideoSource]) -> Path:
+    if args.out is not None:
+        return args.out
+    del sources
+    return Path("runs") / args.input_dir.name
+
+
 def prepare_output_dirs(out_dir: Path, overwrite: bool) -> Tuple[Path, Path]:
     frames_dir = out_dir / "frames_selected"
     reports_dir = out_dir / "reports"
@@ -326,7 +393,10 @@ def prepare_output_dirs(out_dir: Path, overwrite: bool) -> Tuple[Path, Path]:
     frames_dir.mkdir(parents=True, exist_ok=True)
     reports_dir.mkdir(parents=True, exist_ok=True)
 
-    existing_frames = sorted(frames_dir.glob("frame_*.jpg"))
+    existing_frames = sorted(
+        {*frames_dir.glob("frame_*.jpg"), *frames_dir.glob("*_frame_*.jpg")},
+        key=str,
+    )
     if existing_frames and not overwrite:
         raise SystemExit(
             f"{frames_dir} already contains generated frames. "
@@ -434,6 +504,45 @@ def first_quality_rejection(metrics: Dict[str, float], settings: Dict[str, Any])
     return None
 
 
+def format_duration(seconds: Optional[float]) -> str:
+    if seconds is None or seconds < 0:
+        return "--:--"
+    total_seconds = int(round(seconds))
+    minutes, remaining_seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{remaining_seconds:02d}"
+    return f"{minutes:02d}:{remaining_seconds:02d}"
+
+
+def progress_bar(percent: float, width: int = 20) -> str:
+    clamped = max(0.0, min(percent, 100.0))
+    filled = int(round((clamped / 100.0) * width))
+    return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
+
+
+def print_video_progress(
+    video_path: Path,
+    percent: float,
+    current_seconds: float,
+    total_seconds: Optional[float],
+    candidate_count: int,
+    selected_count: int,
+) -> None:
+    print(
+        "{name} {bar} {percent:3.0f}% {current} / {total} candidates {candidates} selected {selected}".format(
+            name=video_path.name,
+            bar=progress_bar(percent),
+            percent=max(0.0, min(percent, 100.0)),
+            current=format_duration(current_seconds),
+            total=format_duration(total_seconds),
+            candidates=candidate_count,
+            selected=selected_count,
+        ),
+        flush=True,
+    )
+
+
 def analyze_video(video_path: Path, settings: Dict[str, Any]) -> Tuple[VideoInfo, List[FrameRecord], List[FrameRecord]]:
     cap = open_video(video_path)
     try:
@@ -442,8 +551,16 @@ def analyze_video(video_path: Path, settings: Dict[str, Any]) -> Tuple[VideoInfo
         sample_stride = max(1, int(round(source_fps / float(settings["candidate_fps"]))))
         start_frame = max(0, int(round(float(settings["start_seconds"]) * source_fps)))
         end_time = None
+        end_frame = video_info.frame_count
         if settings["duration_seconds"] is not None:
             end_time = float(settings["start_seconds"]) + float(settings["duration_seconds"])
+            duration_end_frame = int(round(end_time * source_fps))
+            end_frame = min(end_frame, duration_end_frame) if end_frame is not None else duration_end_frame
+        total_progress_frames = None
+        total_progress_seconds = None
+        if end_frame is not None and end_frame > start_frame:
+            total_progress_frames = end_frame - start_frame
+            total_progress_seconds = total_progress_frames / source_fps
 
         if start_frame:
             cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -455,6 +572,9 @@ def analyze_video(video_path: Path, settings: Dict[str, Any]) -> Tuple[VideoInfo
         last_selected_timestamp: Optional[float] = None
 
         frame_index = start_frame
+        next_progress_percent = PROGRESS_PERCENT_STEP
+        if settings.get("progress"):
+            print_video_progress(video_path, 0.0, 0.0, total_progress_seconds, 0, 0)
         while True:
             ok, frame = cap.read()
             if not ok:
@@ -507,7 +627,34 @@ def analyze_video(video_path: Path, settings: Dict[str, Any]) -> Tuple[VideoInfo
                     last_selected_signature = signature
                     last_selected_timestamp = timestamp
 
+            if settings.get("progress") and total_progress_frames:
+                processed_frames = max(0, frame_index - start_frame + 1)
+                percent = min(100.0, (processed_frames / total_progress_frames) * 100.0)
+                if percent >= next_progress_percent and next_progress_percent < 100:
+                    current_seconds = min(processed_frames / source_fps, total_progress_seconds or 0.0)
+                    print_video_progress(
+                        video_path,
+                        percent,
+                        current_seconds,
+                        total_progress_seconds,
+                        len(records),
+                        len(selected_initial),
+                    )
+                    next_progress_percent += PROGRESS_PERCENT_STEP
+
             frame_index += 1
+        if settings.get("progress"):
+            current_seconds = total_progress_seconds
+            if current_seconds is None:
+                current_seconds = max(0.0, (frame_index - start_frame) / source_fps)
+            print_video_progress(
+                video_path,
+                100.0,
+                current_seconds,
+                total_progress_seconds,
+                len(records),
+                len(selected_initial),
+            )
     finally:
         cap.release()
 
@@ -661,9 +808,10 @@ def finalize_selection(
     return selected_final
 
 
-def assign_output_paths(selected_final: Sequence[FrameRecord]) -> None:
+def assign_output_paths(selected_final: Sequence[FrameRecord], source_id: Optional[str] = None) -> None:
+    prefix = f"{source_id}_" if source_id else ""
     for sequence, record in enumerate(selected_final, start=1):
-        record.output_file = f"frames_selected/frame_{sequence:06d}.jpg"
+        record.output_file = f"frames_selected/{prefix}frame_{sequence:06d}.jpg"
 
 
 def save_selected_frames(video_path: Path, selected_final: Sequence[FrameRecord], out_dir: Path, settings: Dict[str, Any]) -> int:
@@ -936,48 +1084,82 @@ def relative_to(path: Path, base: Path) -> str:
         return str(path)
 
 
-def build_capture_report(
-    video_info: VideoInfo,
-    records: Sequence[FrameRecord],
-    selected_final: Sequence[FrameRecord],
+def build_video_summary(result: VideoRunResult, settings: Dict[str, Any]) -> Dict[str, Any]:
+    selection_counts = selected_by_counts(result.selected_final)
+    return {
+        "source_id": result.source.source_id,
+        "path": str(result.source.path),
+        "video": asdict(result.video_info),
+        "candidate_frame_count": len(result.records),
+        "selected_initial_count": result.selected_initial_count,
+        "selected_frame_count": len(result.selected_final),
+        "selected_by": selection_counts,
+        "coverage_fallback_frame_count": selection_counts.get("coverage_fallback", 0),
+        "rejected_frame_count": len(result.records) - len(result.selected_final),
+        "rejections": count_rejections(result.records),
+        "blur_score_distribution": metric_summary(result.records, "blur_score"),
+        "brightness_distribution": metric_summary(result.records, "brightness"),
+        "contrast_distribution": metric_summary(result.records, "contrast"),
+        "entropy_distribution": metric_summary(result.records, "entropy"),
+        "coverage": coverage_summary(result.records, result.selected_final, settings),
+        "warnings": result.warnings,
+    }
+
+
+def merge_count_maps(items: Iterable[Dict[str, int]]) -> Dict[str, int]:
+    merged: Dict[str, int] = {}
+    for item in items:
+        for key, value in item.items():
+            merged[key] = merged.get(key, 0) + int(value)
+    return dict(sorted(merged.items()))
+
+
+def build_multi_capture_report(
+    input_dir: Path,
+    results: Sequence[VideoRunResult],
     settings: Dict[str, Any],
     out_dir: Path,
     reports_dir: Path,
     warnings: Sequence[str],
 ) -> Dict[str, Any]:
-    rejection_counts = count_rejections(records)
+    all_records = [record for result in results for record in result.records]
+    all_selected = [record for result in results for record in result.selected_final]
     outputs = {
         "frames_selected": "frames_selected",
         "capture_report_json": relative_to(reports_dir / REPORT_FILENAMES["capture_json"], out_dir),
         "capture_report_html": relative_to(reports_dir / REPORT_FILENAMES["capture_html"], out_dir),
-        "frame_contact_sheet": relative_to(reports_dir / REPORT_FILENAMES["contact_sheet"], out_dir),
         "gpu_recommendation_json": relative_to(reports_dir / REPORT_FILENAMES["gpu_json"], out_dir),
     }
-
-    selected_timestamps = [record.timestamp_seconds for record in selected_final]
-    selection_counts = selected_by_counts(selected_final)
+    selection_counts = selected_by_counts(all_selected)
     return {
         "schema_version": 1,
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "video": asdict(video_info),
+        "input": {
+            "mode": "project_videos",
+            "input_dir": str(input_dir),
+            "video_count": len(results),
+            "videos": [
+                {"source_id": result.source.source_id, "path": str(result.source.path)}
+                for result in results
+            ],
+        },
         "settings": settings,
         "summary": {
-            "candidate_frame_count": len(records),
-            "selected_frame_count": len(selected_final),
+            "candidate_frame_count": len(all_records),
+            "selected_frame_count": len(all_selected),
             "selected_by": selection_counts,
             "coverage_fallback_frame_count": selection_counts.get("coverage_fallback", 0),
-            "rejected_frame_count": len(records) - len(selected_final),
-            "rejections": rejection_counts,
-            "blur_score_distribution": metric_summary(records, "blur_score"),
-            "brightness_distribution": metric_summary(records, "brightness"),
-            "contrast_distribution": metric_summary(records, "contrast"),
-            "entropy_distribution": metric_summary(records, "entropy"),
-            "selected_frame_timeline_seconds": selected_timestamps,
-            "coverage": coverage_summary(records, selected_final, settings),
+            "rejected_frame_count": len(all_records) - len(all_selected),
+            "rejections": merge_count_maps(count_rejections(result.records) for result in results),
+            "blur_score_distribution": metric_summary(all_records, "blur_score"),
+            "brightness_distribution": metric_summary(all_records, "brightness"),
+            "contrast_distribution": metric_summary(all_records, "contrast"),
+            "entropy_distribution": metric_summary(all_records, "entropy"),
         },
+        "videos": [build_video_summary(result, settings) for result in results],
         "warnings": list(warnings),
         "outputs": outputs,
-        "frames": [frame_record_to_dict(record) for record in records],
+        "frames": [frame_record_to_dict(record) for record in all_records],
     }
 
 
@@ -996,77 +1178,6 @@ def frame_record_to_dict(record: FrameRecord) -> Dict[str, Any]:
 
 def write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-
-
-def fit_image_to_cell(image: Any, width: int, height: int) -> Any:
-    image_height, image_width = image.shape[:2]
-    scale = min(width / image_width, height / image_height)
-    resized_width = max(1, int(round(image_width * scale)))
-    resized_height = max(1, int(round(image_height * scale)))
-    resized = cv2.resize(image, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
-    cell = np.full((height, width, 3), 245, dtype=np.uint8)
-    x = (width - resized_width) // 2
-    y = (height - resized_height) // 2
-    cell[y : y + resized_height, x : x + resized_width] = resized
-    return cell
-
-
-def create_contact_sheet(
-    out_dir: Path,
-    reports_dir: Path,
-    selected_final: Sequence[FrameRecord],
-    max_frames: int,
-) -> Path:
-    output_path = reports_dir / REPORT_FILENAMES["contact_sheet"]
-    if not selected_final:
-        sheet = np.full((320, 640, 3), 245, dtype=np.uint8)
-        cv2.putText(
-            sheet,
-            "No frames selected",
-            (170, 165),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            (40, 40, 40),
-            2,
-            cv2.LINE_AA,
-        )
-        cv2.imwrite(str(output_path), sheet, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
-        return output_path
-
-    contact_records = pick_evenly(selected_final, max(1, max_frames))
-    columns = min(6, max(1, int(math.ceil(math.sqrt(len(contact_records))))))
-    rows = int(math.ceil(len(contact_records) / columns))
-    cell_width = 220
-    cell_height = 160
-    image_height = 132
-    sheet = np.full((rows * cell_height, columns * cell_width, 3), 230, dtype=np.uint8)
-
-    for index, record in enumerate(contact_records):
-        if record.output_file is None:
-            continue
-        image = cv2.imread(str(out_dir / record.output_file))
-        if image is None:
-            continue
-        thumb = fit_image_to_cell(image, cell_width, image_height)
-        row = index // columns
-        column = index % columns
-        y = row * cell_height
-        x = column * cell_width
-        sheet[y : y + image_height, x : x + cell_width] = thumb
-        label = f"{record.timestamp_seconds:.1f}s  #{record.frame_index}"
-        cv2.putText(
-            sheet,
-            label,
-            (x + 8, y + image_height + 22),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.46,
-            (25, 25, 25),
-            1,
-            cv2.LINE_AA,
-        )
-
-    cv2.imwrite(str(output_path), sheet, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-    return output_path
 
 
 def table_rows(mapping: Dict[str, Any]) -> str:
@@ -1104,18 +1215,6 @@ def metric_table(report: Dict[str, Any]) -> str:
     return "\n".join(rows)
 
 
-def timeline_html(report: Dict[str, Any]) -> str:
-    duration = report["video"].get("duration_seconds")
-    timestamps = report["summary"].get("selected_frame_timeline_seconds", [])
-    if not duration or duration <= 0:
-        return '<div class="timeline empty"></div>'
-    ticks = []
-    for timestamp in timestamps:
-        left = max(0.0, min(100.0, float(timestamp) / float(duration) * 100.0))
-        ticks.append(f'<span style="left:{left:.3f}%"></span>')
-    return '<div class="timeline">{}</div>'.format("".join(ticks))
-
-
 def selected_frame_rows(report: Dict[str, Any], limit: int = 100) -> str:
     selected = [frame for frame in report["frames"] if frame["decision"] in {"selected", "coverage_fallback"}]
     rows = []
@@ -1143,6 +1242,159 @@ def selected_frame_rows(report: Dict[str, Any], limit: int = 100) -> str:
     return "\n".join(rows)
 
 
+def video_frames(report: Dict[str, Any], source_id: str) -> List[Dict[str, Any]]:
+    return [
+        frame
+        for frame in report.get("frames", [])
+        if frame.get("source_id") == source_id
+    ]
+
+
+def timeline_segments(frames: Sequence[Dict[str, Any]], duration_seconds: Optional[float]) -> str:
+    if not frames:
+        return '<div class="timeline-empty">No scored candidate frames.</div>'
+
+    max_time = duration_seconds or max(float(frame.get("timestamp_seconds") or 0.0) for frame in frames)
+    max_time = max(max_time, 0.001)
+    segments = []
+    for frame in frames:
+        timestamp = float(frame.get("timestamp_seconds") or 0.0)
+        left = max(0.0, min(100.0, (timestamp / max_time) * 100.0))
+        decision = str(frame.get("decision") or "rejected")
+        title = (
+            "{time}s | {decision} | blur {blur} | brightness {brightness} | {file}".format(
+                time=frame.get("timestamp_seconds"),
+                decision=decision,
+                blur=frame.get("blur_score"),
+                brightness=frame.get("brightness"),
+                file=frame.get("output_file") or frame.get("reject_reason") or "",
+            )
+        )
+        segments.append(
+            '<span class="tick tick-{decision}" style="left:{left:.3f}%;" title="{title}"></span>'.format(
+                decision=html.escape(decision),
+                left=left,
+                title=html.escape(title),
+            )
+        )
+    return "\n".join(segments)
+
+
+def coverage_gap_segments(video: Dict[str, Any], duration_seconds: Optional[float]) -> str:
+    coverage = video.get("coverage") or {}
+    gaps = coverage.get("windows_below_minimum") or []
+    if not gaps:
+        return ""
+
+    max_time = duration_seconds or max(float(gap.get("end_seconds") or 0.0) for gap in gaps)
+    max_time = max(max_time, 0.001)
+    segments = []
+    for gap in gaps:
+        start = float(gap.get("start_seconds") or 0.0)
+        end = float(gap.get("end_seconds") or start)
+        left = max(0.0, min(100.0, (start / max_time) * 100.0))
+        width = max(0.3, min(100.0 - left, ((end - start) / max_time) * 100.0))
+        title = "{start}s-{end}s | {candidates} candidates | {selected} selected".format(
+            start=gap.get("start_seconds"),
+            end=gap.get("end_seconds"),
+            candidates=gap.get("candidate_frames"),
+            selected=gap.get("selected_frames"),
+        )
+        segments.append(
+            '<span class="gap-window" style="left:{left:.3f}%;width:{width:.3f}%;" title="{title}"></span>'.format(
+                left=left,
+                width=width,
+                title=html.escape(title),
+            )
+        )
+    return "\n".join(segments)
+
+
+def time_markers(duration_seconds: Optional[float]) -> str:
+    if duration_seconds is None or duration_seconds <= 0:
+        return ""
+    markers = []
+    for fraction in [0.0, 0.25, 0.5, 0.75, 1.0]:
+        seconds = duration_seconds * fraction
+        markers.append(
+            '<span style="left:{left:.3f}%;">{label}</span>'.format(
+                left=fraction * 100.0,
+                label=html.escape(format_duration(seconds)),
+            )
+        )
+    return "\n".join(markers)
+
+
+def video_timeline_blocks(report: Dict[str, Any]) -> str:
+    blocks = []
+    for video in report.get("videos", []):
+        source_id = str(video.get("source_id"))
+        frames = video_frames(report, source_id)
+        duration = video.get("video", {}).get("duration_seconds")
+        duration_seconds = float(duration) if duration is not None else None
+        coverage = video.get("coverage") or {}
+        selected_by = video.get("selected_by") or {}
+        largest_gap = coverage.get("largest_selected_gap_seconds")
+        summary = {
+            "selected": video.get("selected_frame_count"),
+            "quality": selected_by.get("quality", 0),
+            "coverage_fallback": video.get("coverage_fallback_frame_count"),
+            "largest_gap_seconds": largest_gap if largest_gap is not None else "n/a",
+            "coverage_gaps": coverage.get("windows_below_minimum_count", 0),
+        }
+        blocks.append(
+            """
+  <section class="timeline-card">
+    <h3>{source}</h3>
+    <div class="timeline-meta">{meta}</div>
+    <div class="timeline-wrap">
+      <div class="timeline-track">
+        {gap_segments}
+        {segments}
+      </div>
+      <div class="time-markers">{markers}</div>
+    </div>
+  </section>
+""".format(
+                source=html.escape(source_id),
+                meta=html.escape(
+                    "selected {selected} | quality {quality} | fallback {coverage_fallback} | coverage gaps {coverage_gaps} | largest gap {largest_gap_seconds}s".format(
+                        **summary
+                    )
+                ),
+                gap_segments=coverage_gap_segments(video, duration_seconds),
+                segments=timeline_segments(frames, duration_seconds),
+                markers=time_markers(duration_seconds),
+            )
+        )
+    return "\n".join(blocks)
+
+
+def video_summary_rows(report: Dict[str, Any]) -> str:
+    rows = []
+    for video in report.get("videos", []):
+        coverage = video.get("coverage", {})
+        rows.append(
+            "<tr><td>{source}</td><td>{path}</td><td>{duration}</td><td>{resolution}</td><td>{candidates}</td><td>{selected}</td><td>{fallback}</td><td>{gap}</td><td>{warnings}</td></tr>".format(
+                source=html.escape(str(video.get("source_id"))),
+                path=html.escape(str(video.get("path"))),
+                duration=html.escape(str(video.get("video", {}).get("duration_seconds"))),
+                resolution=html.escape(
+                    "{}x{}".format(
+                        video.get("video", {}).get("width"),
+                        video.get("video", {}).get("height"),
+                    )
+                ),
+                candidates=html.escape(str(video.get("candidate_frame_count"))),
+                selected=html.escape(str(video.get("selected_frame_count"))),
+                fallback=html.escape(str(video.get("coverage_fallback_frame_count"))),
+                gap=html.escape(str(coverage.get("largest_selected_gap_seconds"))),
+                warnings=html.escape(", ".join(video.get("warnings") or [])),
+            )
+        )
+    return "\n".join(rows)
+
+
 def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], reports_dir: Path) -> Path:
     output_path = reports_dir / REPORT_FILENAMES["capture_html"]
     warnings = report["warnings"]
@@ -1153,13 +1405,11 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
     )
     summary_rows = table_rows(
         {
-            "video": report["video"]["path"],
-            "duration_seconds": report["video"]["duration_seconds"],
-            "resolution": f'{report["video"]["width"]}x{report["video"]["height"]}',
+            "input_dir": report["input"]["input_dir"],
+            "video_count": report["input"]["video_count"],
             "candidate_frames": report["summary"]["candidate_frame_count"],
             "selected_frames": report["summary"]["selected_frame_count"],
             "coverage_fallback_frames": report["summary"]["coverage_fallback_frame_count"],
-            "largest_selected_gap_seconds": report["summary"]["coverage"].get("largest_selected_gap_seconds"),
             "rejected_frames": report["summary"]["rejected_frame_count"],
             "profile": report["settings"]["profile"],
             "candidate_fps": report["settings"]["candidate_fps"],
@@ -1193,7 +1443,7 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
       line-height: 1.45;
     }}
     main {{
-      max-width: 1120px;
+      max-width: 1180px;
       margin: 0 auto;
       padding: 32px 20px 48px;
     }}
@@ -1208,9 +1458,11 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
       font-size: 20px;
       margin-top: 32px;
     }}
-    .meta {{
+    .meta, .note {{
       color: var(--muted);
-      margin-bottom: 24px;
+    }}
+    .note {{
+      font-size: 13px;
     }}
     table {{
       border-collapse: collapse;
@@ -1228,36 +1480,104 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
       background: var(--panel);
       font-weight: 650;
     }}
-    img {{
-      display: block;
-      max-width: 100%;
-      border: 1px solid var(--line);
-    }}
-    .timeline {{
-      position: relative;
-      height: 38px;
-      border: 1px solid var(--line);
-      background: linear-gradient(90deg, #f9fafc, #eef3f8);
-      overflow: hidden;
-    }}
-    .timeline span {{
-      position: absolute;
-      top: 5px;
-      bottom: 5px;
-      width: 2px;
-      background: var(--accent);
-    }}
-    .empty {{
-      background: var(--panel);
-    }}
-    .note {{
-      color: var(--muted);
-      font-size: 13px;
-    }}
     code {{
       background: var(--panel);
       padding: 1px 5px;
       border-radius: 4px;
+    }}
+    h3 {{
+      font-size: 16px;
+      margin: 0 0 4px;
+    }}
+    .timeline-card {{
+      margin: 14px 0 22px;
+      padding: 0;
+    }}
+    .timeline-meta {{
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 8px;
+    }}
+    .timeline-wrap {{
+      border: 1px solid var(--line);
+      padding: 12px 12px 18px;
+      background: var(--panel);
+    }}
+    .timeline-track {{
+      position: relative;
+      height: 58px;
+      background: white;
+      border: 1px solid var(--line);
+      overflow: hidden;
+    }}
+    .tick {{
+      position: absolute;
+      top: 8px;
+      width: 2px;
+      height: 42px;
+      transform: translateX(-1px);
+    }}
+    .tick-selected {{
+      background: #2267c7;
+      z-index: 3;
+    }}
+    .tick-coverage_fallback {{
+      background: #13a36f;
+      z-index: 3;
+    }}
+    .tick-rejected {{
+      background: rgba(101, 112, 128, 0.32);
+      height: 24px;
+      top: 17px;
+      z-index: 1;
+    }}
+    .tick-trimmed {{
+      background: #b7791f;
+      height: 32px;
+      top: 13px;
+      z-index: 2;
+    }}
+    .gap-window {{
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      background: rgba(201, 60, 60, 0.18);
+      border-left: 1px solid rgba(201, 60, 60, 0.45);
+      border-right: 1px solid rgba(201, 60, 60, 0.45);
+      z-index: 0;
+    }}
+    .time-markers {{
+      position: relative;
+      height: 16px;
+      margin-top: 5px;
+      font-size: 12px;
+      color: var(--muted);
+    }}
+    .time-markers span {{
+      position: absolute;
+      transform: translateX(-50%);
+      white-space: nowrap;
+    }}
+    .timeline-empty {{
+      padding: 12px;
+      color: var(--muted);
+    }}
+    .legend {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: 8px 0 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .legend span::before {{
+      content: "";
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      margin-right: 5px;
+      vertical-align: -1px;
+      background: var(--legend-color);
     }}
   </style>
 </head>
@@ -1268,16 +1588,16 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
 
   <h2>Summary</h2>
   <table>{summary_rows}</table>
+  <p class="note">Selected frames from all videos are written to <code>frames_selected/</code> with source-prefixed filenames.</p>
+
+  <h2>Videos</h2>
+  <table>
+    <tr><th>Source</th><th>Path</th><th>Duration (s)</th><th>Resolution</th><th>Candidates</th><th>Selected</th><th>Fallback</th><th>Largest Gap (s)</th><th>Warnings</th></tr>
+    {video_rows}
+  </table>
 
   <h2>Warning Flags</h2>
   {warning_html}
-
-  <h2>Selected Frame Timeline</h2>
-  {timeline}
-  <p class="note">Each blue tick is a final selected frame across the source video duration.</p>
-
-  <h2>Contact Sheet</h2>
-  <img src="{contact_sheet}" alt="Selected frame contact sheet">
 
   <h2>Rejections</h2>
   <table>{rejection_rows}</table>
@@ -1288,36 +1608,95 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
     {metric_rows}
   </table>
 
-  <h2>Selected Frames</h2>
-  <table>
-    <tr><th>File</th><th>Time (s)</th><th>Selected By</th><th>Fallback Reason</th><th>Blur</th><th>Brightness</th><th>Contrast</th><th>Entropy</th><th>Score</th></tr>
-    {selected_rows}
-  </table>
+  <h2>Timelines</h2>
+  <p class="note">Each tick is a scored candidate frame. Red background bands mark coverage windows that still have no selected frame.</p>
+  <div class="legend">
+    <span style="--legend-color:#2267c7;">quality selected</span>
+    <span style="--legend-color:#13a36f;">coverage fallback</span>
+    <span style="--legend-color:rgba(101,112,128,0.45);">rejected</span>
+    <span style="--legend-color:#b7791f;">trimmed</span>
+    <span style="--legend-color:rgba(201,60,60,0.25);">coverage gap</span>
+  </div>
+  {timeline_blocks}
 </main>
 </body>
 </html>
 """.format(
         created_at=html.escape(str(report["created_at"])),
         summary_rows=summary_rows,
+        video_rows=video_summary_rows(report),
         warning_html=warning_html,
-        timeline=timeline_html(report),
-        contact_sheet=html.escape(REPORT_FILENAMES["contact_sheet"]),
         rejection_rows=rejection_rows,
         metric_rows=metric_table(report),
-        selected_rows=selected_frame_rows(report),
+        timeline_blocks=video_timeline_blocks(report),
     )
     output_path.write_text(document, encoding="utf-8")
     return output_path
 
 
-def write_run_config(out_dir: Path, args: argparse.Namespace, settings: Dict[str, Any]) -> Path:
+def process_video_source(
+    source: VideoSource,
+    settings: Dict[str, Any],
+    out_dir: Path,
+) -> VideoRunResult:
+    video_info, records, selected_initial = analyze_video(source.path, settings)
+    for record in records:
+        record.source_id = source.source_id
+        record.source_video = str(source.path)
+    selected_final = finalize_selection(records, selected_initial, settings)
+    assign_output_paths(selected_final, source.source_id)
+    saved_count = save_selected_frames(source.path, selected_final, out_dir, settings)
+    warnings = warning_flags(records, selected_final, settings)
+    return VideoRunResult(
+        source=source,
+        video_info=video_info,
+        records=list(records),
+        selected_initial_count=len(selected_initial),
+        selected_final=list(selected_final),
+        saved_count=saved_count,
+        warnings=warnings,
+    )
+
+
+def representative_video_info(results: Sequence[VideoRunResult]) -> VideoInfo:
+    return max(
+        (result.video_info for result in results),
+        key=lambda info: (info.width * info.height, info.width, info.height),
+    )
+
+
+def aggregate_warnings(results: Sequence[VideoRunResult], settings: Dict[str, Any]) -> List[str]:
+    warnings = {warning for result in results for warning in result.warnings}
+    total_selected = sum(len(result.selected_final) for result in results)
+    if total_selected == 0:
+        warnings.add("no_selected_frames")
+    elif total_selected < int(settings["target_min"]):
+        warnings.add("too_few_selected_frames_total")
+    if any("selected_frames_trimmed_to_target_max" in result.warnings for result in results):
+        warnings.add("one_or_more_videos_trimmed_to_target_max")
+    return sorted(warnings)
+
+
+def write_run_config(
+    out_dir: Path,
+    args: argparse.Namespace,
+    sources: Sequence[VideoSource],
+    settings: Dict[str, Any],
+) -> Path:
     output_path = out_dir / "run_config.json"
     payload = {
         "schema_version": 1,
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "command": " ".join(sys.argv),
-        "video": str(args.video),
-        "out": str(args.out),
+        "input": {
+            "mode": "project_videos",
+            "input_dir": str(args.input_dir),
+            "videos": [
+                {"source_id": source.source_id, "path": str(source.path)}
+                for source in sources
+            ],
+        },
+        "out": str(out_dir),
         "settings": settings,
     }
     write_json(output_path, payload)
@@ -1329,29 +1708,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     require_dependencies()
     settings = build_settings(args)
     validate_args(args, settings)
+    sources = discover_video_sources(args)
 
-    out_dir = args.out
+    out_dir = resolve_output_dir(args, sources)
     frames_dir, reports_dir = prepare_output_dirs(out_dir, args.overwrite)
     del frames_dir
 
-    video_info, records, selected_initial = analyze_video(args.video, settings)
-    selected_final = finalize_selection(records, selected_initial, settings)
-    assign_output_paths(selected_final)
-    saved_count = save_selected_frames(args.video, selected_final, out_dir, settings)
+    results = [
+        process_video_source(
+            source=source,
+            settings=settings,
+            out_dir=out_dir,
+        )
+        for source in sources
+    ]
 
-    warnings = warning_flags(records, selected_final, settings)
-    gpu_report = gpu_recommendation(saved_count, video_info, warnings)
-    create_contact_sheet(
-        out_dir=out_dir,
-        reports_dir=reports_dir,
-        selected_final=selected_final,
-        max_frames=int(settings["contact_sheet_frames"]),
-    )
-
-    capture_report = build_capture_report(
-        video_info=video_info,
-        records=records,
-        selected_final=selected_final,
+    warnings = aggregate_warnings(results, settings)
+    saved_count = sum(result.saved_count for result in results)
+    gpu_report = gpu_recommendation(saved_count, representative_video_info(results), warnings)
+    capture_report = build_multi_capture_report(
+        input_dir=args.input_dir,
+        results=results,
         settings=settings,
         out_dir=out_dir,
         reports_dir=reports_dir,
@@ -1361,10 +1738,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     write_json(reports_dir / REPORT_FILENAMES["capture_json"], capture_report)
     write_json(reports_dir / REPORT_FILENAMES["gpu_json"], gpu_report)
     write_html_report(capture_report, gpu_report, reports_dir)
-    write_run_config(out_dir, args, settings)
+    write_run_config(out_dir, args, sources, settings)
 
-    print(f"Processed: {args.video}")
-    print(f"Candidate frames scored: {len(records)}")
+    print(f"Processed video directory: {args.input_dir}")
+    print("Videos: " + ", ".join(source.source_id for source in sources))
+    print(f"Candidate frames scored: {sum(len(result.records) for result in results)}")
     print(f"Selected frames written: {saved_count}")
     print(f"Frames: {out_dir / 'frames_selected'}")
     print(f"Report: {reports_dir / REPORT_FILENAMES['capture_html']}")

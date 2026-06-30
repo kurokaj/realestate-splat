@@ -168,7 +168,6 @@ Output files:
 ```text
 reports/capture_report.json
 reports/capture_report.html
-reports/frame_contact_sheet.jpg
 reports/gpu_recommendation.json
 ```
 
@@ -202,6 +201,14 @@ lighting unstable
 possible fast camera motion
 possible fisheye / wide distortion
 ```
+
+Before starting cloud GPU work, the local pipeline should use this report as a
+spend gate. Completely hopeless captures should fail locally: zero selected
+frames, selected-frame count far below the configured target minimum, or large
+coverage-window gaps across the camera path. Every non-fatal capture should
+keep a human in the loop by default. The operator should inspect
+`reports/capture_report.html` and explicitly approve continuing before the
+pipeline uploads frames and starts Verda work.
 
 ---
 
@@ -256,6 +263,8 @@ sparse reconstruction
 camera parameters
 point cloud
 logs
+reports/reconstruction_report.json
+reports/reconstruction_report.html
 ```
 
 COLMAP should be executed through the CLI, not only through Python bindings.
@@ -297,6 +306,16 @@ colmap:
 ```
 
 For real estate scenes, start with incremental mapping as baseline, then test global mapping. Global mapping may be useful for larger scenes but should not be assumed superior in every capture.
+
+The COLMAP stage should produce a succinct HTML reconstruction report, similar
+in spirit to the capture report. It does not need to visualize every feature or
+match at first; it should summarize status, image count, reconstruction mode,
+selected sparse model, output paths, command durations, log links, and
+`model_analyzer` metrics including registered images, point count, observation
+count, mean track length, observations per image, and mean reprojection error.
+The orchestrator should download this report locally and pause before training,
+so the operator can decide quickly whether to continue, retry with a different
+mapper, or recapture.
 
 ---
 
@@ -521,7 +540,6 @@ realestate-splat/
 
       reporting/
         html_report.py
-        contact_sheet.py
 
       hosting/
         upload_artifacts.py
@@ -542,9 +560,23 @@ realestate-splat/
 
 Every scene run should follow this structure:
 
+Source capture videos should live outside the run directory:
+
+```text
+data/raw/house_001/
+  kitchen.mp4
+  living_room.mp4
+  bedroom.mp4
+```
+
+The selected frames from all source videos are merged into one run directory:
+
 ```text
 runs/house_001/
   frames_selected/
+    kitchen_frame_000001.jpg
+    living_room_frame_000001.jpg
+    bedroom_frame_000001.jpg
 
   masks/
     image_masks/
@@ -562,7 +594,6 @@ runs/house_001/
   reports/
     capture_report.json
     capture_report.html
-    frame_contact_sheet.jpg
     gpu_recommendation.json
     reconstruction_report.json
 
@@ -591,8 +622,7 @@ Local preprocessing:
 
 ```bash
 python scripts/preprocess_video.py \
-  --video data/raw/house_001.mp4 \
-  --out runs/house_001 \
+  --input-dir data/raw/house_001 \
   --profile indoor_house
 ```
 
@@ -804,7 +834,6 @@ Must output:
 frames_selected/
 reports/capture_report.json
 reports/capture_report.html
-reports/frame_contact_sheet.jpg
 reports/gpu_recommendation.json
 run_config.json
 ```
@@ -875,7 +904,47 @@ Success criteria:
 
 ---
 
-### Milestone 5: Segmentation Prototype
+### Milestone 5: Multiple Camera + Hero Image Support
+
+Add explicit support for mixed capture sources:
+
+```text
+wide / 360 / fisheye coverage pass
+  ↓
+selected coverage frames
+  ↓
+high-resolution hero/detail photos
+  ↓
+COLMAP camera groups with separate intrinsics
+  ↓
+one combined reconstruction for training
+```
+
+The goal is to let a fast wide-angle or 360 walkthrough provide robust spatial
+coverage, while sharper 1x or higher-resolution photos add detail where it
+matters. The combination point should be COLMAP: preprocessing must preserve
+source and camera-group metadata, and reconstruction must assign separate
+camera models/intrinsics for each group instead of pretending all images came
+from one lens.
+
+Initial camera groups:
+
+- phone ultrawide / 0.6x video
+- DJI 360 / fisheye-derived coverage frames
+- phone 1x high-resolution hero photos
+- optional close detail photos
+
+Success criteria:
+
+- can ingest one coverage pass plus a small set of hero photos
+- can group images by capture source and camera model
+- can run COLMAP with separate intrinsics for each group
+- can report which hero images registered successfully
+- can train one splat from the combined reconstruction
+
+---
+
+### Milestone 6: Segmentation Prototype
 
 Add optional segmentation path:
 
@@ -907,6 +976,7 @@ Do first:
 3. COLMAP + training/export scripts
 4. one reliable test scene
 5. viewer prototype
+6. multiple camera + hero image support
 
 Do later:
 
