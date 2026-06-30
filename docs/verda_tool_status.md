@@ -116,40 +116,51 @@ Training scripts should run only after activating the environment.
 
 Each time a new GPU instance is started:
 
-    # Single-command project runtime init from the Verda repo checkout
-    cd /workspace/repo/realestate-splat
-    source verda/init_runtime.sh
-
-This runs the project Verda initialization scripts, installs/copies
-`/workspace/setup_env.sh`, sources the environment for the current shell, and
-prints verification for `/workspace`, micromamba, Pixi, COLMAP, and the
-`/workspace/envs/splat-dev` environment.
-
-Manual checklist equivalent:
-
     # 1. Attach the existing Verda block volume in the UI
 
     # 2. SSH into the instance
     ssh root@YOUR_INSTANCE_IP
 
-    # 3. Verify the volume exists
+    # 3. Bootstrap /workspace manually because the repo lives on the volume
+    mkdir -p /mnt/GaussianSplatVolume
+    mount /dev/vdb /mnt/GaussianSplatVolume
+    rm -rf /workspace
+    ln -s /mnt/GaussianSplatVolume/workspace /workspace
+    df -h /workspace
+
+    # 4. Run project runtime init from the Verda repo checkout
+    cd /workspace/repo/realestate-splat
+    source verda/init_runtime.sh
+
+The manual mount bootstrap is needed because `verda/init_runtime.sh` lives in
+the repo under `/workspace`, and `/workspace` does not exist until the block
+volume is mounted. After that, the init script installs runtime dependencies,
+copies `/workspace/setup_env.sh`, sources the environment for the current shell,
+and prints verification for `/workspace`, micromamba, Pixi, COLMAP, and
+`/workspace/envs/splat-dev`.
+
+If runtime apt dependencies are already installed:
+
+    cd /workspace/repo/realestate-splat
+    SKIP_APT=1 source verda/init_runtime.sh
+
+Manual checklist equivalent:
+
+    # Verify the volume exists
     lsblk -f
 
-    # 4. Mount volume if needed
-    mount -a
-
-    # 5. Verify /workspace points to persistent storage
+    # Verify /workspace points to persistent storage
     df -h /workspace
     ls -l /
 
-    # 6. Activate environment
+    # Activate environment
     source ~/.bashrc
     micromamba activate /workspace/envs/splat-dev
 
-    # 7. Optionally add COLMAP to PATH for manual debugging
+    # Optionally add COLMAP to PATH for manual debugging
     export PATH=/workspace/opt/colmap-install/bin:$PATH
 
-    # 8. Verify tools
+    # Verify tools
     python -c "import torch, gsplat, pycolmap; print(torch.cuda.is_available())"
     /workspace/opt/colmap-install/bin/colmap global_mapper -h
 
