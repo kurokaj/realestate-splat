@@ -3,6 +3,12 @@
 #
 # Run this on the Verda GPU instance from the repository root:
 #
+#   mkdir -p /mnt/GaussianSplatVolume
+#   mount /dev/vdb /mnt/GaussianSplatVolume
+#   rm -rf /workspace  
+#   ln -s /mnt/GaussianSplatVolume/workspace /workspace
+#   df -h /workspace
+#
 #   cd /workspace/repo/realestate-splat
 #   source verda/init_runtime.sh
 #
