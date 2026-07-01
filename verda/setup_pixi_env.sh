@@ -20,13 +20,15 @@ if [ -x /usr/bin/gcc-11 ] && [ -x /usr/bin/g++-11 ]; then
   export CUDAHOSTCXX=/usr/bin/g++-11
 fi
 
-# Old setting for RTX 6000 Ada / compute capability 8.9:
-# export TCNN_CUDA_ARCHITECTURES=89
-# export TORCH_CUDA_ARCH_LIST="8.9"
+# Build tiny-cuda-nn / PyTorch CUDA extensions for both common Verda GPU
+# families used by this project:
+#   8.6 = RTX A6000 / Ampere
+#   8.9 = RTX 6000 Ada / Ada
+export TCNN_CUDA_ARCHITECTURES="86;89"
+export TORCH_CUDA_ARCH_LIST="8.6;8.9"
 
-# Current setting for RTX A6000 / Ampere / compute capability 8.6:
-export TCNN_CUDA_ARCHITECTURES=86
-export TORCH_CUDA_ARCH_LIST="8.6"
+echo "TCNN_CUDA_ARCHITECTURES: ${TCNN_CUDA_ARCHITECTURES}"
+echo "TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST}"
 
 export MAX_JOBS=2
 export CMAKE_BUILD_PARALLEL_LEVEL=2

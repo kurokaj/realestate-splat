@@ -132,6 +132,9 @@ The init script only orchestrates the three Verda scripts:
 2. `verda/install_colmap_runtime_deps.sh` installs COLMAP/Nerfstudio runtime
    apt dependencies.
 3. `verda/setup_pixi_env.sh` adds Pixi/COLMAP paths and CUDA build variables.
+   It sets multi-architecture CUDA extension build targets for both RTX A6000
+   / Ampere (`8.6`) and RTX 6000 Ada / Ada (`8.9`):
+   `TCNN_CUDA_ARCHITECTURES=86;89` and `TORCH_CUDA_ARCH_LIST=8.6;8.9`.
 
 If runtime apt dependencies are already installed:
 
