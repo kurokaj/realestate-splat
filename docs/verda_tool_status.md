@@ -224,6 +224,12 @@ Selected frames should be transferred as a single archive, not as many small
 image files. The orchestrator creates one upload zip containing
 `frames_selected/`, local capture reports, and `run_config.json`, rsyncs that
 bundle to Verda, and unpacks it inside the remote run directory.
+After successful unpack, the local and remote upload zips are removed. Final
+artifact and COLMAP review zips are also removed after they have been downloaded
+and unpacked locally.
+
+Status: this Milestone 3 orchestration flow is complete as of 2026-07-01 after
+a successful end-to-end training run through the pipeline.
 
 The remote COLMAP step should generate a succinct HTML report in addition to
 JSON. The JSON remains the machine-readable contract; the HTML is for the

@@ -346,6 +346,38 @@ def upload_bundle(args: argparse.Namespace, bundle_path: Path, remote_run: Path,
     return run_logged_command("upload_bundle", rsync_base(args) + [str(bundle_path), destination], logs_dir)
 
 
+def cleanup_local_file(name: str, path: Path, logs_dir: Path) -> CommandResult:
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_path = logs_dir / f"{name}.log"
+    started_at = utc_now()
+    existed = path.exists()
+    if existed:
+        path.unlink()
+    finished_at = utc_now()
+    with log_path.open("w", encoding="utf-8") as log_file:
+        log_file.write(f"$ local_unlink {path}\n\n")
+        if existed:
+            log_file.write(f"Deleted {path}\n")
+        else:
+            log_file.write(f"Skipped; {path} did not exist.\n")
+    print(f"\n$ local_unlink {path}")
+    print("Deleted local zip." if existed else "Local zip was already absent.")
+    return CommandResult(
+        name=name,
+        command=["local_unlink", str(path)],
+        log_path=str(log_path),
+        returncode=0,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_seconds=0.0,
+    )
+
+
+def cleanup_remote_file(args: argparse.Namespace, name: str, path: Path, logs_dir: Path) -> CommandResult:
+    script = "set -euo pipefail\n" + f"rm -f {shlex.quote(str(path))}"
+    return run_logged_command(name, ssh_base(args) + [remote_shell_command(script)], logs_dir)
+
+
 def unpack_remote_bundle(args: argparse.Namespace, bundle_path: Path, remote_run: Path, logs_dir: Path) -> CommandResult:
     remote_bundle = remote_run / bundle_path.name
     script = "\n".join(
@@ -392,6 +424,8 @@ def download_artifacts(args: argparse.Namespace, local_run: Path, remote_run: Pa
             [sys.executable, "-m", "zipfile", "-e", str(local_bundle), str(destination)],
             logs_dir,
         ),
+        cleanup_remote_file(args, "remote_cleanup_artifacts_zip", remote_bundle, logs_dir),
+        cleanup_local_file("cleanup_artifacts_zip", local_bundle, logs_dir),
     ]
     return results
 
@@ -429,6 +463,8 @@ def download_colmap_review(args: argparse.Namespace, local_run: Path, remote_run
             [sys.executable, "-m", "zipfile", "-e", str(local_bundle), str(destination)],
             logs_dir,
         ),
+        cleanup_remote_file(args, "remote_cleanup_colmap_review_zip", remote_bundle, logs_dir),
+        cleanup_local_file("cleanup_colmap_review_zip", local_bundle, logs_dir),
     ]
 
 
@@ -499,6 +535,7 @@ def print_dry_run(
     print(f"$ {shlex.join(ssh_base(args) + [remote_shell_command(prepare_script)])}")
     if not args.skip_upload:
         print(f"$ {shlex.join(rsync_base(args) + [str(bundle_path), f'{args.host}:{remote_run / bundle_path.name}'])}")
+        print("# remote upload bundle is deleted after unpack; local upload bundle is deleted after successful remote unpack")
     for name, script_name, skip in [
         ("remote_colmap", "run_colmap.py", args.skip_colmap),
         ("remote_training", "run_training.py", args.skip_training),
@@ -513,6 +550,7 @@ def print_dry_run(
             print("# pause for operator approval before remote_training")
     if not args.skip_download:
         print("# zip final/, reports/, and logs remotely, then rsync one cloud_artifacts.zip back")
+        print("# remote and local download zips are deleted after successful local unpack")
 
 
 def build_pipeline_report(
@@ -592,6 +630,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             bundle_path = build_upload_bundle(local_run, work_dir)
             commands.append(upload_bundle(args, bundle_path, remote_run, logs_dir))
             commands.append(unpack_remote_bundle(args, bundle_path, remote_run, logs_dir))
+            commands.append(cleanup_local_file("cleanup_upload_bundle", bundle_path, logs_dir))
 
         if not args.skip_colmap:
             commands.append(run_remote_stage(args, "remote_colmap", "run_colmap.py", remote_run, logs_dir))

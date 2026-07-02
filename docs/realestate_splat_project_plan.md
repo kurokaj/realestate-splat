@@ -869,7 +869,11 @@ Success criteria:
 
 ---
 
-### Milestone 3: One-Command Cloud Run
+### Milestone 3: One-Command Cloud Run - Complete
+
+Status: complete as of 2026-07-01. The CLI orchestrator has successfully run
+the end-to-end Verda flow: local preprocessing, single-zip upload, remote
+COLMAP, remote gsplat training, export, and artifact download.
 
 Build:
 

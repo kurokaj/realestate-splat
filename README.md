@@ -144,7 +144,11 @@ the calibrated database.
 PLY is the first canonical export. A viewer-specific `.splat` or SuperSplat /
 PlayCanvas-compatible file should be added after the browser viewer choice is fixed.
 
-## Milestone 3: local cloud orchestration
+## Milestone 3: local cloud orchestration - complete
+
+Status: complete as of 2026-07-01. The pipeline has successfully run
+preprocess, zip upload, remote COLMAP, remote gsplat training, export, and
+artifact download through the CLI orchestrator.
 
 Once a Verda host is reachable over SSH, run the scripted cloud pipeline from
 the Mac:
@@ -174,6 +178,11 @@ remotely and rsyncs one return bundle into:
 ```text
 runs/<run>/cloud_artifacts/
 ```
+
+Transfer zips are scratch artifacts. After successful use, the pipeline removes
+the local upload bundle, the remote upload bundle, the remote final-artifact
+bundle, the downloaded final-artifact bundle, and the COLMAP review bundles
+after they have been unpacked.
 
 Use `--skip-upload` to resume after a successful upload/unpack when the remote
 run inputs are already present.
