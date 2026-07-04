@@ -891,7 +891,28 @@ Success criteria:
 
 ---
 
-### Milestone 4: Viewer Prototype
+### Milestone 4: Multiple Camera + Hero Image Support
+
+Add support for a coverage pass plus high-resolution hero/detail photos stored
+under `data/raw/<project>/hero/`.
+
+The combination point is COLMAP: coverage frames and hero photos should keep
+source metadata, camera-group identity, camera model, and separate intrinsics
+when capture sources differ.
+
+Success criteria:
+
+- can ingest one coverage pass plus hero photos
+- can assign coverage and hero images to explicit camera groups
+- can run COLMAP with separate camera intrinsics per group when needed
+- preprocessing report includes hero image metadata and quality metrics
+- COLMAP report states how many hero images registered and which were dropped
+- COLMAP report lists camera models and marks which model/group is hero images
+- can train one splat from the combined reconstruction
+
+---
+
+### Milestone 5: Viewer Prototype
 
 Build browser viewer with:
 
@@ -905,46 +926,6 @@ Success criteria:
 
 - one generated scene can be shared as a link
 - viewer feels like a lightweight game walkthrough
-
----
-
-### Milestone 5: Multiple Camera + Hero Image Support
-
-Add explicit support for mixed capture sources:
-
-```text
-wide / 360 / fisheye coverage pass
-  ↓
-selected coverage frames
-  ↓
-high-resolution hero/detail photos
-  ↓
-COLMAP camera groups with separate intrinsics
-  ↓
-one combined reconstruction for training
-```
-
-The goal is to let a fast wide-angle or 360 walkthrough provide robust spatial
-coverage, while sharper 1x or higher-resolution photos add detail where it
-matters. The combination point should be COLMAP: preprocessing must preserve
-source and camera-group metadata, and reconstruction must assign separate
-camera models/intrinsics for each group instead of pretending all images came
-from one lens.
-
-Initial camera groups:
-
-- phone ultrawide / 0.6x video
-- DJI 360 / fisheye-derived coverage frames
-- phone 1x high-resolution hero photos
-- optional close detail photos
-
-Success criteria:
-
-- can ingest one coverage pass plus a small set of hero photos
-- can group images by capture source and camera model
-- can run COLMAP with separate intrinsics for each group
-- can report which hero images registered successfully
-- can train one splat from the combined reconstruction
 
 ---
 
@@ -979,8 +960,8 @@ Do first:
 2. frame selection report
 3. COLMAP + training/export scripts
 4. one reliable test scene
-5. viewer prototype
-6. multiple camera + hero image support
+5. multiple camera + hero image support
+6. viewer prototype
 
 Do later:
 
