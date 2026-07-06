@@ -145,16 +145,24 @@ def colmap_pose_to_nerfstudio_transform(image: ImagePose) -> List[List[float]]:
     world_to_camera = qvec_to_rotmat(image.qvec)
     tvec = image.tvec
 
-    # COLMAP stores world-to-camera OpenCV poses. Nerfstudio transforms use
-    # camera-to-world OpenGL camera axes, so invert and flip camera Y/Z axes.
+    # Match Nerfstudio's COLMAP conversion:
+    # 1. invert COLMAP's world-to-camera OpenCV pose to camera-to-world,
+    # 2. flip camera Y/Z axes from OpenCV to OpenGL,
+    # 3. remap COLMAP world axes into Nerfstudio's world convention.
     rotation_t = [[world_to_camera[row][col] for row in range(3)] for col in range(3)]
     center = [-sum(rotation_t[row][col] * tvec[col] for col in range(3)) for row in range(3)]
 
-    transform = [
+    opengl_camera_to_world = [
         [rotation_t[0][0], -rotation_t[0][1], -rotation_t[0][2], center[0]],
         [rotation_t[1][0], -rotation_t[1][1], -rotation_t[1][2], center[1]],
         [rotation_t[2][0], -rotation_t[2][1], -rotation_t[2][2], center[2]],
         [0.0, 0.0, 0.0, 1.0],
+    ]
+    transform = [
+        opengl_camera_to_world[0],
+        opengl_camera_to_world[2],
+        [-value for value in opengl_camera_to_world[1]],
+        opengl_camera_to_world[3],
     ]
     return transform
 
