@@ -28,6 +28,7 @@ import platform
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -40,6 +41,7 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 DEFAULT_VERDA_COLMAP = Path("/workspace/opt/colmap-install/bin/colmap")
 REPORT_NAME = "reconstruction_report.json"
 REPORT_HTML_NAME = "reconstruction_report.html"
+IMAGE_MANIFEST_NAME = "image_manifest.json"
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "binary": str(DEFAULT_VERDA_COLMAP),
@@ -609,6 +611,138 @@ def count_images(image_dir: Path) -> int:
     return sum(1 for path in image_dir.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES)
 
 
+def load_image_manifest(run_dir: Path) -> Dict[str, Any]:
+    manifest_path = run_dir / "reports" / IMAGE_MANIFEST_NAME
+    if not manifest_path.exists():
+        return {"schema_version": 1, "images": [], "camera_groups": []}
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Could not parse image manifest: {manifest_path}") from exc
+    if not isinstance(manifest, dict):
+        raise SystemExit(f"Image manifest root must be an object: {manifest_path}")
+    images = manifest.get("images") or []
+    if not isinstance(images, list):
+        raise SystemExit(f"Image manifest 'images' must be a list: {manifest_path}")
+    return manifest
+
+
+def manifest_camera_group_id(entry: Mapping[str, Any]) -> str:
+    explicit = entry.get("camera_group_id")
+    if explicit:
+        return str(explicit)
+    return "{}_{}x{}".format(entry.get("camera_group"), entry.get("width"), entry.get("height"))
+
+
+def should_use_manifest_camera_groups(manifest: Mapping[str, Any]) -> bool:
+    images = manifest.get("images") or []
+    group_ids = {manifest_camera_group_id(entry) for entry in images if isinstance(entry, dict)}
+    return len(group_ids) > 1
+
+
+def apply_manifest_camera_policy(settings: Dict[str, Any], manifest: Mapping[str, Any]) -> None:
+    if should_use_manifest_camera_groups(manifest):
+        settings["single_camera"] = False
+        settings["camera_group_source"] = "image_manifest"
+
+
+def manifest_images_by_name(manifest: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
+    by_name: Dict[str, Dict[str, Any]] = {}
+    for entry in manifest.get("images") or []:
+        if not isinstance(entry, dict):
+            continue
+        image_name = entry.get("image_name")
+        if image_name:
+            by_name[str(image_name)] = dict(entry)
+    return by_name
+
+
+def remap_database_cameras_from_manifest(database_path: Path, manifest: Mapping[str, Any], logs_dir: Path) -> Optional[CommandResult]:
+    manifest_by_name = manifest_images_by_name(manifest)
+    if not manifest_by_name or not should_use_manifest_camera_groups(manifest):
+        return None
+
+    log_path = logs_dir / "manifest_camera_groups.log"
+    started_at = utc_now()
+    start_time = time.monotonic()
+    print(f"\n$ apply_manifest_camera_groups {database_path}", flush=True)
+
+    conn = sqlite3.connect(str(database_path))
+    try:
+        image_rows = conn.execute("SELECT image_id, name, camera_id FROM images").fetchall()
+        camera_rows = conn.execute("SELECT camera_id, model, width, height, params, prior_focal_length FROM cameras").fetchall()
+        cameras = {int(row[0]): row for row in camera_rows}
+        groups: Dict[str, List[Tuple[int, str, int, Dict[str, Any]]]] = {}
+        missing_manifest = []
+        for image_id, name, camera_id in image_rows:
+            entry = manifest_by_name.get(str(name))
+            if entry is None:
+                missing_manifest.append(str(name))
+                continue
+            groups.setdefault(manifest_camera_group_id(entry), []).append((int(image_id), str(name), int(camera_id), entry))
+
+        max_camera_id = max(cameras) if cameras else 0
+        assignments: List[Dict[str, Any]] = []
+        for group_id, items in sorted(groups.items()):
+            if not items:
+                continue
+            template_camera_id = items[0][2]
+            template = cameras.get(template_camera_id)
+            if template is None:
+                continue
+            _old_id, model, width, height, params, prior_focal_length = template
+            max_camera_id += 1
+            new_camera_id = max_camera_id
+            conn.execute(
+                "INSERT INTO cameras(camera_id, model, width, height, params, prior_focal_length) VALUES (?, ?, ?, ?, ?, ?)",
+                (new_camera_id, model, width, height, params, prior_focal_length),
+            )
+            conn.executemany(
+                "UPDATE images SET camera_id = ? WHERE image_id = ?",
+                [(new_camera_id, image_id) for image_id, _name, _camera_id, _entry in items],
+            )
+            sample = items[0][3]
+            assignments.append(
+                {
+                    "camera_group_id": group_id,
+                    "role": sample.get("role"),
+                    "camera_group": sample.get("camera_group"),
+                    "width": sample.get("width"),
+                    "height": sample.get("height"),
+                    "image_count": len(items),
+                    "camera_id": new_camera_id,
+                }
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    finished_at = utc_now()
+    duration = round(time.monotonic() - start_time, 3)
+    with log_path.open("w", encoding="utf-8") as log_file:
+        log_file.write(f"$ apply_manifest_camera_groups {database_path}\n\n")
+        log_file.write(json.dumps({"assignments": assignments, "missing_manifest": missing_manifest}, indent=2) + "\n")
+    for assignment in assignments:
+        print(
+            "Camera group {group} -> camera_id {camera} ({count} images)".format(
+                group=assignment["camera_group_id"],
+                camera=assignment["camera_id"],
+                count=assignment["image_count"],
+            )
+        )
+    if missing_manifest:
+        print(f"Images without manifest entries: {len(missing_manifest)}")
+    return CommandResult(
+        name="manifest_camera_groups",
+        command=["apply_manifest_camera_groups", str(database_path)],
+        log_path=str(log_path),
+        returncode=0,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_seconds=duration,
+    )
+
+
 def build_core_commands(
     colmap_bin: str,
     settings: Mapping[str, Any],
@@ -856,12 +990,91 @@ def parse_model_analyzer_metrics(log_path: Path) -> Dict[str, Any]:
     return metrics
 
 
+def parse_registered_image_names(sparse_text_dir: Path) -> List[str]:
+    images_txt = sparse_text_dir / "images.txt"
+    if not images_txt.exists():
+        return []
+    names: List[str] = []
+    data_line_index = 0
+    for raw_line in images_txt.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if data_line_index % 2 == 0:
+            parts = line.split()
+            if len(parts) >= 10:
+                names.append(parts[9])
+        data_line_index += 1
+    return names
+
+
+def build_manifest_reconstruction_summary(manifest: Mapping[str, Any], sparse_text_dir: Path) -> Dict[str, Any]:
+    images = [entry for entry in manifest.get("images") or [] if isinstance(entry, dict)]
+    registered_names = set(parse_registered_image_names(sparse_text_dir))
+    hero_images = [entry for entry in images if entry.get("role") == "hero"]
+    hero_registered = [entry for entry in hero_images if entry.get("image_name") in registered_names]
+    hero_dropped = [entry for entry in hero_images if entry.get("image_name") not in registered_names]
+    return {
+        "hero": {
+            "total": len(hero_images),
+            "registered": len(hero_registered),
+            "dropped": len(hero_dropped),
+            "registered_images": [entry.get("image_name") for entry in hero_registered],
+            "dropped_images": [entry.get("image_name") for entry in hero_dropped],
+        },
+        "registered_image_count_from_text": len(registered_names),
+    }
+
+
+def build_camera_group_summary(manifest: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    groups: Dict[str, Dict[str, Any]] = {}
+    for entry in manifest.get("images") or []:
+        if not isinstance(entry, dict):
+            continue
+        group_id = manifest_camera_group_id(entry)
+        group = groups.setdefault(
+            group_id,
+            {
+                "id": group_id,
+                "camera_group": entry.get("camera_group"),
+                "role": entry.get("role"),
+                "width": entry.get("width"),
+                "height": entry.get("height"),
+                "image_count": 0,
+                "hero": entry.get("role") == "hero",
+                "locations": set(),
+            },
+        )
+        group["image_count"] += 1
+        if entry.get("role") == "hero":
+            group["hero"] = True
+        if entry.get("location"):
+            group["locations"].add(entry["location"])
+
+    output = []
+    for group in groups.values():
+        output.append(
+            {
+                "id": group["id"],
+                "camera_group": group["camera_group"],
+                "role": group["role"],
+                "width": group["width"],
+                "height": group["height"],
+                "image_count": group["image_count"],
+                "hero": group["hero"],
+                "locations": sorted(group["locations"]),
+            }
+        )
+    return sorted(output, key=lambda item: str(item["id"]))
+
+
 def build_report(
     *,
     run_dir: Path,
     settings: Mapping[str, Any],
     paths: Mapping[str, Path],
     image_count: int,
+    image_manifest: Mapping[str, Any],
     colmap_bin: str,
     option_names: Optional[ColmapOptionNames],
     commands: Sequence[CommandResult],
@@ -873,6 +1086,8 @@ def build_report(
     dry_run: bool,
 ) -> Dict[str, Any]:
     reconstruction_metrics = parse_model_analyzer_metrics(paths["logs_dir"] / "model_analyzer.log")
+    manifest_summary = build_manifest_reconstruction_summary(image_manifest, paths["sparse_text_dir"])
+    camera_groups = build_camera_group_summary(image_manifest)
     outputs = {
         "database": relative_to(paths["database_path"], run_dir),
         "database_global": relative_to(paths["database_global_path"], run_dir),
@@ -905,6 +1120,8 @@ def build_report(
         },
         "outputs": outputs,
         "reconstruction_metrics": reconstruction_metrics,
+        "manifest_reconstruction": manifest_summary,
+        "camera_groups": camera_groups,
         "selected_sparse_model": relative_to(selected_model, run_dir) if selected_model else None,
         "commands": [asdict(command) for command in commands],
         "error": error,
@@ -968,6 +1185,38 @@ def metric_rows(metrics: Mapping[str, Any]) -> str:
             "<tr><th>{key}</th><td>{value}</td></tr>".format(
                 key=html.escape(key.replace("_", " ")),
                 value=html.escape(str(metrics[key])),
+            )
+        )
+    return "\n".join(rows)
+
+
+def hero_registration_rows(summary: Mapping[str, Any]) -> str:
+    hero = summary.get("hero") or {}
+    dropped = hero.get("dropped_images") or []
+    return table_rows(
+        {
+            "hero_total": hero.get("total", 0),
+            "hero_registered": hero.get("registered", 0),
+            "hero_dropped": hero.get("dropped", 0),
+            "dropped_images": ", ".join(str(item) for item in dropped) if dropped else "none",
+        }
+    )
+
+
+def camera_group_rows(groups: Sequence[Mapping[str, Any]]) -> str:
+    if not groups:
+        return '<tr><td colspan="7">No image manifest camera groups found.</td></tr>'
+    rows = []
+    for group in groups:
+        rows.append(
+            "<tr><td>{id}</td><td>{camera_group}</td><td>{role}</td><td>{hero}</td><td>{resolution}</td><td>{count}</td><td>{locations}</td></tr>".format(
+                id=html.escape(str(group.get("id"))),
+                camera_group=html.escape(str(group.get("camera_group"))),
+                role=html.escape(str(group.get("role"))),
+                hero=html.escape(str(group.get("hero"))),
+                resolution=html.escape("{}x{}".format(group.get("width"), group.get("height"))),
+                count=html.escape(str(group.get("image_count"))),
+                locations=html.escape(", ".join(str(item) for item in group.get("locations") or [])),
             )
         )
     return "\n".join(rows)
@@ -1059,6 +1308,15 @@ def write_html_report(reports_dir: Path, report: Mapping[str, Any]) -> Path:
   <h2>Model Analyzer</h2>
   <table>{metrics_rows}</table>
 
+  <h2>Hero Registration</h2>
+  <table>{hero_rows}</table>
+
+  <h2>Camera Groups</h2>
+  <table>
+    <tr><th>ID</th><th>Camera Group</th><th>Role</th><th>Hero</th><th>Resolution</th><th>Images</th><th>Locations</th></tr>
+    {camera_group_rows}
+  </table>
+
   <h2>Commands</h2>
   <table>
     <tr><th>Name</th><th>Exit Code</th><th>Duration (s)</th><th>Log</th></tr>
@@ -1096,6 +1354,8 @@ def write_html_report(reports_dir: Path, report: Mapping[str, Any]) -> Path:
         ),
         outputs_rows=table_rows(outputs),
         metrics_rows=metric_rows(report.get("reconstruction_metrics") or {}),
+        hero_rows=hero_registration_rows(report.get("manifest_reconstruction") or {}),
+        camera_group_rows=camera_group_rows(report.get("camera_groups") or []),
         command_rows=command_rows(report.get("commands") or []),
         error_html=error_html,
     )
@@ -1103,10 +1363,28 @@ def write_html_report(reports_dir: Path, report: Mapping[str, Any]) -> Path:
     return output_path
 
 
-def print_dry_run(commands: Sequence[Tuple[str, Sequence[str]]], paths: Mapping[str, Path], settings: Mapping[str, Any]) -> None:
+def print_dry_run(
+    commands: Sequence[Tuple[str, Sequence[str]]],
+    paths: Mapping[str, Path],
+    settings: Mapping[str, Any],
+    image_manifest: Mapping[str, Any],
+) -> None:
     print("Dry run. No files will be created or modified.\n")
-    for _name, command in commands:
+    for name, command in commands:
         print(f"$ {shlex.join(command)}")
+        if name == "feature_extractor" and should_use_manifest_camera_groups(image_manifest):
+            groups = build_camera_group_summary(image_manifest)
+            print("# apply manifest camera groups after feature extraction:")
+            for group in groups:
+                print(
+                    "#   {id}: {count} images, role={role}, resolution={width}x{height}".format(
+                        id=group.get("id"),
+                        count=group.get("image_count"),
+                        role=group.get("role"),
+                        width=group.get("width"),
+                        height=group.get("height"),
+                    )
+                )
 
     assumed_model = paths["sparse_dir"] / "0"
     for _name, command in build_followup_commands("colmap", settings, paths, assumed_model):
@@ -1119,6 +1397,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     settings = build_settings(args)
     run_dir = args.run.expanduser()
+    image_manifest = load_image_manifest(run_dir)
+    apply_manifest_camera_policy(settings, image_manifest)
     paths = prepare_output_paths(run_dir, settings, args.overwrite, args.dry_run)
     image_count = count_images(paths["image_dir"])
     if image_count == 0:
@@ -1129,7 +1409,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     core_commands = build_core_commands(colmap_bin, settings, paths, option_names)
 
     if args.dry_run:
-        print_dry_run(core_commands, paths, settings)
+        print_dry_run(core_commands, paths, settings, image_manifest)
         return 0
 
     started_at = utc_now()
@@ -1141,6 +1421,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         for name, command in core_commands:
             command_results.append(run_command(name, command, paths["logs_dir"]))
+            if name == "feature_extractor":
+                manifest_result = remap_database_cameras_from_manifest(paths["database_path"], image_manifest, paths["logs_dir"])
+                if manifest_result is not None:
+                    command_results.append(manifest_result)
 
         selected_model = find_sparse_model(paths["sparse_dir"])
         if selected_model is None:
@@ -1160,6 +1444,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             settings=settings,
             paths=paths,
             image_count=image_count,
+            image_manifest=image_manifest,
             colmap_bin=colmap_bin,
             option_names=option_names,
             commands=command_results,
@@ -1180,6 +1465,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         settings=settings,
         paths=paths,
         image_count=image_count,
+        image_manifest=image_manifest,
         colmap_bin=colmap_bin,
         option_names=option_names,
         commands=command_results,

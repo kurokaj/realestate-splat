@@ -895,6 +895,8 @@ Success criteria:
 
 Add support for a coverage pass plus high-resolution hero/detail photos stored
 under `data/raw/<project>/hero/`.
+Use `data/raw/<project>/<area>.mp4` for coverage videos and
+`data/raw/<project>/hero/<area>/` for matching hero-photo clusters.
 
 The combination point is COLMAP: coverage frames and hero photos should keep
 source metadata, camera-group identity, camera model, and separate intrinsics

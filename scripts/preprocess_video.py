@@ -14,10 +14,11 @@ import html
 import json
 import math
 import re
+import shutil
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 try:
     import cv2  # type: ignore
@@ -117,9 +118,11 @@ REPORT_FILENAMES = {
     "capture_json": "capture_report.json",
     "capture_html": "capture_report.html",
     "gpu_json": "gpu_recommendation.json",
+    "image_manifest_json": "image_manifest.json",
 }
 
 VIDEO_SUFFIXES = {".avi", ".m4v", ".mkv", ".mov", ".mp4"}
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 PROGRESS_PERCENT_STEP = 10
 
 
@@ -158,6 +161,22 @@ class VideoInfo:
 class VideoSource:
     source_id: str
     path: Path
+
+
+@dataclass
+class HeroImageRecord:
+    source_id: str
+    location: str
+    path: str
+    output_file: str
+    camera_group: str
+    width: int
+    height: int
+    blur_score: float
+    brightness: float
+    contrast: float
+    entropy: float
+    quality_score: float
 
 
 @dataclass
@@ -379,6 +398,22 @@ def discover_video_sources(args: argparse.Namespace) -> List[VideoSource]:
     return sources
 
 
+def discover_hero_images(input_dir: Path) -> List[Tuple[str, Path]]:
+    hero_dir = input_dir / "hero"
+    if not hero_dir.exists():
+        return []
+    if not hero_dir.is_dir():
+        raise SystemExit(f"Hero image path exists but is not a directory: {hero_dir}")
+
+    hero_images: List[Tuple[str, Path]] = []
+    for location_dir in sorted(path for path in hero_dir.iterdir() if path.is_dir()):
+        location = sanitize_source_id(location_dir.name)
+        for image_path in sorted(location_dir.iterdir()):
+            if image_path.is_file() and image_path.suffix.lower() in IMAGE_SUFFIXES:
+                hero_images.append((location, image_path))
+    return hero_images
+
+
 def resolve_output_dir(args: argparse.Namespace, sources: Sequence[VideoSource]) -> Path:
     if args.out is not None:
         return args.out
@@ -394,8 +429,9 @@ def prepare_output_dirs(out_dir: Path, overwrite: bool) -> Tuple[Path, Path]:
     reports_dir.mkdir(parents=True, exist_ok=True)
 
     existing_frames = sorted(
-        {*frames_dir.glob("frame_*.jpg"), *frames_dir.glob("*_frame_*.jpg")},
-        key=str,
+        path
+        for path in frames_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
     )
     if existing_frames and not overwrite:
         raise SystemExit(
@@ -852,6 +888,45 @@ def save_selected_frames(video_path: Path, selected_final: Sequence[FrameRecord]
     return saved_count
 
 
+def process_hero_images(
+    hero_inputs: Sequence[Tuple[str, Path]],
+    out_dir: Path,
+    settings: Dict[str, Any],
+) -> List[HeroImageRecord]:
+    records: List[HeroImageRecord] = []
+    per_location_counts: Dict[str, int] = {}
+    for location, image_path in hero_inputs:
+        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if image is None:
+            raise SystemExit(f"Could not read hero image: {image_path}")
+        metrics, _ahash, _signature = score_frame(image)
+        height, width = image.shape[:2]
+        per_location_counts[location] = per_location_counts.get(location, 0) + 1
+        sequence = per_location_counts[location]
+        suffix = image_path.suffix.lower() if image_path.suffix.lower() in IMAGE_SUFFIXES else ".jpg"
+        output_file = f"frames_selected/hero_{location}_{sequence:06d}{suffix}"
+        output_path = out_dir / output_file
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(image_path, output_path)
+        records.append(
+            HeroImageRecord(
+                source_id=f"hero_{location}",
+                location=location,
+                path=str(image_path),
+                output_file=output_file,
+                camera_group="hero",
+                width=int(width),
+                height=int(height),
+                blur_score=round(float(metrics["blur_score"]), 3),
+                brightness=round(float(metrics["brightness"]), 3),
+                contrast=round(float(metrics["contrast"]), 3),
+                entropy=round(float(metrics["entropy"]), 3),
+                quality_score=quality_score(metrics, settings),
+            )
+        )
+    return records
+
+
 def percentile(values: Sequence[float], q: float) -> Optional[float]:
     if not values:
         return None
@@ -1106,6 +1181,119 @@ def build_video_summary(result: VideoRunResult, settings: Dict[str, Any]) -> Dic
     }
 
 
+def hero_summary(hero_records: Sequence[HeroImageRecord]) -> Dict[str, Any]:
+    by_location: Dict[str, int] = {}
+    for record in hero_records:
+        by_location[record.location] = by_location.get(record.location, 0) + 1
+    return {
+        "image_count": len(hero_records),
+        "locations": dict(sorted(by_location.items())),
+        "blur_score_distribution": metric_summary(hero_records, "blur_score"),
+        "brightness_distribution": metric_summary(hero_records, "brightness"),
+        "contrast_distribution": metric_summary(hero_records, "contrast"),
+        "entropy_distribution": metric_summary(hero_records, "entropy"),
+    }
+
+
+def image_manifest_entry_for_video(record: FrameRecord, video_info: VideoInfo) -> Dict[str, Any]:
+    if record.output_file is None:
+        raise SystemExit("Selected frame is missing output_file.")
+    output_path = Path(record.output_file)
+    return {
+        "image_name": output_path.name,
+        "path": record.output_file,
+        "role": "coverage",
+        "source_id": record.source_id,
+        "location": record.source_id,
+        "source_path": record.source_video,
+        "camera_group": "coverage",
+        "width": video_info.width,
+        "height": video_info.height,
+        "metrics": {
+            "blur_score": round(record.blur_score, 3),
+            "brightness": round(record.brightness, 3),
+            "contrast": round(record.contrast, 3),
+            "entropy": round(record.entropy, 3),
+            "quality_score": record.quality_score,
+        },
+    }
+
+
+def image_manifest_entry_for_hero(record: HeroImageRecord) -> Dict[str, Any]:
+    output_path = Path(record.output_file)
+    return {
+        "image_name": output_path.name,
+        "path": record.output_file,
+        "role": "hero",
+        "source_id": record.source_id,
+        "location": record.location,
+        "source_path": record.path,
+        "camera_group": record.camera_group,
+        "width": record.width,
+        "height": record.height,
+        "metrics": {
+            "blur_score": record.blur_score,
+            "brightness": record.brightness,
+            "contrast": record.contrast,
+            "entropy": record.entropy,
+            "quality_score": record.quality_score,
+        },
+    }
+
+
+def camera_group_key(entry: Mapping[str, Any]) -> str:
+    return "{}_{}x{}".format(entry.get("camera_group"), entry.get("width"), entry.get("height"))
+
+
+def build_image_manifest(
+    results: Sequence[VideoRunResult],
+    hero_records: Sequence[HeroImageRecord],
+) -> Dict[str, Any]:
+    images: List[Dict[str, Any]] = []
+    for result in results:
+        for record in result.selected_final:
+            images.append(image_manifest_entry_for_video(record, result.video_info))
+    images.extend(image_manifest_entry_for_hero(record) for record in hero_records)
+
+    groups: Dict[str, Dict[str, Any]] = {}
+    for entry in images:
+        key = camera_group_key(entry)
+        group = groups.setdefault(
+            key,
+            {
+                "camera_group": entry.get("camera_group"),
+                "role": entry.get("role"),
+                "width": entry.get("width"),
+                "height": entry.get("height"),
+                "image_count": 0,
+                "locations": set(),
+            },
+        )
+        group["image_count"] += 1
+        if entry.get("location"):
+            group["locations"].add(entry["location"])
+
+    camera_groups = []
+    for key, group in sorted(groups.items()):
+        camera_groups.append(
+            {
+                "id": key,
+                "camera_group": group["camera_group"],
+                "role": group["role"],
+                "width": group["width"],
+                "height": group["height"],
+                "image_count": group["image_count"],
+                "locations": sorted(group["locations"]),
+            }
+        )
+
+    return {
+        "schema_version": 1,
+        "images": images,
+        "camera_groups": camera_groups,
+    }
+
+
 def merge_count_maps(items: Iterable[Dict[str, int]]) -> Dict[str, int]:
     merged: Dict[str, int] = {}
     for item in items:
@@ -1117,6 +1305,7 @@ def merge_count_maps(items: Iterable[Dict[str, int]]) -> Dict[str, int]:
 def build_multi_capture_report(
     input_dir: Path,
     results: Sequence[VideoRunResult],
+    hero_records: Sequence[HeroImageRecord],
     settings: Dict[str, Any],
     out_dir: Path,
     reports_dir: Path,
@@ -1129,6 +1318,7 @@ def build_multi_capture_report(
         "capture_report_json": relative_to(reports_dir / REPORT_FILENAMES["capture_json"], out_dir),
         "capture_report_html": relative_to(reports_dir / REPORT_FILENAMES["capture_html"], out_dir),
         "gpu_recommendation_json": relative_to(reports_dir / REPORT_FILENAMES["gpu_json"], out_dir),
+        "image_manifest_json": relative_to(reports_dir / REPORT_FILENAMES["image_manifest_json"], out_dir),
     }
     selection_counts = selected_by_counts(all_selected)
     return {
@@ -1138,15 +1328,19 @@ def build_multi_capture_report(
             "mode": "project_videos",
             "input_dir": str(input_dir),
             "video_count": len(results),
+            "hero_image_count": len(hero_records),
             "videos": [
                 {"source_id": result.source.source_id, "path": str(result.source.path)}
                 for result in results
             ],
+            "hero_dir": str(input_dir / "hero"),
         },
         "settings": settings,
         "summary": {
             "candidate_frame_count": len(all_records),
             "selected_frame_count": len(all_selected),
+            "hero_image_count": len(hero_records),
+            "total_image_count": len(all_selected) + len(hero_records),
             "selected_by": selection_counts,
             "coverage_fallback_frame_count": selection_counts.get("coverage_fallback", 0),
             "rejected_frame_count": len(all_records) - len(all_selected),
@@ -1157,6 +1351,8 @@ def build_multi_capture_report(
             "entropy_distribution": metric_summary(all_records, "entropy"),
         },
         "videos": [build_video_summary(result, settings) for result in results],
+        "hero": hero_summary(hero_records),
+        "hero_images": [asdict(record) for record in hero_records],
         "warnings": list(warnings),
         "outputs": outputs,
         "frames": [frame_record_to_dict(record) for record in all_records],
@@ -1395,6 +1591,46 @@ def video_summary_rows(report: Dict[str, Any]) -> str:
     return "\n".join(rows)
 
 
+def hero_location_rows(report: Dict[str, Any]) -> str:
+    hero = report.get("hero") or {}
+    locations = hero.get("locations") or {}
+    if not locations:
+        return '<tr><td colspan="2">No hero images found.</td></tr>'
+    rows = []
+    for location, count in sorted(locations.items()):
+        rows.append(
+            "<tr><td>{location}</td><td>{count}</td></tr>".format(
+                location=html.escape(str(location)),
+                count=html.escape(str(count)),
+            )
+        )
+    return "\n".join(rows)
+
+
+def hero_metric_table(report: Dict[str, Any]) -> str:
+    hero = report.get("hero") or {}
+    metric_names = [
+        ("Blur", "blur_score_distribution"),
+        ("Brightness", "brightness_distribution"),
+        ("Contrast", "contrast_distribution"),
+        ("Entropy", "entropy_distribution"),
+    ]
+    rows = []
+    for label, key in metric_names:
+        values = hero.get(key) or {}
+        rows.append(
+            "<tr><th>{}</th><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+                html.escape(label),
+                html.escape(str(values.get("min"))),
+                html.escape(str(values.get("p10"))),
+                html.escape(str(values.get("p50"))),
+                html.escape(str(values.get("p90"))),
+                html.escape(str(values.get("max"))),
+            )
+        )
+    return "\n".join(rows)
+
+
 def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], reports_dir: Path) -> Path:
     output_path = reports_dir / REPORT_FILENAMES["capture_html"]
     warnings = report["warnings"]
@@ -1407,6 +1643,8 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
         {
             "input_dir": report["input"]["input_dir"],
             "video_count": report["input"]["video_count"],
+            "hero_images": report["summary"]["hero_image_count"],
+            "total_images": report["summary"]["total_image_count"],
             "candidate_frames": report["summary"]["candidate_frame_count"],
             "selected_frames": report["summary"]["selected_frame_count"],
             "coverage_fallback_frames": report["summary"]["coverage_fallback_frame_count"],
@@ -1596,6 +1834,17 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
     {video_rows}
   </table>
 
+  <h2>Hero Images</h2>
+  <p class="note">Hero photos are copied from <code>hero/&lt;location&gt;/</code> into <code>frames_selected/</code> and marked as a separate camera group for COLMAP.</p>
+  <table>
+    <tr><th>Location</th><th>Images</th></tr>
+    {hero_rows}
+  </table>
+  <table>
+    <tr><th>Metric</th><th>Min</th><th>P10</th><th>P50</th><th>P90</th><th>Max</th></tr>
+    {hero_metric_rows}
+  </table>
+
   <h2>Warning Flags</h2>
   {warning_html}
 
@@ -1625,6 +1874,8 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
         created_at=html.escape(str(report["created_at"])),
         summary_rows=summary_rows,
         video_rows=video_summary_rows(report),
+        hero_rows=hero_location_rows(report),
+        hero_metric_rows=hero_metric_table(report),
         warning_html=warning_html,
         rejection_rows=rejection_rows,
         metric_rows=metric_table(report),
@@ -1665,6 +1916,22 @@ def representative_video_info(results: Sequence[VideoRunResult]) -> VideoInfo:
     )
 
 
+def representative_image_info(results: Sequence[VideoRunResult], hero_records: Sequence[HeroImageRecord]) -> VideoInfo:
+    candidates = list(result.video_info for result in results)
+    for record in hero_records:
+        candidates.append(
+            VideoInfo(
+                path=record.path,
+                fps=0.0,
+                frame_count=1,
+                duration_seconds=None,
+                width=record.width,
+                height=record.height,
+            )
+        )
+    return max(candidates, key=lambda info: (info.width * info.height, info.width, info.height))
+
+
 def aggregate_warnings(results: Sequence[VideoRunResult], settings: Dict[str, Any]) -> List[str]:
     warnings = {warning for result in results for warning in result.warnings}
     total_selected = sum(len(result.selected_final) for result in results)
@@ -1681,6 +1948,7 @@ def write_run_config(
     out_dir: Path,
     args: argparse.Namespace,
     sources: Sequence[VideoSource],
+    hero_records: Sequence[HeroImageRecord],
     settings: Dict[str, Any],
 ) -> Path:
     output_path = out_dir / "run_config.json"
@@ -1694,6 +1962,17 @@ def write_run_config(
             "videos": [
                 {"source_id": source.source_id, "path": str(source.path)}
                 for source in sources
+            ],
+            "hero_dir": str(args.input_dir / "hero"),
+            "hero_images": [
+                {
+                    "source_id": record.source_id,
+                    "location": record.location,
+                    "path": record.path,
+                    "output_file": record.output_file,
+                    "camera_group": record.camera_group,
+                }
+                for record in hero_records
             ],
         },
         "out": str(out_dir),
@@ -1709,6 +1988,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     settings = build_settings(args)
     validate_args(args, settings)
     sources = discover_video_sources(args)
+    hero_inputs = discover_hero_images(args.input_dir)
 
     out_dir = resolve_output_dir(args, sources)
     frames_dir, reports_dir = prepare_output_dirs(out_dir, args.overwrite)
@@ -1722,13 +2002,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         for source in sources
     ]
+    hero_records = process_hero_images(hero_inputs, out_dir, settings)
+    image_manifest = build_image_manifest(results, hero_records)
 
     warnings = aggregate_warnings(results, settings)
     saved_count = sum(result.saved_count for result in results)
-    gpu_report = gpu_recommendation(saved_count, representative_video_info(results), warnings)
+    total_image_count = saved_count + len(hero_records)
+    gpu_report = gpu_recommendation(total_image_count, representative_image_info(results, hero_records), warnings)
     capture_report = build_multi_capture_report(
         input_dir=args.input_dir,
         results=results,
+        hero_records=hero_records,
         settings=settings,
         out_dir=out_dir,
         reports_dir=reports_dir,
@@ -1736,14 +2020,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     write_json(reports_dir / REPORT_FILENAMES["capture_json"], capture_report)
+    write_json(reports_dir / REPORT_FILENAMES["image_manifest_json"], image_manifest)
     write_json(reports_dir / REPORT_FILENAMES["gpu_json"], gpu_report)
     write_html_report(capture_report, gpu_report, reports_dir)
-    write_run_config(out_dir, args, sources, settings)
+    write_run_config(out_dir, args, sources, hero_records, settings)
 
     print(f"Processed video directory: {args.input_dir}")
     print("Videos: " + ", ".join(source.source_id for source in sources))
     print(f"Candidate frames scored: {sum(len(result.records) for result in results)}")
     print(f"Selected frames written: {saved_count}")
+    print(f"Hero images copied: {len(hero_records)}")
+    print(f"Total images for COLMAP/training: {total_image_count}")
     print(f"Frames: {out_dir / 'frames_selected'}")
     print(f"Report: {reports_dir / REPORT_FILENAMES['capture_html']}")
     print(f"GPU recommendation: {gpu_report['recommendation']['suggested_gpu']}")

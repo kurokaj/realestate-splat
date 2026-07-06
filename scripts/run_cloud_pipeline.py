@@ -326,6 +326,7 @@ def build_upload_bundle(run_dir: Path, work_dir: Path) -> Path:
         add_to_zip(zip_file, run_dir / "reports" / "capture_report.json", Path("reports/capture_report.json"))
         add_to_zip(zip_file, run_dir / "reports" / "capture_report.html", Path("reports/capture_report.html"))
         add_to_zip(zip_file, run_dir / "reports" / "gpu_recommendation.json", Path("reports/gpu_recommendation.json"))
+        add_to_zip(zip_file, run_dir / "reports" / "image_manifest.json", Path("reports/image_manifest.json"))
         add_to_zip(zip_file, run_dir / "run_config.json", Path("run_config.json"))
     return bundle_path
 
