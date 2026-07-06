@@ -28,7 +28,6 @@ import platform
 import re
 import shlex
 import shutil
-import sqlite3
 import subprocess
 import sys
 import time
@@ -655,92 +654,6 @@ def manifest_images_by_name(manifest: Mapping[str, Any]) -> Dict[str, Dict[str, 
         if image_name:
             by_name[str(image_name)] = dict(entry)
     return by_name
-
-
-def remap_database_cameras_from_manifest(database_path: Path, manifest: Mapping[str, Any], logs_dir: Path) -> Optional[CommandResult]:
-    manifest_by_name = manifest_images_by_name(manifest)
-    if not manifest_by_name or not should_use_manifest_camera_groups(manifest):
-        return None
-
-    log_path = logs_dir / "manifest_camera_groups.log"
-    started_at = utc_now()
-    start_time = time.monotonic()
-    print(f"\n$ apply_manifest_camera_groups {database_path}", flush=True)
-
-    conn = sqlite3.connect(str(database_path))
-    try:
-        image_rows = conn.execute("SELECT image_id, name, camera_id FROM images").fetchall()
-        camera_rows = conn.execute("SELECT camera_id, model, width, height, params, prior_focal_length FROM cameras").fetchall()
-        cameras = {int(row[0]): row for row in camera_rows}
-        groups: Dict[str, List[Tuple[int, str, int, Dict[str, Any]]]] = {}
-        missing_manifest = []
-        for image_id, name, camera_id in image_rows:
-            entry = manifest_by_name.get(str(name))
-            if entry is None:
-                missing_manifest.append(str(name))
-                continue
-            groups.setdefault(manifest_camera_group_id(entry), []).append((int(image_id), str(name), int(camera_id), entry))
-
-        max_camera_id = max(cameras) if cameras else 0
-        assignments: List[Dict[str, Any]] = []
-        for group_id, items in sorted(groups.items()):
-            if not items:
-                continue
-            template_camera_id = items[0][2]
-            template = cameras.get(template_camera_id)
-            if template is None:
-                continue
-            _old_id, model, width, height, params, prior_focal_length = template
-            max_camera_id += 1
-            new_camera_id = max_camera_id
-            conn.execute(
-                "INSERT INTO cameras(camera_id, model, width, height, params, prior_focal_length) VALUES (?, ?, ?, ?, ?, ?)",
-                (new_camera_id, model, width, height, params, prior_focal_length),
-            )
-            conn.executemany(
-                "UPDATE images SET camera_id = ? WHERE image_id = ?",
-                [(new_camera_id, image_id) for image_id, _name, _camera_id, _entry in items],
-            )
-            sample = items[0][3]
-            assignments.append(
-                {
-                    "camera_group_id": group_id,
-                    "role": sample.get("role"),
-                    "camera_group": sample.get("camera_group"),
-                    "width": sample.get("width"),
-                    "height": sample.get("height"),
-                    "image_count": len(items),
-                    "camera_id": new_camera_id,
-                }
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
-    finished_at = utc_now()
-    duration = round(time.monotonic() - start_time, 3)
-    with log_path.open("w", encoding="utf-8") as log_file:
-        log_file.write(f"$ apply_manifest_camera_groups {database_path}\n\n")
-        log_file.write(json.dumps({"assignments": assignments, "missing_manifest": missing_manifest}, indent=2) + "\n")
-    for assignment in assignments:
-        print(
-            "Camera group {group} -> camera_id {camera} ({count} images)".format(
-                group=assignment["camera_group_id"],
-                camera=assignment["camera_id"],
-                count=assignment["image_count"],
-            )
-        )
-    if missing_manifest:
-        print(f"Images without manifest entries: {len(missing_manifest)}")
-    return CommandResult(
-        name="manifest_camera_groups",
-        command=["apply_manifest_camera_groups", str(database_path)],
-        log_path=str(log_path),
-        returncode=0,
-        started_at=started_at,
-        finished_at=finished_at,
-        duration_seconds=duration,
-    )
 
 
 def build_core_commands(
@@ -1374,10 +1287,11 @@ def print_dry_run(
         print(f"$ {shlex.join(command)}")
         if name == "feature_extractor" and should_use_manifest_camera_groups(image_manifest):
             groups = build_camera_group_summary(image_manifest)
-            print("# apply manifest camera groups after feature extraction:")
+            print("# manifest camera groups detected; COLMAP runs with --ImageReader.single_camera 0")
+            print("# COLMAP will keep rig/frame metadata valid and estimate separate camera intrinsics.")
             for group in groups:
                 print(
-                    "#   {id}: {count} images, role={role}, resolution={width}x{height}".format(
+                    "#   manifest group {id}: {count} images, role={role}, resolution={width}x{height}".format(
                         id=group.get("id"),
                         count=group.get("image_count"),
                         role=group.get("role"),
@@ -1421,10 +1335,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         for name, command in core_commands:
             command_results.append(run_command(name, command, paths["logs_dir"]))
-            if name == "feature_extractor":
-                manifest_result = remap_database_cameras_from_manifest(paths["database_path"], image_manifest, paths["logs_dir"])
-                if manifest_result is not None:
-                    command_results.append(manifest_result)
 
         selected_model = find_sparse_model(paths["sparse_dir"])
         if selected_model is None:
