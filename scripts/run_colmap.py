@@ -368,6 +368,7 @@ def build_settings(args: argparse.Namespace) -> Dict[str, Any]:
     for key, value in cli_overrides.items():
         if value is not None:
             settings[key] = value
+    settings["_single_camera_explicit"] = args.single_camera is not None
 
     merge_option_map(settings, "feature_options", parse_option_pairs(args.feature_option, "--feature-option"))
     merge_option_map(settings, "matcher_options", parse_option_pairs(args.matcher_option, "--matcher-option"))
@@ -640,7 +641,7 @@ def should_use_manifest_camera_groups(manifest: Mapping[str, Any]) -> bool:
 
 
 def apply_manifest_camera_policy(settings: Dict[str, Any], manifest: Mapping[str, Any]) -> None:
-    if should_use_manifest_camera_groups(manifest):
+    if should_use_manifest_camera_groups(manifest) and not settings.get("_single_camera_explicit"):
         settings["single_camera"] = False
         settings["camera_group_source"] = "image_manifest"
 
@@ -1023,7 +1024,7 @@ def build_report(
             "image_dir": relative_to(paths["image_dir"], run_dir),
             "image_count": image_count,
         },
-        "settings": dict(settings),
+        "settings": {key: value for key, value in settings.items() if not str(key).startswith("_")},
         "environment": {
             "python": sys.version.split()[0],
             "platform": platform.platform(),
@@ -1287,8 +1288,11 @@ def print_dry_run(
         print(f"$ {shlex.join(command)}")
         if name == "feature_extractor" and should_use_manifest_camera_groups(image_manifest):
             groups = build_camera_group_summary(image_manifest)
-            print("# manifest camera groups detected; COLMAP runs with --ImageReader.single_camera 0")
-            print("# COLMAP will keep rig/frame metadata valid and estimate separate camera intrinsics.")
+            if settings.get("single_camera"):
+                print("# manifest camera groups detected, but explicit --single-camera keeps one shared COLMAP camera.")
+            else:
+                print("# manifest camera groups detected; COLMAP runs with --ImageReader.single_camera 0")
+                print("# COLMAP will keep rig/frame metadata valid and estimate separate camera intrinsics.")
             for group in groups:
                 print(
                     "#   manifest group {id}: {count} images, role={role}, resolution={width}x{height}".format(

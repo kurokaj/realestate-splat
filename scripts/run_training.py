@@ -226,6 +226,8 @@ def validate_config(config: Mapping[str, Any], run_dir: Path, dry_run: bool) -> 
 
     return {
         "backend": backend,
+        "run_dir": run_dir,
+        "python_bin": sys.executable,
         "method": training["method"],
         "pixi_bin": pixi_bin,
         "nerfstudio_dir": nerfstudio_dir,
@@ -252,11 +254,24 @@ def find_latest_training_config(output_dir: Path) -> Optional[Path]:
     return latest_existing_file(output_dir.glob("**/config.yml"))
 
 
+def data_prepare_command_name(command: Sequence[str]) -> str:
+    if any(Path(part).name == "prepare_nerfstudio_from_colmap.py" for part in command):
+        return "prepare_nerfstudio_from_colmap.py"
+    if "ns-process-data" in command:
+        return "ns-process-data"
+    return Path(command[0]).name if command else "unknown"
+
+
 def print_dry_run(commands: Mapping[str, List[str]], settings: Mapping[str, Any], should_prepare_data: bool) -> None:
     print("Dry run. No files will be created or modified.\n")
     print(f"# backend: {settings['backend']}")
     print(f"# authoritative COLMAP: {settings['colmap_binary']}")
     if should_prepare_data:
+        prepare_command = commands["prepare_nerfstudio_data"]
+        if data_prepare_command_name(prepare_command) == "prepare_nerfstudio_from_colmap.py":
+            print("# data prepare: custom COLMAP TXT -> Nerfstudio transforms exporter (multi-camera)")
+        else:
+            print("# data prepare: Nerfstudio ns-process-data images (single-camera/default)")
         print(f"$ {shlex.join(commands['prepare_nerfstudio_data'])}")
     else:
         print("# Nerfstudio data preparation skipped; transforms.json already exists.")
@@ -304,6 +319,7 @@ def build_report(
             "max_dataset_size": settings["max_dataset_size"],
             "process_options": settings["process_options"],
             "train_options": settings["train_options"],
+            "data_prepare_command": settings.get("data_prepare_command"),
         },
         "outputs": {
             "gsplat": relative_to(gsplat_dir, run_dir),
@@ -336,6 +352,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         should_prepare_data = True
 
     commands = build_backend_commands(settings["backend"], settings)
+    settings["data_prepare_command"] = data_prepare_command_name(commands["prepare_nerfstudio_data"])
 
     if args.dry_run:
         print_dry_run(commands, settings, should_prepare_data)

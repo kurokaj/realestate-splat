@@ -87,6 +87,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--colmap-mode", choices=["incremental", "global"], help="Override COLMAP mode on the remote run.")
     parser.add_argument("--matcher", choices=["exhaustive", "sequential", "vocab_tree"], help="Override COLMAP matcher.")
+    parser.add_argument(
+        "--colmap-single-camera",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override COLMAP ImageReader.single_camera. Use --colmap-single-camera as a fallback if per-image cameras break training.",
+    )
     parser.add_argument("--max-steps", type=int, help="Override training max steps.")
     parser.add_argument("--num-downscales", type=int, help="Override Nerfstudio data downscale count.")
     parser.add_argument("--backend", choices=["splatfacto", "raw_gsplat"], help="Training backend.")
@@ -162,6 +168,8 @@ def build_remote_python_command(args: argparse.Namespace, script_name: str, remo
             command.extend(["--mode", args.colmap_mode])
         if args.matcher:
             command.extend(["--matcher", args.matcher])
+        if args.colmap_single_camera is not None:
+            command.append("--single-camera" if args.colmap_single_camera else "--no-single-camera")
         if args.overwrite_remote:
             command.append("--overwrite")
     elif script_name == "run_training.py":
@@ -171,6 +179,8 @@ def build_remote_python_command(args: argparse.Namespace, script_name: str, remo
             command.extend(["--max-steps", str(args.max_steps)])
         if args.num_downscales is not None:
             command.extend(["--num-downscales", str(args.num_downscales)])
+        if args.overwrite_remote:
+            command.append("--overwrite-data")
     elif script_name == "export_scene.py":
         if args.backend:
             command.extend(["--backend", args.backend])

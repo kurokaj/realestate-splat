@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
+import sys
 from pathlib import Path
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Mapping, Optional
 
 from realestate_splat.cli import option_map_to_cli
+
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 def colmap_model_path_for_process_data(data_dir: Path, colmap_model_dir: Path) -> str:
@@ -26,7 +31,80 @@ def pixi_command(pixi_bin: str, nerfstudio_dir: Path, args: List[str]) -> List[s
     ]
 
 
+def count_cameras_in_text_model(colmap_model_dir: Path) -> Optional[int]:
+    candidate_dirs = [colmap_model_dir]
+    for parent in [colmap_model_dir, *colmap_model_dir.parents]:
+        if parent.name == "colmap":
+            candidate_dirs.append(parent / "sparse_txt")
+            break
+
+    for candidate_dir in candidate_dirs:
+        cameras_path = candidate_dir / "cameras.txt"
+        if not cameras_path.exists():
+            continue
+        count = 0
+        for raw_line in cameras_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if line and not line.startswith("#"):
+                count += 1
+        return count
+    return None
+
+
+def count_cameras_in_report(run_dir: Path) -> Optional[int]:
+    report_path = run_dir / "reports" / "reconstruction_report.json"
+    if not report_path.exists():
+        return None
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+    metrics = report.get("reconstruction_metrics") or {}
+    cameras = metrics.get("cameras")
+    if cameras is None:
+        return None
+    try:
+        return int(cameras)
+    except (TypeError, ValueError):
+        return None
+
+
+def should_use_custom_multicamera_prepare(settings: Mapping[str, Any]) -> bool:
+    data_dir = Path(str(settings["data_dir"]))
+    colmap_model_dir = Path(str(settings["colmap_model_dir"]))
+    run_dir = Path(str(settings.get("run_dir", data_dir.parent)))
+
+    camera_count = count_cameras_in_text_model(colmap_model_dir)
+    if camera_count is None:
+        camera_count = count_cameras_in_report(run_dir)
+    return camera_count is not None and camera_count > 1
+
+
+def build_custom_multicamera_process_data_command(settings: Mapping[str, Any]) -> List[str]:
+    script_path = REPO_ROOT / "scripts" / "prepare_nerfstudio_from_colmap.py"
+    args = [
+        str(settings.get("python_bin") or sys.executable),
+        str(script_path),
+        "--run",
+        str(settings["run_dir"]),
+        "--frames-dir",
+        str(settings["frames_dir"]),
+        "--data-dir",
+        str(settings["data_dir"]),
+        "--colmap-model-dir",
+        str(settings["colmap_model_dir"]),
+        "--num-downscales",
+        str(int(settings["num_downscales"])),
+        "--overwrite",
+    ]
+    return args
+
+
 def build_process_data_command(settings: Mapping[str, Any]) -> List[str]:
+    if should_use_custom_multicamera_prepare(settings):
+        return build_custom_multicamera_process_data_command(settings)
+
     data_dir = Path(str(settings["data_dir"]))
     colmap_model_dir = Path(str(settings["colmap_model_dir"]))
     num_downscales = int(settings["num_downscales"])
