@@ -28,6 +28,7 @@ import platform
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -54,6 +55,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "max_image_size": 3200,
     "option_namespace": "auto",
     "view_graph_calibrator": True,
+    "manifest_camera_groups": True,
     "sequential_overlap": 10,
     "export_text": True,
     "undistort": False,
@@ -150,6 +152,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="For global_mapper, copy the database and run view_graph_calibrator before mapping.",
+    )
+    parser.add_argument(
+        "--manifest-camera-groups",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="When image_manifest.json has multiple groups, rewrite the COLMAP database to one camera per group.",
     )
     parser.add_argument(
         "--sequential-overlap",
@@ -360,6 +368,7 @@ def build_settings(args: argparse.Namespace) -> Dict[str, Any]:
         "max_image_size": args.max_image_size,
         "option_namespace": args.option_namespace,
         "view_graph_calibrator": args.view_graph_calibrator,
+        "manifest_camera_groups": args.manifest_camera_groups,
         "sequential_overlap": args.sequential_overlap,
         "vocab_tree": str(args.vocab_tree) if args.vocab_tree is not None else None,
         "export_text": args.export_text,
@@ -655,6 +664,186 @@ def manifest_images_by_name(manifest: Mapping[str, Any]) -> Dict[str, Dict[str, 
         if image_name:
             by_name[str(image_name)] = dict(entry)
     return by_name
+
+
+def table_columns(connection: sqlite3.Connection, table: str) -> List[str]:
+    return [row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()]
+
+
+def has_table(connection: sqlite3.Connection, table: str) -> bool:
+    row = connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+    return row is not None
+
+
+def validate_required_table_columns(connection: sqlite3.Connection, required: Mapping[str, Sequence[str]]) -> None:
+    missing: List[str] = []
+    for table, columns in required.items():
+        if not has_table(connection, table):
+            missing.append(f"{table}.*")
+            continue
+        existing = set(table_columns(connection, table))
+        for column in columns:
+            if column not in existing:
+                missing.append(f"{table}.{column}")
+    if missing:
+        raise RuntimeError("COLMAP database schema is missing expected columns: " + ", ".join(missing))
+
+
+def apply_manifest_camera_groups_to_database(
+    *,
+    database_path: Path,
+    manifest: Mapping[str, Any],
+    logs_dir: Path,
+) -> CommandResult:
+    log_path = logs_dir / "apply_manifest_camera_groups.log"
+    started_at = utc_now()
+    start_time = time.monotonic()
+    print(f"\n$ apply_manifest_camera_groups {database_path}", flush=True)
+
+    with log_path.open("w", encoding="utf-8") as log_file:
+        log_file.write(f"$ apply_manifest_camera_groups {database_path}\n\n")
+        if not should_use_manifest_camera_groups(manifest):
+            log_file.write("No manifest camera grouping needed.\n")
+            finished_at = utc_now()
+            return CommandResult(
+                name="apply_manifest_camera_groups",
+                command=["apply_manifest_camera_groups", str(database_path)],
+                log_path=str(log_path),
+                returncode=0,
+                started_at=started_at,
+                finished_at=finished_at,
+                duration_seconds=round(time.monotonic() - start_time, 3),
+            )
+
+        manifest_by_name = manifest_images_by_name(manifest)
+        connection = sqlite3.connect(str(database_path))
+        try:
+            validate_required_table_columns(
+                connection,
+                {
+                    "cameras": ["camera_id", "model", "width", "height", "params", "prior_focal_length"],
+                    "images": ["image_id", "name", "camera_id", "frame_id"],
+                    "rigs": ["rig_id", "ref_sensor_id", "ref_sensor_type"],
+                    "frames": ["frame_id", "rig_id"],
+                    "frame_data": ["frame_id", "data_id", "sensor_id", "sensor_type"],
+                },
+            )
+
+            image_rows = connection.execute("SELECT image_id, name, camera_id FROM images ORDER BY image_id").fetchall()
+            if not image_rows:
+                raise RuntimeError("COLMAP database has no images after feature extraction.")
+
+            old_cameras = {
+                int(row[0]): row
+                for row in connection.execute(
+                    "SELECT camera_id, model, width, height, params, prior_focal_length FROM cameras ORDER BY camera_id"
+                ).fetchall()
+            }
+            groups: Dict[str, Dict[str, Any]] = {}
+            image_assignments: List[Tuple[int, str, str]] = []
+
+            for image_id, name, old_camera_id in image_rows:
+                entry = manifest_by_name.get(str(name))
+                if entry is None:
+                    raise RuntimeError(
+                        f"Image '{name}' exists in COLMAP database but is missing from reports/{IMAGE_MANIFEST_NAME}."
+                    )
+                if int(old_camera_id) not in old_cameras:
+                    raise RuntimeError(f"Image '{name}' references missing camera id {old_camera_id}.")
+
+                group_id = manifest_camera_group_id(entry)
+                group = groups.setdefault(
+                    group_id,
+                    {
+                        "id": group_id,
+                        "entry": entry,
+                        "sample_old_camera_id": int(old_camera_id),
+                        "image_count": 0,
+                    },
+                )
+                group["image_count"] += 1
+                image_assignments.append((int(image_id), str(name), group_id))
+
+            sorted_group_ids = sorted(groups)
+            group_camera_ids = {group_id: index + 1 for index, group_id in enumerate(sorted_group_ids)}
+            group_rig_ids = {group_id: index + 1 for index, group_id in enumerate(sorted_group_ids)}
+
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute("BEGIN")
+            connection.execute("DELETE FROM frame_data")
+            connection.execute("DELETE FROM frames")
+            if has_table(connection, "rig_sensors"):
+                connection.execute("DELETE FROM rig_sensors")
+            connection.execute("DELETE FROM rigs")
+            connection.execute("DELETE FROM cameras")
+
+            for group_id in sorted_group_ids:
+                old_camera = old_cameras[int(groups[group_id]["sample_old_camera_id"])]
+                camera_id = group_camera_ids[group_id]
+                connection.execute(
+                    "INSERT INTO cameras(camera_id, model, width, height, params, prior_focal_length) VALUES (?, ?, ?, ?, ?, ?)",
+                    (camera_id, old_camera[1], old_camera[2], old_camera[3], old_camera[4], old_camera[5]),
+                )
+                connection.execute(
+                    "INSERT INTO rigs(rig_id, ref_sensor_id, ref_sensor_type) VALUES (?, ?, ?)",
+                    (group_rig_ids[group_id], camera_id, 0),
+                )
+
+            for image_id, _name, group_id in image_assignments:
+                camera_id = group_camera_ids[group_id]
+                rig_id = group_rig_ids[group_id]
+                frame_id = image_id
+                connection.execute("UPDATE images SET camera_id=?, frame_id=? WHERE image_id=?", (camera_id, frame_id, image_id))
+                connection.execute("INSERT INTO frames(frame_id, rig_id) VALUES (?, ?)", (frame_id, rig_id))
+                connection.execute(
+                    "INSERT INTO frame_data(frame_id, data_id, sensor_id, sensor_type) VALUES (?, ?, ?, ?)",
+                    (frame_id, image_id, camera_id, 0),
+                )
+
+            if has_table(connection, "pose_priors"):
+                pose_columns = set(table_columns(connection, "pose_priors"))
+                if {"corr_sensor_id", "corr_sensor_type", "corr_data_id"}.issubset(pose_columns):
+                    for image_id, _name, group_id in image_assignments:
+                        connection.execute(
+                            "UPDATE pose_priors SET corr_sensor_id=?, corr_sensor_type=? WHERE corr_data_id=?",
+                            (group_camera_ids[group_id], 0, image_id),
+                        )
+
+            foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+            if foreign_key_errors:
+                raise RuntimeError(f"Manifest camera group rewrite left foreign key errors: {foreign_key_errors[:5]}")
+            connection.execute("COMMIT")
+            connection.execute("PRAGMA foreign_keys=ON")
+
+            for group_id in sorted_group_ids:
+                group = groups[group_id]
+                entry = group["entry"]
+                line = (
+                    f"{group_id}: camera_id={group_camera_ids[group_id]}, "
+                    f"rig_id={group_rig_ids[group_id]}, images={group['image_count']}, "
+                    f"role={entry.get('role')}, resolution={entry.get('width')}x{entry.get('height')}"
+                )
+                print(f"  {line}", flush=True)
+                log_file.write(line + "\n")
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            connection.close()
+
+    finished_at = utc_now()
+    return CommandResult(
+        name="apply_manifest_camera_groups",
+        command=["apply_manifest_camera_groups", str(database_path)],
+        log_path=str(log_path),
+        returncode=0,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_seconds=round(time.monotonic() - start_time, 3),
+    )
 
 
 def build_core_commands(
@@ -1290,9 +1479,12 @@ def print_dry_run(
             groups = build_camera_group_summary(image_manifest)
             if settings.get("single_camera"):
                 print("# manifest camera groups detected, but explicit --single-camera keeps one shared COLMAP camera.")
+            elif settings.get("manifest_camera_groups"):
+                print("# manifest camera groups detected; COLMAP runs with --ImageReader.single_camera 0")
+                print("# after feature extraction, the database will be rewritten to one camera/rig per manifest group.")
             else:
                 print("# manifest camera groups detected; COLMAP runs with --ImageReader.single_camera 0")
-                print("# COLMAP will keep rig/frame metadata valid and estimate separate camera intrinsics.")
+                print("# --no-manifest-camera-groups leaves COLMAP's per-image cameras untouched.")
             for group in groups:
                 print(
                     "#   manifest group {id}: {count} images, role={role}, resolution={width}x{height}".format(
@@ -1339,6 +1531,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         for name, command in core_commands:
             command_results.append(run_command(name, command, paths["logs_dir"]))
+            if (
+                name == "feature_extractor"
+                and should_use_manifest_camera_groups(image_manifest)
+                and not settings.get("single_camera")
+                and settings.get("manifest_camera_groups")
+            ):
+                command_results.append(
+                    apply_manifest_camera_groups_to_database(
+                        database_path=paths["database_path"],
+                        manifest=image_manifest,
+                        logs_dir=paths["logs_dir"],
+                    )
+                )
 
         selected_model = find_sparse_model(paths["sparse_dir"])
         if selected_model is None:

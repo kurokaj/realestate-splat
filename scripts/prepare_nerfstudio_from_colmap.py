@@ -308,6 +308,27 @@ def manifest_by_name(run_dir: Path) -> Dict[str, Dict[str, Any]]:
     }
 
 
+def manifest_camera_group_id(entry: Mapping[str, Any]) -> str:
+    explicit = entry.get("camera_group_id")
+    if explicit:
+        return str(explicit)
+    return "{}_{}x{}".format(entry.get("camera_group"), entry.get("width"), entry.get("height"))
+
+
+def validate_manifest_camera_count(cameras: Mapping[int, Camera], manifest: Mapping[str, Mapping[str, Any]]) -> None:
+    if not manifest:
+        return
+    manifest_group_ids = {manifest_camera_group_id(entry) for entry in manifest.values()}
+    if len(manifest_group_ids) <= 1:
+        return
+    if len(cameras) != len(manifest_group_ids):
+        raise SystemExit(
+            "COLMAP camera count does not match manifest camera groups. "
+            f"COLMAP cameras={len(cameras)}, manifest groups={len(manifest_group_ids)}. "
+            "Rerun COLMAP with manifest camera grouping enabled before training."
+        )
+
+
 def build_transforms(
     *,
     run_dir: Path,
@@ -316,6 +337,7 @@ def build_transforms(
     cameras: Mapping[int, Camera],
 ) -> Dict[str, Any]:
     manifest = manifest_by_name(run_dir)
+    validate_manifest_camera_count(cameras, manifest)
     frames: List[Dict[str, Any]] = []
     for image in images:
         camera = cameras.get(image.camera_id)
@@ -329,17 +351,21 @@ def build_transforms(
                 f"{image.name}: camera={camera.width}x{camera.height}, image={actual_width}x{actual_height}"
             )
 
+        manifest_entry = manifest.get(image.name)
+        group_id = manifest_camera_group_id(manifest_entry) if manifest_entry else None
+
         frame = {
             "file_path": f"images/{image.name}",
             "transform_matrix": colmap_pose_to_nerfstudio_transform(image),
             "colmap_image_id": image.image_id,
             "colmap_camera_id": image.camera_id,
+            "intrinsics_source": "colmap_camera",
             **camera_intrinsics(camera),
         }
-        manifest_entry = manifest.get(image.name)
         if manifest_entry:
             frame["role"] = manifest_entry.get("role")
             frame["camera_group"] = manifest_entry.get("camera_group")
+            frame["camera_group_id"] = group_id
             frame["location"] = manifest_entry.get("location")
             frame["source_id"] = manifest_entry.get("source_id")
         frames.append(frame)
@@ -353,6 +379,7 @@ def build_transforms(
             "registered_images": len(frames),
             "camera_count": len(cameras),
             "multi_camera": len(cameras) > 1,
+            "intrinsics_mode": "colmap_camera",
         },
     }
 
