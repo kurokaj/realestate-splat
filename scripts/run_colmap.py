@@ -722,12 +722,17 @@ def apply_manifest_camera_groups_to_database(
                 connection,
                 {
                     "cameras": ["camera_id", "model", "width", "height", "params", "prior_focal_length"],
-                    "images": ["image_id", "name", "camera_id", "frame_id"],
+                    "images": ["image_id", "name", "camera_id"],
                     "rigs": ["rig_id", "ref_sensor_id", "ref_sensor_type"],
                     "frames": ["frame_id", "rig_id"],
                     "frame_data": ["frame_id", "data_id", "sensor_id", "sensor_type"],
                 },
             )
+            images_columns = set(table_columns(connection, "images"))
+            log_file.write("Schema columns:\n")
+            for table in ["cameras", "images", "rigs", "frames", "frame_data", "pose_priors"]:
+                if has_table(connection, table):
+                    log_file.write(f"  {table}: {', '.join(table_columns(connection, table))}\n")
 
             image_rows = connection.execute("SELECT image_id, name, camera_id FROM images ORDER BY image_id").fetchall()
             if not image_rows:
@@ -793,7 +798,13 @@ def apply_manifest_camera_groups_to_database(
                 camera_id = group_camera_ids[group_id]
                 rig_id = group_rig_ids[group_id]
                 frame_id = image_id
-                connection.execute("UPDATE images SET camera_id=?, frame_id=? WHERE image_id=?", (camera_id, frame_id, image_id))
+                if "frame_id" in images_columns:
+                    connection.execute(
+                        "UPDATE images SET camera_id=?, frame_id=? WHERE image_id=?",
+                        (camera_id, frame_id, image_id),
+                    )
+                else:
+                    connection.execute("UPDATE images SET camera_id=? WHERE image_id=?", (camera_id, image_id))
                 connection.execute("INSERT INTO frames(frame_id, rig_id) VALUES (?, ?)", (frame_id, rig_id))
                 connection.execute(
                     "INSERT INTO frame_data(frame_id, data_id, sensor_id, sensor_type) VALUES (?, ?, ?, ?)",
