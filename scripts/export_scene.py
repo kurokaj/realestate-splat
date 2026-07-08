@@ -8,12 +8,14 @@ such as .splat can be added once the browser viewer target is fixed.
 from __future__ import annotations
 
 import argparse
+import html
 import json
+import re
 import shutil
 import shlex
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
@@ -38,6 +40,8 @@ DEFAULT_NERFSTUDIO_DIR = Path("/workspace/opt/nerfstudio")
 
 
 REPORT_NAME = "export_report.json"
+SPLAT_REPORT_JSON = "splat_report.json"
+SPLAT_REPORT_HTML = "splat_report.html"
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -174,6 +178,242 @@ def write_viewer_config(run_dir: Path, final_dir: Path, output_ply: Path) -> Pat
     return viewer_config_path
 
 
+def read_json(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def file_size_mb(path: Optional[Path]) -> Optional[float]:
+    if path is None or not path.exists():
+        return None
+    return round(path.stat().st_size / (1024 * 1024), 2)
+
+
+def parse_ply_vertex_count(path: Optional[Path]) -> Optional[int]:
+    if path is None or not path.exists():
+        return None
+    try:
+        with path.open("rb") as file:
+            for _ in range(200):
+                raw_line = file.readline()
+                if not raw_line:
+                    break
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                match = re.match(r"element\s+vertex\s+(\d+)", line)
+                if match:
+                    return int(match.group(1))
+                if line == "end_header":
+                    break
+    except OSError:
+        return None
+    return None
+
+
+def parse_training_downscale_factor(run_dir: Path) -> Optional[int]:
+    log_path = run_dir / "gsplat" / "logs" / "train_splatfacto.log"
+    if not log_path.exists():
+        return None
+    text = log_path.read_text(encoding="utf-8", errors="replace")
+    match = re.search(r"Auto image downscale factor of\s+(\d+)", text)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"downscale_factor=([0-9]+)", text)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def manifest_camera_resolutions(run_dir: Path, downscale_factor: Optional[int]) -> List[Dict[str, Any]]:
+    manifest = read_json(run_dir / "reports" / "image_manifest.json")
+    groups: Dict[str, Dict[str, Any]] = {}
+    factor = downscale_factor or 1
+    for entry in manifest.get("images") or []:
+        if not isinstance(entry, dict):
+            continue
+        group_id = entry.get("camera_group_id") or "{}_{}x{}".format(
+            entry.get("camera_group"),
+            entry.get("width"),
+            entry.get("height"),
+        )
+        group = groups.setdefault(
+            str(group_id),
+            {
+                "id": str(group_id),
+                "camera_group": entry.get("camera_group"),
+                "role": entry.get("role"),
+                "source_width": entry.get("width"),
+                "source_height": entry.get("height"),
+                "training_width": None,
+                "training_height": None,
+                "image_count": 0,
+                "locations": set(),
+            },
+        )
+        group["image_count"] += 1
+        if entry.get("location"):
+            group["locations"].add(str(entry["location"]))
+
+    output = []
+    for group in groups.values():
+        width = group.get("source_width")
+        height = group.get("source_height")
+        if isinstance(width, int) and isinstance(height, int):
+            group["training_width"] = max(1, width // factor)
+            group["training_height"] = max(1, height // factor)
+        group["locations"] = sorted(group["locations"])
+        output.append(group)
+    return sorted(output, key=lambda item: item["id"])
+
+
+def viewer_tier(splat_count: Optional[int]) -> Dict[str, Any]:
+    if splat_count is None:
+        return {"tier": "unknown", "detail": "PLY vertex count could not be read."}
+    if splat_count <= 500_000:
+        return {"tier": "web/mobile", "detail": "Within a common lightweight browser budget."}
+    if splat_count <= 1_500_000:
+        return {"tier": "desktop/browser", "detail": "Good desktop-quality range; mobile may need pruning."}
+    if splat_count <= 3_000_000:
+        return {"tier": "large/complex", "detail": "High-detail scene; expect heavier loading and rendering."}
+    return {"tier": "archive/heavy", "detail": "Very heavy for browser delivery without pruning or compression."}
+
+
+def table_rows(mapping: Mapping[str, Any]) -> str:
+    rows = []
+    for key, value in mapping.items():
+        rows.append(
+            "<tr><th>{key}</th><td>{value}</td></tr>".format(
+                key=html.escape(str(key).replace("_", " ")),
+                value=html.escape(str(value)),
+            )
+        )
+    return "\n".join(rows)
+
+
+def camera_resolution_rows(groups: Sequence[Mapping[str, Any]]) -> str:
+    if not groups:
+        return '<tr><td colspan="7">No camera resolution manifest found.</td></tr>'
+    rows = []
+    for group in groups:
+        source = "{}x{}".format(group.get("source_width"), group.get("source_height"))
+        training = "{}x{}".format(group.get("training_width"), group.get("training_height"))
+        rows.append(
+            "<tr><td>{id}</td><td>{role}</td><td>{source}</td><td>{training}</td><td>{count}</td><td>{locations}</td></tr>".format(
+                id=html.escape(str(group.get("id"))),
+                role=html.escape(str(group.get("role"))),
+                source=html.escape(source),
+                training=html.escape(training),
+                count=html.escape(str(group.get("image_count"))),
+                locations=html.escape(", ".join(group.get("locations") or [])),
+            )
+        )
+    return "\n".join(rows)
+
+
+def write_splat_report_html(path: Path, report: Mapping[str, Any]) -> None:
+    summary = report.get("summary") or {}
+    training = report.get("training") or {}
+    export = report.get("export") or {}
+    viewer = report.get("viewer") or {}
+    document = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Splat Report</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 32px; color: #1f2933; }}
+    main {{ max-width: 1100px; }}
+    table {{ border-collapse: collapse; width: 100%; margin: 12px 0 28px; }}
+    th, td {{ border: 1px solid #d8dee4; padding: 8px 10px; text-align: left; vertical-align: top; }}
+    th {{ background: #f6f8fa; width: 260px; }}
+    h1, h2 {{ margin-bottom: 8px; }}
+    .note {{ color: #52606d; }}
+  </style>
+</head>
+<body>
+<main>
+  <h1>Splat Report</h1>
+  <p class="note">Generated {created_at}</p>
+
+  <h2>Summary</h2>
+  <table>{summary_rows}</table>
+
+  <h2>Training Resolution</h2>
+  <table>{training_rows}</table>
+  <table>
+    <tr><th>Camera Group</th><th>Role</th><th>Source Resolution</th><th>Training Resolution</th><th>Images</th><th>Locations</th></tr>
+    {camera_rows}
+  </table>
+
+  <h2>Export</h2>
+  <table>{export_rows}</table>
+
+  <h2>Viewer Budget</h2>
+  <table>{viewer_rows}</table>
+</main>
+</body>
+</html>
+""".format(
+        created_at=html.escape(str(report.get("created_at"))),
+        summary_rows=table_rows(summary),
+        training_rows=table_rows(training),
+        camera_rows=camera_resolution_rows(report.get("camera_resolutions") or []),
+        export_rows=table_rows(export),
+        viewer_rows=table_rows(viewer),
+    )
+    path.write_text(document, encoding="utf-8")
+
+
+def build_splat_report(
+    *,
+    run_dir: Path,
+    output_ply: Path,
+    source_ply: Optional[Path],
+    export_report: Mapping[str, Any],
+    finished_at: str,
+) -> Dict[str, Any]:
+    training_report = read_json(run_dir / "reports" / "training_report.json")
+    reconstruction_report = read_json(run_dir / "reports" / "reconstruction_report.json")
+    downscale_factor = parse_training_downscale_factor(run_dir)
+    splat_count = parse_ply_vertex_count(output_ply)
+    tier = viewer_tier(splat_count)
+    return {
+        "schema_version": 1,
+        "created_at": finished_at,
+        "run": str(run_dir),
+        "summary": {
+            "status": export_report.get("status"),
+            "splat_count": splat_count,
+            "scene_ply_mb": file_size_mb(output_ply),
+            "viewer_tier": tier["tier"],
+            "training_downscale_factor": downscale_factor,
+        },
+        "training": {
+            "method": (training_report.get("settings") or {}).get("method"),
+            "max_steps": (training_report.get("settings") or {}).get("max_steps"),
+            "num_downscales_generated": (training_report.get("settings") or {}).get("num_downscales"),
+            "image_downscale_factor_used": downscale_factor,
+            "selected_config": training_report.get("selected_config"),
+            "registered_images": (reconstruction_report.get("reconstruction_metrics") or {}).get("registered_images"),
+            "hero_registered": ((reconstruction_report.get("manifest_reconstruction") or {}).get("hero") or {}).get("registered"),
+            "hero_dropped": ((reconstruction_report.get("manifest_reconstruction") or {}).get("hero") or {}).get("dropped"),
+        },
+        "camera_resolutions": manifest_camera_resolutions(run_dir, downscale_factor),
+        "export": {
+            "scene_ply": relative_to(output_ply, run_dir),
+            "source_ply": relative_to(source_ply, run_dir),
+            "scene_ply_mb": file_size_mb(output_ply),
+            "source_ply_mb": file_size_mb(source_ply),
+            "splat_count_from_ply_vertices": splat_count,
+        },
+        "viewer": tier,
+    }
+
+
 def print_dry_run(command: Sequence[str], output_ply: Path) -> None:
     print("Dry run. No files will be created or modified.\n")
     print(f"$ {shlex.join(command)}")
@@ -216,6 +456,8 @@ def build_report(
             "scene_ply": relative_to(output_ply, run_dir),
             "viewer_config_json": relative_to(viewer_config, run_dir),
             "export_report_json": relative_to(run_dir / "reports" / REPORT_NAME, run_dir),
+            "splat_report_json": relative_to(run_dir / "reports" / SPLAT_REPORT_JSON, run_dir),
+            "splat_report_html": relative_to(run_dir / "reports" / SPLAT_REPORT_HTML, run_dir),
         },
         "environment": environment_report({"pixi": pixi_bin, "nerfstudio_dir": str(nerfstudio_dir)}),
         "commands": command_results_to_json(commands),
@@ -315,8 +557,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     report_path = reports_dir / REPORT_NAME
     write_json(report_path, report)
+    splat_report = build_splat_report(
+        run_dir=run_dir,
+        output_ply=output_ply,
+        source_ply=source_ply,
+        export_report=report,
+        finished_at=finished_at,
+    )
+    write_json(reports_dir / SPLAT_REPORT_JSON, splat_report)
+    write_splat_report_html(reports_dir / SPLAT_REPORT_HTML, splat_report)
     print(f"\nExport complete. Canonical scene: {output_ply}")
     print(f"Report: {report_path}")
+    print(f"Splat report: {reports_dir / SPLAT_REPORT_HTML}")
     return 0
 
 
