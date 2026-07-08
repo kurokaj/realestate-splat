@@ -20,12 +20,12 @@ if [ -x /usr/bin/gcc-11 ] && [ -x /usr/bin/g++-11 ]; then
   export CUDAHOSTCXX=/usr/bin/g++-11
 fi
 
-# Build tiny-cuda-nn / PyTorch CUDA extensions for both common Verda GPU
-# families used by this project:
+# Build tiny-cuda-nn / PyTorch CUDA extensions for common Verda GPU families:
+#   7.0 = Tesla V100 / Volta
 #   8.6 = RTX A6000 / Ampere
 #   8.9 = RTX 6000 Ada / Ada
-export TCNN_CUDA_ARCHITECTURES="86;89"
-export TORCH_CUDA_ARCH_LIST="8.6;8.9"
+export TCNN_CUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES:-70;86;89}"
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-7.0;8.6;8.9}"
 
 echo "TCNN_CUDA_ARCHITECTURES: ${TCNN_CUDA_ARCHITECTURES}"
 echo "TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST}"
