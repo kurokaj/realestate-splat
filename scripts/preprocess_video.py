@@ -145,6 +145,9 @@ class FrameRecord:
     output_file: Optional[str] = None
     source_id: Optional[str] = None
     source_video: Optional[str] = None
+    source_image: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
 
 
 @dataclass
@@ -183,6 +186,17 @@ class HeroImageRecord:
 class VideoRunResult:
     source: VideoSource
     video_info: VideoInfo
+    records: List[FrameRecord]
+    selected_initial_count: int
+    selected_final: List[FrameRecord]
+    saved_count: int
+    warnings: List[str]
+
+
+@dataclass
+class CoverageImageRunResult:
+    source_id: str
+    path: str
     records: List[FrameRecord]
     selected_initial_count: int
     selected_final: List[FrameRecord]
@@ -381,10 +395,6 @@ def discover_video_sources(args: argparse.Namespace) -> List[VideoSource]:
         for path in args.input_dir.iterdir()
         if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES
     )
-    if not video_paths:
-        suffixes = ", ".join(sorted(VIDEO_SUFFIXES))
-        raise SystemExit(f"No videos found in {args.input_dir}. Expected one of: {suffixes}")
-
     sources = [VideoSource(source_id=sanitize_source_id(path.stem), path=path) for path in video_paths]
     seen: Dict[str, Path] = {}
     for source in sources:
@@ -396,6 +406,14 @@ def discover_video_sources(args: argparse.Namespace) -> List[VideoSource]:
             )
         seen[source.source_id] = source.path
     return sources
+
+
+def discover_coverage_images(input_dir: Path) -> List[Path]:
+    return sorted(
+        path
+        for path in input_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
+    )
 
 
 def discover_hero_images(input_dir: Path) -> List[Tuple[str, Path]]:
@@ -927,6 +945,124 @@ def process_hero_images(
     return records
 
 
+def coverage_image_warnings(records: Sequence[FrameRecord], selected_final: Sequence[FrameRecord], settings: Dict[str, Any]) -> List[str]:
+    warnings: List[str] = []
+    candidate_count = len(records)
+    selected_count = len(selected_final)
+    rejection_counts = count_rejections(records)
+
+    if selected_count == 0 and candidate_count > 0:
+        warnings.append("no_selected_coverage_images")
+    elif selected_count < int(settings["target_min"]) and candidate_count >= int(settings["target_min"]):
+        warnings.append("too_few_selected_coverage_images")
+
+    if rejection_counts.get("trimmed_after_target_max", 0) > 0:
+        warnings.append("coverage_images_trimmed_to_target_max")
+
+    if candidate_count > 0:
+        blur_rate = rejection_counts.get("blur", 0) / candidate_count
+        duplicate_rate = rejection_counts.get("duplicate", 0) / candidate_count
+        if blur_rate >= 0.35:
+            warnings.append("high_coverage_image_blur_rate")
+        if duplicate_rate >= 0.50:
+            warnings.append("high_coverage_image_duplicate_rate")
+
+    return warnings
+
+
+def process_coverage_images(
+    image_paths: Sequence[Path],
+    out_dir: Path,
+    settings: Dict[str, Any],
+) -> CoverageImageRunResult:
+    source_id = "coverage_images"
+    records: List[FrameRecord] = []
+    selected_initial: List[FrameRecord] = []
+    last_selected_hash: Optional[int] = None
+    last_selected_signature: Optional[Any] = None
+
+    for sequence, image_path in enumerate(image_paths, start=1):
+        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if image is None:
+            raise SystemExit(f"Could not read coverage image: {image_path}")
+
+        metrics, ahash_value, signature = score_frame(image)
+        reject_reason = first_quality_rejection(metrics, settings)
+        hash_distance_value: Optional[int] = None
+        pixel_difference_value: Optional[float] = None
+
+        if reject_reason is None and last_selected_hash is not None and last_selected_signature is not None:
+            hash_distance_value = hamming_distance(ahash_value, last_selected_hash)
+            pixel_difference_value = pixel_difference(signature, last_selected_signature)
+            if (
+                hash_distance_value <= int(settings["duplicate_hash_threshold"])
+                and pixel_difference_value <= float(settings["duplicate_pixel_threshold"])
+            ):
+                reject_reason = "duplicate"
+
+        height, width = image.shape[:2]
+        record = FrameRecord(
+            frame_index=sequence,
+            timestamp_seconds=float(sequence - 1),
+            blur_score=round(metrics["blur_score"], 3),
+            brightness=round(metrics["brightness"], 3),
+            contrast=round(metrics["contrast"], 3),
+            entropy=round(metrics["entropy"], 3),
+            ahash_hex=f"{ahash_value:016x}",
+            selected_initial=reject_reason is None,
+            reject_reason=reject_reason,
+            quality_score=quality_score(metrics, settings),
+            hash_distance_to_previous_selected=hash_distance_value,
+            pixel_difference_to_previous_selected=(
+                round(pixel_difference_value, 5) if pixel_difference_value is not None else None
+            ),
+            source_id=source_id,
+            source_image=str(image_path),
+            width=int(width),
+            height=int(height),
+        )
+        records.append(record)
+
+        if reject_reason is None:
+            selected_initial.append(record)
+            last_selected_hash = ahash_value
+            last_selected_signature = signature
+
+    target_max = int(settings["target_max"])
+    if len(selected_initial) > target_max:
+        selected_ids = {id(record) for record in best_quality_frames(selected_initial, target_max)}
+    else:
+        selected_ids = {id(record) for record in selected_initial}
+
+    selected_final: List[FrameRecord] = []
+    for record in records:
+        if id(record) in selected_ids:
+            record.selected_final = True
+            record.selected_by = "quality"
+            selected_final.append(record)
+        elif record.selected_initial:
+            record.reject_reason = "trimmed_after_target_max"
+
+    for sequence, record in enumerate(selected_final, start=1):
+        source_path = Path(record.source_image or "")
+        suffix = source_path.suffix.lower() if source_path.suffix.lower() in IMAGE_SUFFIXES else ".jpg"
+        record.output_file = f"frames_selected/image_{sequence:06d}{suffix}"
+        output_path = out_dir / record.output_file
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, output_path)
+
+    warnings = coverage_image_warnings(records, selected_final, settings)
+    return CoverageImageRunResult(
+        source_id=source_id,
+        path=str(out_dir),
+        records=records,
+        selected_initial_count=len(selected_initial),
+        selected_final=selected_final,
+        saved_count=len(selected_final),
+        warnings=warnings,
+    )
+
+
 def percentile(values: Sequence[float], q: float) -> Optional[float]:
     if not values:
         return None
@@ -1181,6 +1317,38 @@ def build_video_summary(result: VideoRunResult, settings: Dict[str, Any]) -> Dic
     }
 
 
+def build_empty_coverage_image_summary() -> Dict[str, Any]:
+    return {
+        "source_id": "coverage_images",
+        "image_count": 0,
+        "selected_image_count": 0,
+        "selected_initial_count": 0,
+        "rejected_image_count": 0,
+        "rejections": {},
+        "blur_score_distribution": metric_summary([], "blur_score"),
+        "brightness_distribution": metric_summary([], "brightness"),
+        "contrast_distribution": metric_summary([], "contrast"),
+        "entropy_distribution": metric_summary([], "entropy"),
+        "warnings": [],
+    }
+
+
+def build_coverage_image_summary(result: CoverageImageRunResult) -> Dict[str, Any]:
+    return {
+        "source_id": result.source_id,
+        "image_count": len(result.records),
+        "selected_image_count": len(result.selected_final),
+        "selected_initial_count": result.selected_initial_count,
+        "rejected_image_count": len(result.records) - len(result.selected_final),
+        "rejections": count_rejections(result.records),
+        "blur_score_distribution": metric_summary(result.records, "blur_score"),
+        "brightness_distribution": metric_summary(result.records, "brightness"),
+        "contrast_distribution": metric_summary(result.records, "contrast"),
+        "entropy_distribution": metric_summary(result.records, "entropy"),
+        "warnings": result.warnings,
+    }
+
+
 def hero_summary(hero_records: Sequence[HeroImageRecord]) -> Dict[str, Any]:
     by_location: Dict[str, int] = {}
     for record in hero_records:
@@ -1219,6 +1387,30 @@ def image_manifest_entry_for_video(record: FrameRecord, video_info: VideoInfo) -
     }
 
 
+def image_manifest_entry_for_coverage_image(record: FrameRecord) -> Dict[str, Any]:
+    if record.output_file is None:
+        raise SystemExit("Selected coverage image is missing output_file.")
+    output_path = Path(record.output_file)
+    return {
+        "image_name": output_path.name,
+        "path": record.output_file,
+        "role": "coverage",
+        "source_id": record.source_id,
+        "location": record.source_id,
+        "source_path": record.source_image,
+        "camera_group": "coverage",
+        "width": record.width,
+        "height": record.height,
+        "metrics": {
+            "blur_score": round(record.blur_score, 3),
+            "brightness": round(record.brightness, 3),
+            "contrast": round(record.contrast, 3),
+            "entropy": round(record.entropy, 3),
+            "quality_score": record.quality_score,
+        },
+    }
+
+
 def image_manifest_entry_for_hero(record: HeroImageRecord) -> Dict[str, Any]:
     output_path = Path(record.output_file)
     return {
@@ -1247,12 +1439,18 @@ def camera_group_key(entry: Mapping[str, Any]) -> str:
 
 def build_image_manifest(
     results: Sequence[VideoRunResult],
+    coverage_image_result: Optional[CoverageImageRunResult],
     hero_records: Sequence[HeroImageRecord],
 ) -> Dict[str, Any]:
     images: List[Dict[str, Any]] = []
     for result in results:
         for record in result.selected_final:
             images.append(image_manifest_entry_for_video(record, result.video_info))
+    if coverage_image_result is not None:
+        images.extend(
+            image_manifest_entry_for_coverage_image(record)
+            for record in coverage_image_result.selected_final
+        )
     images.extend(image_manifest_entry_for_hero(record) for record in hero_records)
 
     groups: Dict[str, Dict[str, Any]] = {}
@@ -1305,6 +1503,7 @@ def merge_count_maps(items: Iterable[Dict[str, int]]) -> Dict[str, int]:
 def build_multi_capture_report(
     input_dir: Path,
     results: Sequence[VideoRunResult],
+    coverage_image_result: Optional[CoverageImageRunResult],
     hero_records: Sequence[HeroImageRecord],
     settings: Dict[str, Any],
     out_dir: Path,
@@ -1313,6 +1512,12 @@ def build_multi_capture_report(
 ) -> Dict[str, Any]:
     all_records = [record for result in results for record in result.records]
     all_selected = [record for result in results for record in result.selected_final]
+    coverage_image_records = list(coverage_image_result.records if coverage_image_result is not None else [])
+    selected_coverage_images = list(
+        coverage_image_result.selected_final if coverage_image_result is not None else []
+    )
+    all_quality_records = all_records + coverage_image_records
+    all_selected_coverage = all_selected + selected_coverage_images
     outputs = {
         "frames_selected": "frames_selected",
         "capture_report_json": relative_to(reports_dir / REPORT_FILENAMES["capture_json"], out_dir),
@@ -1320,42 +1525,57 @@ def build_multi_capture_report(
         "gpu_recommendation_json": relative_to(reports_dir / REPORT_FILENAMES["gpu_json"], out_dir),
         "image_manifest_json": relative_to(reports_dir / REPORT_FILENAMES["image_manifest_json"], out_dir),
     }
-    selection_counts = selected_by_counts(all_selected)
+    selection_counts = selected_by_counts(all_selected_coverage)
     return {
         "schema_version": 1,
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "input": {
-            "mode": "project_videos",
+            "mode": "project_media",
             "input_dir": str(input_dir),
             "video_count": len(results),
+            "coverage_image_count": len(coverage_image_records),
             "hero_image_count": len(hero_records),
             "videos": [
                 {"source_id": result.source.source_id, "path": str(result.source.path)}
                 for result in results
+            ],
+            "coverage_images": [
+                str(record.source_image)
+                for record in coverage_image_records
             ],
             "hero_dir": str(input_dir / "hero"),
         },
         "settings": settings,
         "summary": {
             "candidate_frame_count": len(all_records),
+            "coverage_image_candidate_count": len(coverage_image_records),
             "selected_frame_count": len(all_selected),
+            "selected_coverage_image_count": len(selected_coverage_images),
             "hero_image_count": len(hero_records),
-            "total_image_count": len(all_selected) + len(hero_records),
+            "total_image_count": len(all_selected_coverage) + len(hero_records),
             "selected_by": selection_counts,
             "coverage_fallback_frame_count": selection_counts.get("coverage_fallback", 0),
-            "rejected_frame_count": len(all_records) - len(all_selected),
-            "rejections": merge_count_maps(count_rejections(result.records) for result in results),
-            "blur_score_distribution": metric_summary(all_records, "blur_score"),
-            "brightness_distribution": metric_summary(all_records, "brightness"),
-            "contrast_distribution": metric_summary(all_records, "contrast"),
-            "entropy_distribution": metric_summary(all_records, "entropy"),
+            "rejected_frame_count": len(all_quality_records) - len(all_selected_coverage),
+            "rejections": merge_count_maps(
+                [count_rejections(result.records) for result in results]
+                + ([count_rejections(coverage_image_records)] if coverage_image_result is not None else [])
+            ),
+            "blur_score_distribution": metric_summary(all_quality_records, "blur_score"),
+            "brightness_distribution": metric_summary(all_quality_records, "brightness"),
+            "contrast_distribution": metric_summary(all_quality_records, "contrast"),
+            "entropy_distribution": metric_summary(all_quality_records, "entropy"),
         },
         "videos": [build_video_summary(result, settings) for result in results],
+        "coverage_images": (
+            build_coverage_image_summary(coverage_image_result)
+            if coverage_image_result is not None
+            else build_empty_coverage_image_summary()
+        ),
         "hero": hero_summary(hero_records),
         "hero_images": [asdict(record) for record in hero_records],
         "warnings": list(warnings),
         "outputs": outputs,
-        "frames": [frame_record_to_dict(record) for record in all_records],
+        "frames": [frame_record_to_dict(record) for record in all_quality_records],
     }
 
 
@@ -1588,6 +1808,44 @@ def video_summary_rows(report: Dict[str, Any]) -> str:
                 warnings=html.escape(", ".join(video.get("warnings") or [])),
             )
         )
+    return "\n".join(rows) or '<tr><td colspan="9">No videos found.</td></tr>'
+
+
+def coverage_image_rows(report: Dict[str, Any]) -> str:
+    coverage_images = report.get("coverage_images") or {}
+    warnings = coverage_images.get("warnings") or []
+    return table_rows(
+        {
+            "candidate_images": coverage_images.get("image_count", 0),
+            "selected_images": coverage_images.get("selected_image_count", 0),
+            "selected_initial": coverage_images.get("selected_initial_count", 0),
+            "rejected_images": coverage_images.get("rejected_image_count", 0),
+            "warnings": ", ".join(warnings) if warnings else "",
+        }
+    )
+
+
+def coverage_image_metric_table(report: Dict[str, Any]) -> str:
+    coverage_images = report.get("coverage_images") or {}
+    metric_names = [
+        ("Blur", "blur_score_distribution"),
+        ("Brightness", "brightness_distribution"),
+        ("Contrast", "contrast_distribution"),
+        ("Entropy", "entropy_distribution"),
+    ]
+    rows = []
+    for label, key in metric_names:
+        values = coverage_images.get(key) or {}
+        rows.append(
+            "<tr><th>{}</th><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+                html.escape(label),
+                html.escape(str(values.get("min"))),
+                html.escape(str(values.get("p10"))),
+                html.escape(str(values.get("p50"))),
+                html.escape(str(values.get("p90"))),
+                html.escape(str(values.get("max"))),
+            )
+        )
     return "\n".join(rows)
 
 
@@ -1643,9 +1901,11 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
         {
             "input_dir": report["input"]["input_dir"],
             "video_count": report["input"]["video_count"],
+            "coverage_images": report["summary"]["selected_coverage_image_count"],
             "hero_images": report["summary"]["hero_image_count"],
             "total_images": report["summary"]["total_image_count"],
             "candidate_frames": report["summary"]["candidate_frame_count"],
+            "coverage_image_candidates": report["summary"]["coverage_image_candidate_count"],
             "selected_frames": report["summary"]["selected_frame_count"],
             "coverage_fallback_frames": report["summary"]["coverage_fallback_frame_count"],
             "rejected_frames": report["summary"]["rejected_frame_count"],
@@ -1834,6 +2094,14 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
     {video_rows}
   </table>
 
+  <h2>Coverage Images</h2>
+  <p class="note">Root-level images are quality checked as coverage images. They stay separate from hero photos and use the coverage camera group.</p>
+  <table>{coverage_image_rows}</table>
+  <table>
+    <tr><th>Metric</th><th>Min</th><th>P10</th><th>P50</th><th>P90</th><th>Max</th></tr>
+    {coverage_image_metric_rows}
+  </table>
+
   <h2>Hero Images</h2>
   <p class="note">Hero photos are copied from <code>hero/&lt;location&gt;/</code> into <code>frames_selected/</code> and marked as a separate camera group for COLMAP.</p>
   <table>
@@ -1874,6 +2142,8 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
         created_at=html.escape(str(report["created_at"])),
         summary_rows=summary_rows,
         video_rows=video_summary_rows(report),
+        coverage_image_rows=coverage_image_rows(report),
+        coverage_image_metric_rows=coverage_image_metric_table(report),
         hero_rows=hero_location_rows(report),
         hero_metric_rows=hero_metric_table(report),
         warning_html=warning_html,
@@ -1916,8 +2186,24 @@ def representative_video_info(results: Sequence[VideoRunResult]) -> VideoInfo:
     )
 
 
-def representative_image_info(results: Sequence[VideoRunResult], hero_records: Sequence[HeroImageRecord]) -> VideoInfo:
+def representative_image_info(
+    results: Sequence[VideoRunResult],
+    coverage_image_result: Optional[CoverageImageRunResult],
+    hero_records: Sequence[HeroImageRecord],
+) -> VideoInfo:
     candidates = list(result.video_info for result in results)
+    if coverage_image_result is not None:
+        for record in coverage_image_result.selected_final:
+            candidates.append(
+                VideoInfo(
+                    path=record.source_image or "",
+                    fps=0.0,
+                    frame_count=1,
+                    duration_seconds=None,
+                    width=int(record.width or 0),
+                    height=int(record.height or 0),
+                )
+            )
     for record in hero_records:
         candidates.append(
             VideoInfo(
@@ -1929,18 +2215,30 @@ def representative_image_info(results: Sequence[VideoRunResult], hero_records: S
                 height=record.height,
             )
         )
+    if not candidates:
+        return VideoInfo(path="", fps=0.0, frame_count=0, duration_seconds=None, width=0, height=0)
     return max(candidates, key=lambda info: (info.width * info.height, info.width, info.height))
 
 
-def aggregate_warnings(results: Sequence[VideoRunResult], settings: Dict[str, Any]) -> List[str]:
+def aggregate_warnings(
+    results: Sequence[VideoRunResult],
+    coverage_image_result: Optional[CoverageImageRunResult],
+    settings: Dict[str, Any],
+) -> List[str]:
     warnings = {warning for result in results for warning in result.warnings}
+    if coverage_image_result is not None:
+        warnings.update(coverage_image_result.warnings)
     total_selected = sum(len(result.selected_final) for result in results)
+    if coverage_image_result is not None:
+        total_selected += len(coverage_image_result.selected_final)
     if total_selected == 0:
-        warnings.add("no_selected_frames")
+        warnings.add("no_selected_coverage_media")
     elif total_selected < int(settings["target_min"]):
-        warnings.add("too_few_selected_frames_total")
+        warnings.add("too_few_selected_coverage_media_total")
     if any("selected_frames_trimmed_to_target_max" in result.warnings for result in results):
         warnings.add("one_or_more_videos_trimmed_to_target_max")
+    if coverage_image_result is not None and "coverage_images_trimmed_to_target_max" in coverage_image_result.warnings:
+        warnings.add("coverage_images_trimmed_to_target_max")
     return sorted(warnings)
 
 
@@ -1948,6 +2246,7 @@ def write_run_config(
     out_dir: Path,
     args: argparse.Namespace,
     sources: Sequence[VideoSource],
+    coverage_image_result: Optional[CoverageImageRunResult],
     hero_records: Sequence[HeroImageRecord],
     settings: Dict[str, Any],
 ) -> Path:
@@ -1957,11 +2256,21 @@ def write_run_config(
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "command": " ".join(sys.argv),
         "input": {
-            "mode": "project_videos",
+            "mode": "project_media",
             "input_dir": str(args.input_dir),
             "videos": [
                 {"source_id": source.source_id, "path": str(source.path)}
                 for source in sources
+            ],
+            "coverage_images": [
+                {
+                    "source_id": record.source_id,
+                    "path": record.source_image,
+                    "output_file": record.output_file,
+                    "selected": record.selected_final,
+                    "reject_reason": record.reject_reason,
+                }
+                for record in (coverage_image_result.records if coverage_image_result is not None else [])
             ],
             "hero_dir": str(args.input_dir / "hero"),
             "hero_images": [
@@ -1988,7 +2297,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     settings = build_settings(args)
     validate_args(args, settings)
     sources = discover_video_sources(args)
+    coverage_image_inputs = discover_coverage_images(args.input_dir)
     hero_inputs = discover_hero_images(args.input_dir)
+    if not sources and not coverage_image_inputs:
+        video_suffixes = ", ".join(sorted(VIDEO_SUFFIXES))
+        image_suffixes = ", ".join(sorted(IMAGE_SUFFIXES))
+        raise SystemExit(
+            f"No coverage videos or root-level coverage images found in {args.input_dir}. "
+            f"Expected videos ({video_suffixes}) or images ({image_suffixes})."
+        )
 
     out_dir = resolve_output_dir(args, sources)
     frames_dir, reports_dir = prepare_output_dirs(out_dir, args.overwrite)
@@ -2002,16 +2319,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         for source in sources
     ]
+    coverage_image_result = (
+        process_coverage_images(coverage_image_inputs, out_dir, settings)
+        if coverage_image_inputs
+        else None
+    )
     hero_records = process_hero_images(hero_inputs, out_dir, settings)
-    image_manifest = build_image_manifest(results, hero_records)
+    image_manifest = build_image_manifest(results, coverage_image_result, hero_records)
 
-    warnings = aggregate_warnings(results, settings)
+    warnings = aggregate_warnings(results, coverage_image_result, settings)
     saved_count = sum(result.saved_count for result in results)
-    total_image_count = saved_count + len(hero_records)
-    gpu_report = gpu_recommendation(total_image_count, representative_image_info(results, hero_records), warnings)
+    selected_coverage_image_count = coverage_image_result.saved_count if coverage_image_result is not None else 0
+    total_image_count = saved_count + selected_coverage_image_count + len(hero_records)
+    gpu_report = gpu_recommendation(
+        total_image_count,
+        representative_image_info(results, coverage_image_result, hero_records),
+        warnings,
+    )
     capture_report = build_multi_capture_report(
         input_dir=args.input_dir,
         results=results,
+        coverage_image_result=coverage_image_result,
         hero_records=hero_records,
         settings=settings,
         out_dir=out_dir,
@@ -2023,12 +2351,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     write_json(reports_dir / REPORT_FILENAMES["image_manifest_json"], image_manifest)
     write_json(reports_dir / REPORT_FILENAMES["gpu_json"], gpu_report)
     write_html_report(capture_report, gpu_report, reports_dir)
-    write_run_config(out_dir, args, sources, hero_records, settings)
+    write_run_config(out_dir, args, sources, coverage_image_result, hero_records, settings)
 
-    print(f"Processed video directory: {args.input_dir}")
-    print("Videos: " + ", ".join(source.source_id for source in sources))
+    print(f"Processed media directory: {args.input_dir}")
+    print("Videos: " + (", ".join(source.source_id for source in sources) if sources else "none"))
     print(f"Candidate frames scored: {sum(len(result.records) for result in results)}")
     print(f"Selected frames written: {saved_count}")
+    print(f"Coverage images checked: {len(coverage_image_inputs)}")
+    print(f"Coverage images copied: {selected_coverage_image_count}")
     print(f"Hero images copied: {len(hero_records)}")
     print(f"Total images for COLMAP/training: {total_image_count}")
     print(f"Frames: {out_dir / 'frames_selected'}")

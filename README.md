@@ -1,16 +1,21 @@
 # Buildvision3D
 
-Script-first tooling for turning real estate capture video into selected frames and reports for later Gaussian splatting.
+Script-first tooling for turning real estate capture videos or image sets into selected frames and reports for later Gaussian splatting.
 
 ## Milestone 1: local preprocessing
 
-Put future source videos in a project folder:
+Put future source videos and optional root-level coverage images in a project folder. Keep high-detail hero photos under `hero/` so they stay separate from normal coverage images:
 
 ```text
 data/raw/<splat_project_name>/
   kitchen.mp4
   living_room.mp4
   bedroom.mp4
+  coverage_photo_001.jpg
+  coverage_photo_002.jpg
+  hero/
+    kitchen/
+      hero_001.jpg
 ```
 
 Install the local dependencies with conda:
@@ -51,11 +56,13 @@ runs/apartment_001/
 ```
 
 It does not create a raw frame cache. Only final selected frames are written.
-All selected frames from the project videos go into one `frames_selected/`
-folder for a single downstream COLMAP and splatfacto run. The HTML report
-summarizes each source video and the combined selected-frame count. Use
+All selected frames from the project videos and selected root-level coverage
+images go into one `frames_selected/` folder for a single downstream COLMAP and
+splatfacto run. The HTML report summarizes each source video, the coverage
+image quality checks, and the combined selected-image count. Use
 `--out runs/custom_name` to override the inferred run directory. Selection
-settings such as `--target-max` apply per source video.
+settings such as `--target-max` apply per source video and to the root coverage
+image set.
 
 For the current toy parking-garage capture, use:
 

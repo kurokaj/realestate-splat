@@ -560,13 +560,18 @@ realestate-splat/
 
 Every scene run should follow this structure:
 
-Source capture videos should live outside the run directory:
+Source capture videos and optional root-level coverage images should live outside the run directory:
 
 ```text
 data/raw/house_001/
   kitchen.mp4
   living_room.mp4
   bedroom.mp4
+  coverage_photo_001.jpg
+  coverage_photo_002.jpg
+  hero/
+    kitchen/
+      hero_001.jpg
 ```
 
 The selected frames from all source videos are merged into one run directory:
@@ -841,6 +846,7 @@ run_config.json
 Success criteria:
 
 - can process one room video
+- can process a root-level coverage image set
 - selects reasonable frames
 - removes obvious blur/duplicates
 - keeps gap-aware coverage across the video when possible
@@ -896,6 +902,7 @@ Success criteria:
 Add support for a coverage pass plus high-resolution hero/detail photos stored
 under `data/raw/<project>/hero/`.
 Use `data/raw/<project>/<area>.mp4` for coverage videos and
+root-level `data/raw/<project>/*.jpg` for coverage image datasets, and
 `data/raw/<project>/hero/<area>/` for matching hero-photo clusters.
 
 The combination point is COLMAP: coverage frames and hero photos should keep
