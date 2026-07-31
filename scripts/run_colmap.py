@@ -2,8 +2,9 @@
 """Run COLMAP reconstruction for a preprocessed real estate splat run.
 
 This script is intended to run on the Verda GPU instance after the selected
-frames have been uploaded to the run directory. It follows the run directory
-contract documented in ``docs/realestate_splat_project_plan.md``:
+frames have been uploaded to the run directory. It follows the legacy run
+directory contract documented in
+``docs/legacy/realestate_splat_project_plan.md``:
 
     runs/<scene>/
       frames_selected/

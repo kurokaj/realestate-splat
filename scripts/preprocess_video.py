@@ -1529,6 +1529,7 @@ def build_multi_capture_report(
     return {
         "schema_version": 1,
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "command": " ".join(sys.argv),
         "input": {
             "mode": "project_media",
             "input_dir": str(input_dir),
