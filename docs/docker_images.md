@@ -851,6 +851,13 @@ python3 scripts/run_training_stage.py \
   --num-downscales 1
 ```
 
+The wrapper runs `prepare_nerfstudio_from_colmap.py` through Pixi by default.
+This matters because system `/usr/bin/python3` may not have Pillow/OpenCV, while
+the Nerfstudio/Pixi environment does. If testing an older clone of the wrapper
+that fails with `Pillow or OpenCV is required for --num-downscales > 0`, either
+pull the latest branch or rerun with `--num-downscales 0` as a temporary smoke
+test workaround.
+
 Quick result checks:
 
 ```bash

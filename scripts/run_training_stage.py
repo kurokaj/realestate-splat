@@ -40,7 +40,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--endpoint-url", help="S3-compatible endpoint URL. For r2://, R2_ENDPOINT is used by default.")
     parser.add_argument("--stage-run-id", help="Stable training run id. Defaults to a UTC timestamp.")
     parser.add_argument("--pipeline-run-id", help="Optional parent pipeline run id for stage_result.json.")
-    parser.add_argument("--python-bin", default=sys.executable, help="Python executable used for local prep scripts.")
+    parser.add_argument(
+        "--python-bin",
+        default=sys.executable,
+        help="Python executable used for local prep scripts when --no-prepare-with-pixi is set.",
+    )
+    parser.add_argument(
+        "--prepare-with-pixi",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run prepare_nerfstudio_from_colmap.py inside the Pixi/Nerfstudio environment.",
+    )
     parser.add_argument("--pixi-bin", default=str(DEFAULT_PIXI_BIN), help="Path to Pixi in the Nerfstudio image.")
     parser.add_argument("--nerfstudio-dir", default=str(DEFAULT_NERFSTUDIO_DIR), help="Nerfstudio source directory with pixi.toml.")
     parser.add_argument("--method", default="splatfacto", help="Nerfstudio method, e.g. splatfacto.")
@@ -194,8 +204,7 @@ def build_training_commands(args: argparse.Namespace, local_run_dir: Path) -> Li
     data_dir = local_run_dir / "nerfstudio"
     output_dir = local_run_dir / "gsplat" / "outputs"
     experiment_name = args.experiment_name or args.project_id
-    prepare_command = [
-        args.python_bin,
+    prepare_args = [
         "scripts/prepare_nerfstudio_from_colmap.py",
         "--run",
         str(local_run_dir),
@@ -209,6 +218,17 @@ def build_training_commands(args: argparse.Namespace, local_run_dir: Path) -> Li
         str(args.num_downscales),
         "--overwrite",
     ]
+    if args.prepare_with_pixi:
+        prepare_command = [
+            args.pixi_bin,
+            "run",
+            "--manifest-path",
+            str(Path(args.nerfstudio_dir) / "pixi.toml"),
+            "python",
+            *prepare_args,
+        ]
+    else:
+        prepare_command = [args.python_bin, *prepare_args]
     train_command = [
         args.pixi_bin,
         "run",
