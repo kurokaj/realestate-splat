@@ -514,6 +514,61 @@ It is a verified reconstruction image, but not yet the final R2 stage-runner ima
 Rebuild a follow-up image revision with awscli before running the wrapper inside the container.
 ```
 
+## Image Startup / Pull Optimization Backlog
+
+Cold pod startup can be billed while the image is downloading/extracting. A
+10-minute cold pull is acceptable for smoke testing, but too slow for the
+future automated pipeline. Revisit these items when rebuilding images for the
+R2 runner tags.
+
+General actions:
+
+```text
+Bake awscli/git/stage scripts into the R2 runner images so pod startup does not
+  run apt-get before every job.
+Use registry auth in RunPod to avoid Docker Hub shared-IP throttling.
+Prefer pinned tags/digests, but keep latest-dev only for manual development.
+Keep image build contexts tiny; never send runs/ or local data to Docker.
+Add .dockerignore files beside image builds if needed.
+Measure cold pull + extract time separately from stage runtime in smoke notes.
+```
+
+Build-cache actions:
+
+```text
+Set up docker buildx registry cache for future rebuilds:
+  --cache-to type=registry,...
+  --cache-from type=registry,...
+
+Do not rely on disposable GPU VM local Docker cache.
+Structure Dockerfiles so Python stage code is copied near the end.
+Python-only changes should then rebuild only the final layers.
+```
+
+COLMAP image actions:
+
+```text
+Add awscli to the next R2-runner rebuild.
+Optionally bake scripts/run_colmap_stage.py, scripts/run_colmap.py, and src/.
+Keep SSH out of the production image; use a separate debug template/tag if needed.
+Consider a runtime-only image later, but do not risk COLMAP/Ceres/cuDSS linkage
+  until the stage path is stable.
+```
+
+Nerfstudio image actions:
+
+```text
+High priority: reduce image size after the R2 training smoke succeeds.
+Move from CUDA devel base to CUDA runtime base with a multi-stage build.
+Clean Pixi/conda/pip caches before the final layer.
+Avoid leaving compiler/build caches in the runtime image.
+Check whether /workspace/opt/nerfstudio contains unused git/build artifacts.
+Keep /root/.cache/torch out of the image unless intentionally prewarming LPIPS.
+Mount /root/.cache/torch on reusable debug pods to avoid redownloading AlexNet.
+Consider a split build image + runtime image for tiny-cuda-nn/gsplat artifacts.
+Bake awscli/git/stage scripts into the final R2 runner once the wrapper settles.
+```
+
 ## Nerfstudio / Splatfacto
 
 The Nerfstudio/Splatfacto image is the dedicated Gaussian splatting training
@@ -699,6 +754,115 @@ Nerfstudio image caching/undistortion is scene-specific runtime work. Do not
 try to solve that in the image. Later, store prepared `nerfstudio/` data as a
 stage artifact so repeated training runs can skip it when inputs and downscale
 settings have not changed.
+
+### R2-backed stage wrapper
+
+The repo-side stage wrapper is:
+
+```text
+scripts/run_training_stage.py
+```
+
+During wrapper development, use the pushed Nerfstudio image as the GPU runtime,
+install `awscli`/`git` into the temporary pod, clone the repo branch, and run
+the wrapper from the clone. Once the wrapper is stable, cut a follow-up
+`r2-runner` image that bakes in `awscli` and a tested repo commit.
+
+Default wrapper behavior:
+
+```text
+Inputs:
+  preprocess/current/
+    frames_selected/
+    image_manifest.json
+    capture_report.json
+    preprocess_summary.json
+
+  colmap/current/
+    sparse_txt/
+    sparse/
+    reconstruction_report.json
+    stage_result.json
+
+Local adapter shape:
+  frames_selected/
+  colmap/sparse_txt/
+  colmap/sparse/
+  reports/reconstruction_report.json
+
+Process:
+  scripts/prepare_nerfstudio_from_colmap.py
+  pixi run ns-train splatfacto
+
+Output:
+  training/current/
+    outputs/
+    nerfstudio/transforms.json
+    training_summary.json
+    stage_result.json
+
+History:
+  training/runs/<stage_run_id>/
+    training_summary.json
+    stage_result.json
+```
+
+Successful runs do not upload terminal logs. Failed runs upload
+`training/current/logs/` and, if present, `training/current/outputs_partial/`.
+
+### Manual R2 smoke test without rebuilding
+
+Start a GPU pod/container from:
+
+```text
+docker.io/blackjokuro/buildvision3d-nerfstudio-splatfacto-gpu:latest-dev
+```
+
+For Web Terminal development, keep the container alive:
+
+```bash
+bash -lc 'apt-get update && \
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends awscli git ca-certificates && \
+  sleep infinity'
+```
+
+Then inside the pod:
+
+```bash
+cd /workspace
+git clone --branch production-runtime-roadmap https://github.com/kurokaj/realestate-splat.git Buildvision3D
+cd /workspace/Buildvision3D
+
+export AWS_ACCESS_KEY_ID="<r2-access-key-id>"
+export AWS_SECRET_ACCESS_KEY="<r2-secret-access-key>"
+export AWS_DEFAULT_REGION="auto"
+export R2_ENDPOINT="<r2-endpoint-url>"
+export R2_BUCKET="buildvision3d-pipeline"
+
+python3 scripts/run_training_stage.py \
+  --project-id car_single_smoke \
+  --preprocess-uri "r2://$R2_BUCKET/projects/car_single_smoke/preprocess/current" \
+  --colmap-uri "r2://$R2_BUCKET/projects/car_single_smoke/colmap/current" \
+  --output-uri "r2://$R2_BUCKET/projects/car_single_smoke/training" \
+  --endpoint-url "$R2_ENDPOINT" \
+  --max-steps 100 \
+  --save-every 50 \
+  --eval-every 50 \
+  --num-downscales 1
+```
+
+Quick result checks:
+
+```bash
+aws --endpoint-url "$R2_ENDPOINT" s3 ls \
+  "s3://$R2_BUCKET/projects/car_single_smoke/training/current/"
+
+aws --endpoint-url "$R2_ENDPOINT" s3 cp \
+  "s3://$R2_BUCKET/projects/car_single_smoke/training/current/stage_result.json" -
+
+aws --endpoint-url "$R2_ENDPOINT" s3 cp \
+  "s3://$R2_BUCKET/projects/car_single_smoke/training/current/training_summary.json" -
+```
 
 ### Verified smoke result
 

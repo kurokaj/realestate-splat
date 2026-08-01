@@ -1539,7 +1539,7 @@ Deliverables:
 [done] baked Nerfstudio/Pixi runtime
 [done] torch CUDA, gsplat, tiny-cuda-nn verification
 [done] short splatfacto smoke training
-[pending] stage command that pulls Nerfstudio/COLMAP inputs from object storage
+[done] stage command that pulls Nerfstudio/COLMAP inputs from object storage
 [pending] checkpoint upload every 10-15 minutes
 [pending] metrics/log upload during or after training
 [pending] resume from latest checkpoint
@@ -1553,7 +1553,7 @@ Initial implementation plan:
 1. Build Pixi-style image. [done]
 2. Verify torch.cuda, gsplat, tiny-cuda-nn, ns-process-data, and ns-train. [done]
 3. Run a short training smoke test from existing COLMAP text output. [done]
-4. Add stage wrapper for object-storage inputs/outputs. [pending]
+4. Add stage wrapper for object-storage inputs/outputs. [done]
 5. Add checkpoint upload/resume behavior before provider automation. [pending]
 ```
 
