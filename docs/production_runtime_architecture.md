@@ -1541,6 +1541,7 @@ Deliverables:
 [done] short splatfacto smoke training
 [done] stage command that pulls Nerfstudio/COLMAP inputs from object storage
 [done] manual R2 smoke from preprocess/current + colmap/current
+[done] manual R2 smoke exported training/current/exports/splat.ply
 [pending] checkpoint upload every 10-15 minutes
 [pending] metrics/log upload during or after training
 [pending] resume from latest checkpoint

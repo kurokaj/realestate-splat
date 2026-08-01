@@ -51,10 +51,10 @@ Caspar requires CUDA architecture 75 or newer.
 
 ### Build details to remember
 
-The verified image uses:
+The first verified image used:
 
 ```text
-Base image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+Base image: nvidia/cuda:12.4.1-devel-ubuntu22.04, single-stage
 COLMAP: 4.2.0.dev0, commit cf7a8853, built 2026-07-21
 Ceres: 2.3.0
 CUDA: 12.4.1 in container
@@ -84,16 +84,35 @@ as build context:
 cd docker/colmap-gpu
 
 export IMAGE_NAME="docker.io/blackjokuro/buildvision3d-colmap-gpu"
-export IMAGE_TAG="cuda12.4-colmap-global-caspar-sm75-sm86-sm89-r1"
+export IMAGE_TAG="cuda12.4-colmap-r2-runtime-sm75-sm86-sm89-r2"
 export CUDA_ARCHS="75;86;89"
 export BUILD_JOBS=8
 
-docker build --no-cache --network=host \
+docker build --network=host \
   --build-arg CUDA_ARCHS="$CUDA_ARCHS" \
   --build-arg BUILD_JOBS="$BUILD_JOBS" \
   -t "$IMAGE_NAME:$IMAGE_TAG" \
   .
 ```
+
+The current Dockerfile is a multi-stage R2-runner recipe:
+
+```text
+builder stage:
+  nvidia/cuda:12.4.1-devel-ubuntu22.04
+  compiler/build tools
+  Ceres and COLMAP source trees
+
+runtime stage:
+  nvidia/cuda:12.4.1-runtime-ubuntu22.04
+  awscli, git, Python
+  copied /opt/ceres-cuda and /opt/colmap-cuda
+  no repository code baked in
+```
+
+The runtime stage removes apt caches and does not carry the Ceres/COLMAP source
+trees forward. Build will fail if `ldd /opt/colmap-cuda/bin/colmap` reports a
+missing shared library.
 
 ### Option namespaces
 
@@ -899,6 +918,13 @@ Input preprocess: r2://buildvision3d-pipeline/projects/car_single_smoke/preproce
 Input COLMAP:     r2://buildvision3d-pipeline/projects/car_single_smoke/colmap/current/
 Current output:   r2://buildvision3d-pipeline/projects/car_single_smoke/training/current/
 History output:   r2://buildvision3d-pipeline/projects/car_single_smoke/training/runs/training_20260801T094215/
+```
+
+Export substep smoke verified after adding `ns-export gaussian-splat`:
+
+```text
+Canonical current export: r2://buildvision3d-pipeline/projects/car_single_smoke/training/current/exports/splat.ply
+History remains metadata-only; exported PLY is not duplicated under training/runs/<stage_run_id>/.
 ```
 
 ## Nerfstudio Image Version Log
