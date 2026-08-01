@@ -1540,11 +1540,14 @@ Deliverables:
 [done] torch CUDA, gsplat, tiny-cuda-nn verification
 [done] short splatfacto smoke training
 [done] stage command that pulls Nerfstudio/COLMAP inputs from object storage
+[done] manual R2 smoke from preprocess/current + colmap/current
 [pending] checkpoint upload every 10-15 minutes
 [pending] metrics/log upload during or after training
 [pending] resume from latest checkpoint
-[pending] export to canonical final artifacts
+[done] export to canonical current PLY artifact
+[pending] promotion of final deliverables/versioned exports
 [pending] manual RunPod run documentation
+[pending] optional Nerfstudio prepare mode for physical image undistortion
 ```
 
 Initial implementation plan:
@@ -1561,9 +1564,23 @@ Success criteria:
 
 ```text
 Training image runs manually on GPU and completes a short splatfacto smoke. [done]
-Training runs manually on RunPod from object-storage COLMAP outputs. [pending]
+Training runs manually on RunPod from object-storage COLMAP outputs. [done]
 A failed/interrupted job can resume from the latest uploaded checkpoint. [pending]
 Cold start is materially lower than rebuilding the current Verda-style environment. [done]
+```
+
+Prepare-mode TODO:
+
+```text
+Current mode: transforms_only
+  copies registered original images
+  writes COLMAP intrinsics and distortion parameters into transforms.json
+  relies on Nerfstudio's camera/distortion handling during loading/training
+
+Future mode: undistort
+  physically undistorts registered images
+  updates intrinsics/transforms for the undistorted image space
+  compares quality against transforms_only on one real capture
 ```
 
 ### Milestone 8: RunPod CLI Orchestrator

@@ -60,6 +60,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--eval-every", type=int, default=50, help="Eval interval.")
     parser.add_argument("--num-downscales", type=int, default=1, help="Downscale levels for prepared Nerfstudio data.")
     parser.add_argument(
+        "--export",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Export the latest trained gaussian splat to training/current/exports/splat.ply.",
+    )
+    parser.add_argument("--export-name", default="splat.ply", help="Canonical exported PLY filename under exports/.")
+    parser.add_argument(
         "--train-option",
         action="append",
         default=[],
@@ -173,6 +180,18 @@ def print_plan(
     print(f"$ prepare local training run -> {local_run_dir}")
     for command in build_training_commands(args, local_run_dir):
         print("$ " + " ".join(command))
+    if args.export:
+        print(
+            "$ "
+            + " ".join(
+                build_export_command(
+                    args,
+                    local_run_dir,
+                    local_run_dir / "gsplat" / "outputs" / "<experiment>" / "splatfacto" / "<timestamp>" / "config.yml",
+                )
+            )
+        )
+        print(f"$ copy exported .ply -> {local_run_dir / 'exports' / args.export_name}")
     print(f"$ prepare current payload -> {current_dir}")
     print(f"$ prepare history payload -> {history_dir}")
     print(f"$ sync {current_dir} -> {args.output_uri.rstrip('/')}/current")
@@ -249,6 +268,22 @@ def build_training_commands(args: argparse.Namespace, local_run_dir: Path) -> Li
     return [prepare_command, train_command]
 
 
+def build_export_command(args: argparse.Namespace, local_run_dir: Path, load_config: Path) -> List[str]:
+    export_dir = local_run_dir / "gsplat" / "exports" / "gaussian_splat"
+    return [
+        args.pixi_bin,
+        "run",
+        "--manifest-path",
+        str(Path(args.nerfstudio_dir) / "pixi.toml"),
+        "ns-export",
+        "gaussian-splat",
+        "--load-config",
+        str(load_config),
+        "--output-dir",
+        str(export_dir),
+    ]
+
+
 def run_training(args: argparse.Namespace, local_run_dir: Path, logs_dir: Path) -> List[CommandResult]:
     gsplat_dir = local_run_dir / "gsplat"
     gsplat_dir.mkdir(parents=True, exist_ok=True)
@@ -256,6 +291,18 @@ def run_training(args: argparse.Namespace, local_run_dir: Path, logs_dir: Path) 
     prepare_command, train_command = build_training_commands(args, local_run_dir)
     results.append(run_logged_command("prepare_nerfstudio_data", prepare_command, logs_dir, Path.cwd()))
     results.append(run_logged_command("train_splatfacto", train_command, logs_dir, gsplat_dir))
+    if args.export:
+        config_path = latest_file(local_run_dir / "gsplat" / "outputs", "config.yml")
+        if config_path is None:
+            raise RuntimeError("Training finished but no config.yml was found for export.")
+        export_command = build_export_command(args, local_run_dir, config_path)
+        results.append(run_logged_command("export_gaussian_splat", export_command, logs_dir, gsplat_dir))
+        source_ply = find_exported_ply(local_run_dir / "gsplat" / "exports" / "gaussian_splat")
+        if source_ply is None:
+            raise RuntimeError("ns-export finished but no .ply file was found.")
+        export_output = local_run_dir / "exports" / args.export_name
+        export_output.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_ply, export_output)
     return results
 
 
@@ -281,6 +328,7 @@ def prepare_upload_payloads(
     write_json(current_dir / "training_summary.json", summary)
     write_json(history_dir / "training_summary.json", summary)
     copy_training_outputs(local_run_dir, current_dir)
+    copy_tree(local_run_dir / "exports", current_dir / "exports")
     copy_if_exists(local_run_dir / "nerfstudio" / "transforms.json", current_dir / "nerfstudio" / "transforms.json")
 
     finished_at = utc_now()
@@ -358,13 +406,17 @@ def prepare_failed_payloads(
 
 def training_summary(local_run_dir: Path, command_results: Sequence[CommandResult]) -> Dict[str, Any]:
     output_dir = local_run_dir / "gsplat" / "outputs"
+    exports_dir = local_run_dir / "exports"
     config_path = latest_file(output_dir, "config.yml")
     dataparser_path = latest_file(output_dir, "dataparser_transforms.json")
     checkpoint_files = sorted(output_dir.glob("**/*.ckpt"))
+    ply_files = sorted(exports_dir.glob("*.ply")) if exports_dir.exists() else []
     return {
         "schema_version": 1,
         "created_at": utc_now(),
         "output_dir": relative_or_string(output_dir, local_run_dir),
+        "exports_dir": relative_or_string(exports_dir, local_run_dir) if exports_dir.exists() else None,
+        "exported_ply": relative_or_string(ply_files[-1] if ply_files else None, local_run_dir),
         "selected_config": relative_or_string(config_path, local_run_dir),
         "dataparser_transforms": relative_or_string(dataparser_path, local_run_dir),
         "checkpoint_count": len(checkpoint_files),
@@ -387,6 +439,15 @@ def latest_file(root: Path, name: str) -> Optional[Path]:
         return None
     candidates = sorted(root.glob(f"**/{name}"), key=lambda path: path.stat().st_mtime)
     return candidates[-1] if candidates else None
+
+
+def find_exported_ply(export_dir: Path) -> Optional[Path]:
+    if not export_dir.exists():
+        return None
+    candidates = [path for path in export_dir.glob("**/*.ply") if path.is_file()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: (path.stat().st_size, path.stat().st_mtime))
 
 
 def upload_payloads(args: argparse.Namespace, stage_run_id: str, current_dir: Path, history_dir: Path) -> None:

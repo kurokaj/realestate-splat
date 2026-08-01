@@ -793,10 +793,12 @@ Local adapter shape:
 Process:
   scripts/prepare_nerfstudio_from_colmap.py
   pixi run ns-train splatfacto
+  pixi run ns-export gaussian-splat
 
 Output:
   training/current/
     outputs/
+    exports/splat.ply
     nerfstudio/transforms.json
     training_summary.json
     stage_result.json
@@ -807,7 +809,8 @@ History:
     stage_result.json
 ```
 
-Successful runs do not upload terminal logs. Failed runs upload
+Successful runs do not upload terminal logs. Heavy artifacts are stored only in
+`training/current/`, not duplicated into history runs. Failed runs upload
 `training/current/logs/` and, if present, `training/current/outputs_partial/`.
 
 ### Manual R2 smoke test without rebuilding
@@ -869,6 +872,9 @@ aws --endpoint-url "$R2_ENDPOINT" s3 cp \
 
 aws --endpoint-url "$R2_ENDPOINT" s3 cp \
   "s3://$R2_BUCKET/projects/car_single_smoke/training/current/training_summary.json" -
+
+aws --endpoint-url "$R2_ENDPOINT" s3 ls \
+  "s3://$R2_BUCKET/projects/car_single_smoke/training/current/exports/"
 ```
 
 ### Verified smoke result
@@ -883,6 +889,16 @@ Smoke outputs included:
 /workspace/training-smoke/gsplat/outputs/smoke/splatfacto/2026-07-29_190853/dataparser_transforms.json
 /workspace/training-smoke/gsplat/outputs/smoke_timed/splatfacto/2026-07-29_191903/config.yml
 /workspace/training-smoke/gsplat/outputs/smoke_timed/splatfacto/2026-07-29_191903/dataparser_transforms.json
+```
+
+R2 wrapper smoke verified on 2026-08-01 with `car_single_smoke`:
+
+```text
+Stage run id: training_20260801T094215
+Input preprocess: r2://buildvision3d-pipeline/projects/car_single_smoke/preprocess/current/
+Input COLMAP:     r2://buildvision3d-pipeline/projects/car_single_smoke/colmap/current/
+Current output:   r2://buildvision3d-pipeline/projects/car_single_smoke/training/current/
+History output:   r2://buildvision3d-pipeline/projects/car_single_smoke/training/runs/training_20260801T094215/
 ```
 
 ## Nerfstudio Image Version Log
