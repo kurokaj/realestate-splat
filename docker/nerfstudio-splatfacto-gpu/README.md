@@ -32,7 +32,15 @@ docker build --network=host \
   .
 ```
 
-Verified image:
+Latest R2-clean image:
+
+```text
+docker.io/blackjokuro/buildvision3d-nerfstudio-splatfacto-gpu:cuda11.8-pixi-splatfacto-r2-clean-sm75-sm86-sm89-r2
+compressed registry size: 11.72GB
+digest: TBD after push/inspect
+```
+
+Previous verified image:
 
 ```text
 docker.io/blackjokuro/buildvision3d-nerfstudio-splatfacto-gpu:cuda11.8-pixi-splatfacto-sm75-sm86-sm89-r1

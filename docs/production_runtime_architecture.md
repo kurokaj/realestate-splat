@@ -51,6 +51,12 @@ docs/legacy/verda_tool_status.md
 Active production runtime work should happen in this document and in the new
 runtime/container/orchestration code it describes.
 
+Detailed controller implementation plan:
+
+```text
+docs/controller_plan.md
+```
+
 ---
 
 ## Core principle
@@ -1720,7 +1726,7 @@ Focus on making artifacts durable and stages rerunnable.
 Next implementation task after R2 smoke testing:
 
 ```text
-Create the self-hosted orchestration skeleton.
+Create the self-hosted controller skeleton.
 
 Include:
 - docker-compose.yml with Postgres, backend, worker-controller
@@ -1736,6 +1742,8 @@ Do not build a polished UI yet.
 Do not add Prefect/Temporal.
 Prove that Postgres state can drive the pipeline graph first.
 ```
+
+Use `docs/controller_plan.md` as the concrete working checklist for this task.
 
 ---
 

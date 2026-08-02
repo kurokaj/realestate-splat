@@ -191,19 +191,19 @@ scripts/run_colmap_stage.py
 ```
 
 For the current stage-runner recipe, mount or clone the repo into the GPU
-runtime and run the wrapper from the repository root. The image has the
-verified COLMAP binary and needs `awscli` for R2 sync; the repo supplies the
+runtime and run the wrapper from the repository root. The R2-runtime image has
+the verified COLMAP binary, `awscli`, `git`, and Python; the repo supplies the
 stage script.
 
 The first pushed COLMAP image digest was verified for reconstruction before the
-R2 wrapper existed. Rebuild a new image revision with `awscli` before expecting
-the container itself to run `scripts/run_colmap_stage.py` against R2.
+R2 wrapper existed. The current `cuda12.4-colmap-r2-runtime-sm75-sm86-sm89-r2`
+tag is the first R2-backed runner image.
 
 During wrapper development, do not rebuild the image just to iterate on Python.
-Use the pushed COLMAP image as the GPU runtime, install `awscli` into the
-temporary pod/container, clone the repo branch, and run the wrapper from the
-clone. Once the wrapper is stable, cut a follow-up `r2-runner` image that bakes
-in `awscli` and a tested repo commit.
+Use the pushed COLMAP image as the GPU runtime, clone the repo branch, and run
+the wrapper from the clone. A later locked production image may bake a tested
+repo commit, but that is intentionally deferred while the Python wrappers are
+changing quickly.
 
 Default wrapper behavior:
 
@@ -530,9 +530,9 @@ car_single smoke reconstruction completed.
 R2 wrapper status:
 
 ```text
-This digest was built before scripts/run_colmap_stage.py existed.
-It is a verified reconstruction image, but not yet the final R2 stage-runner image.
-Rebuild a follow-up image revision with awscli before running the wrapper inside the container.
+Original r1 digest was built before scripts/run_colmap_stage.py existed.
+Current r2 runtime tag includes awscli/git/Python for R2 stage execution.
+Repo code is still cloned at pod startup for faster wrapper iteration.
 ```
 
 ## Image Startup / Pull Optimization Backlog
@@ -545,8 +545,8 @@ R2 runner tags.
 General actions:
 
 ```text
-Bake awscli/git/stage scripts into the R2 runner images so pod startup does not
-  run apt-get before every job.
+Keep awscli/git baked into R2 runner images so pod startup does not run apt-get.
+Keep repo code cloned at pod startup until the wrappers settle.
 Use registry auth in RunPod to avoid Docker Hub shared-IP throttling.
 Prefer pinned tags/digests, but keep latest-dev only for manual development.
 Keep image build contexts tiny; never send runs/ or local data to Docker.
@@ -569,11 +569,10 @@ Python-only changes should then rebuild only the final layers.
 COLMAP image actions:
 
 ```text
-Add awscli to the next R2-runner rebuild.
-Optionally bake scripts/run_colmap_stage.py, scripts/run_colmap.py, and src/.
+awscli/git/Python are included in the current r2 runtime image.
+Optionally bake scripts/run_colmap_stage.py, scripts/run_colmap.py, and src/ later.
 Keep SSH out of the production image; use a separate debug template/tag if needed.
-Consider a runtime-only image later, but do not risk COLMAP/Ceres/cuDSS linkage
-  until the stage path is stable.
+The current r2 image is multi-stage/runtime-only and was pushed at about 2.2GB compressed.
 ```
 
 Nerfstudio image actions:
@@ -587,7 +586,8 @@ Check whether /workspace/opt/nerfstudio contains unused git/build artifacts.
 Keep /root/.cache/torch out of the image unless intentionally prewarming LPIPS.
 Mount /root/.cache/torch on reusable debug pods to avoid redownloading AlexNet.
 Consider a split build image + runtime image for tiny-cuda-nn/gsplat artifacts.
-Bake awscli/git/stage scripts into the final R2 runner once the wrapper settles.
+awscli/git are already included in the current R2-clean runner.
+Optionally bake stage scripts into a locked production image once the wrapper settles.
 ```
 
 ## Nerfstudio / Splatfacto
@@ -811,9 +811,9 @@ scripts/run_training_stage.py
 ```
 
 During wrapper development, use the pushed Nerfstudio image as the GPU runtime,
-install `awscli`/`git` into the temporary pod, clone the repo branch, and run
-the wrapper from the clone. Once the wrapper is stable, cut a follow-up
-`r2-runner` image that bakes in `awscli` and a tested repo commit.
+clone the repo branch at pod startup, and run the wrapper from the clone. The
+R2-clean image includes `awscli` and `git`; the repo is intentionally not baked
+into the image while wrapper code is still changing quickly.
 
 Default wrapper behavior:
 
@@ -871,9 +871,7 @@ docker.io/blackjokuro/buildvision3d-nerfstudio-splatfacto-gpu:latest-dev
 For Web Terminal development, keep the container alive:
 
 ```bash
-bash -lc 'apt-get update && \
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends awscli git ca-certificates && \
-  sleep infinity'
+bash -lc 'sleep infinity'
 ```
 
 Then inside the pod:
@@ -956,6 +954,75 @@ History remains metadata-only; exported PLY is not duplicated under training/run
 ```
 
 ## Nerfstudio Image Version Log
+
+### 2026-08-02: Nerfstudio Splatfacto R2-clean runner
+
+Registry:
+
+```text
+docker.io
+```
+
+Repository:
+
+```text
+blackjokuro/buildvision3d-nerfstudio-splatfacto-gpu
+```
+
+Tags:
+
+```text
+docker.io/blackjokuro/buildvision3d-nerfstudio-splatfacto-gpu:cuda11.8-pixi-splatfacto-r2-clean-sm75-sm86-sm89-r2
+docker.io/blackjokuro/buildvision3d-nerfstudio-splatfacto-gpu:latest-dev
+```
+
+Digest:
+
+```text
+TBD: paste from docker inspect --format='{{index .RepoDigests 0}}' after push.
+```
+
+Size:
+
+```text
+Compressed registry size: 11.72GB
+Previous compressed registry size: 11.79GB
+Local docker image inspect size from Verda A100 build: 12584508533 bytes
+```
+
+Build/verification environment:
+
+```text
+Verda VM
+A100 40GB
+Container CUDA 11.8
+Docker
+```
+
+Changes from r1:
+
+```text
+Added awscli for R2-backed training stage execution.
+Kept git for fast repo clone at pod startup.
+Removed Nerfstudio .git metadata.
+Removed common pip/pixi/torch/nv caches.
+Removed Pixi package cache while preserving .pixi/envs/default.
+Removed Python __pycache__ and .pyc files.
+Added ns-export gaussian-splat verification.
+Added post-cleanup pixi verification.
+```
+
+Verification status:
+
+```text
+Docker GPU passthrough verified on A100.
+awscli verified.
+torch.cuda verified: torch 2.2.2, CUDA visible, torch.version.cuda 11.8.
+tiny-cuda-nn import verified.
+gsplat import verified.
+ns-export gaussian-splat help verified.
+tiny-cuda-nn warned about A100 compute capability 80 because this image targets 75/86/89; acceptable for the RunPod target pool.
+```
 
 ### 2026-07-29: Nerfstudio Splatfacto CUDA 11.8, Pixi, RunPod target
 
