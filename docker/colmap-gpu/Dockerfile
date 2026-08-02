@@ -84,7 +84,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-venv \
     libboost-program-options1.74.0 libboost-graph1.74.0 libboost-system1.74.0 libboost-filesystem1.74.0 \
     libopenimageio2.2 openimageio-tools \
-    libopenexr-3-1 libimath-3-1-29 \
     libmetis5 libgoogle-glog0v5 libgflags2.2 \
     libsqlite3-0 libglew2.2 libopengl0 \
     libcgal-dev libgmp10 libmpfr6 \
