@@ -84,7 +84,7 @@ as build context:
 cd docker/colmap-gpu
 
 export IMAGE_NAME="docker.io/blackjokuro/buildvision3d-colmap-gpu"
-export IMAGE_TAG="cuda12.4-colmap-r2-single-sm75-sm86-sm89-r2"
+export IMAGE_TAG="cuda12.4-colmap-r2-runtime-sm75-sm86-sm89-r2"
 export CUDA_ARCHS="75;86;89"
 export BUILD_JOBS=8
 
@@ -95,20 +95,26 @@ docker build --network=host \
   .
 ```
 
-The current Dockerfile is a cleaned single-stage R2-runner recipe:
+The current Dockerfile is a multi-stage R2-runner recipe:
 
 ```text
-base:
+builder stage:
   nvidia/cuda:12.4.1-devel-ubuntu22.04
-  known-good COLMAP/Ceres/cuDSS build environment
+  compiler/build tools
+  Ceres and COLMAP source trees
+
+runtime stage:
+  nvidia/cuda:12.4.1-runtime-ubuntu22.04
   awscli, git, Python for R2 stage wrappers
+  copied /opt/ceres-cuda and /opt/colmap-cuda
   no repository code baked in
 ```
 
-The Dockerfile removes apt caches and deletes the Ceres/COLMAP source trees
-after install. A multi-stage runtime experiment reached 6.99GB, larger than the
-5.9GB original image, so it is not the current recommendation. Build will fail
-if `ldd /opt/colmap-cuda/bin/colmap` reports a missing shared library.
+The Dockerfile removes apt caches, deletes Ceres/COLMAP source trees after
+install in the builder, and does not copy those source trees into the final
+runtime stage. On the Verda build, `docker image inspect` reported about
+2.39GB for this runtime tag. Build will fail if
+`ldd /opt/colmap-cuda/bin/colmap` reports a missing shared library.
 
 ### Option namespaces
 
@@ -653,6 +659,8 @@ tiny-cuda-nn: import verified with GPU available
 Important dependency/runtime notes:
 
 ```text
+Install awscli in the R2 runner revision so scripts/run_training_stage.py can sync R2.
+Keep Git in the image while stage wrappers are cloned at pod startup.
 Do not verify tinycudann during docker build; docker build has no GPU.
 Verify torch.cuda, tinycudann, and gsplat with docker run --gpus all.
 Pixi manifest deprecation warnings from Nerfstudio v1.1.4 are acceptable for now.
@@ -666,16 +674,34 @@ Build from the Dockerfile directory:
 cd docker/nerfstudio-splatfacto-gpu
 
 export IMAGE_NAME="docker.io/blackjokuro/buildvision3d-nerfstudio-splatfacto-gpu"
-export IMAGE_TAG="cuda11.8-pixi-splatfacto-sm75-sm86-sm89-r1"
+export IMAGE_TAG="cuda11.8-pixi-splatfacto-r2-clean-sm75-sm86-sm89-r2"
 export NS_REF="v1.1.4"
 export BUILD_JOBS=8
 
-docker build --no-cache --network=host \
+docker build --network=host \
   --build-arg NS_REF="$NS_REF" \
   --build-arg BUILD_JOBS="$BUILD_JOBS" \
   -t "$IMAGE_NAME:$IMAGE_TAG" \
   .
 ```
+
+The current R2-clean Dockerfile keeps the proven single-stage CUDA/Pixi shape
+and removes low-risk leftovers:
+
+```text
+Nerfstudio .git metadata
+pip/pixi/torch/nv caches
+Pixi package cache at .pixi/pkgs
+Python __pycache__ and .pyc files
+apt package lists
+```
+
+Do not remove `/workspace/opt/nerfstudio/.pixi/envs/default`; that is the
+actual runtime environment.
+
+The Dockerfile runs a second lightweight `pixi run` verification after cleanup.
+That catches the important failure mode where deleting caches accidentally
+removes something the runtime environment still needs.
 
 ### Verification commands
 
@@ -699,6 +725,12 @@ docker run --rm --gpus all "$IMAGE_NAME:$IMAGE_TAG" \
 docker run --rm --gpus all "$IMAGE_NAME:$IMAGE_TAG" \
   /workspace/pixi/bin/pixi run --manifest-path /workspace/opt/nerfstudio/pixi.toml \
   ns-train splatfacto --help
+
+docker run --rm --gpus all "$IMAGE_NAME:$IMAGE_TAG" \
+  /workspace/pixi/bin/pixi run --manifest-path /workspace/opt/nerfstudio/pixi.toml \
+  ns-export gaussian-splat --help
+
+docker run --rm --gpus all "$IMAGE_NAME:$IMAGE_TAG" aws --version
 ```
 
 ### Smoke-test command shape

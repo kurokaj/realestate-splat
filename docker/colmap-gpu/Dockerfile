@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
 
 ARG CUDA_ARCHS="75;86;89"
 ARG BUILD_JOBS=8
@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git wget curl ca-certificates gnupg \
     build-essential cmake ninja-build pkg-config ccache \
     gcc-10 g++-10 \
-    python3 python3-pip python3-venv awscli \
+    python3 \
     libboost-program-options-dev libboost-graph-dev libboost-system-dev libboost-filesystem-dev \
     libeigen3-dev libopenimageio-dev openimageio-tools libopenexr-dev \
     libmetis-dev libgoogle-glog-dev libgflags-dev \
@@ -73,6 +73,33 @@ RUN git clone https://github.com/colmap/colmap.git \
     && ninja install \
     && cd /opt/src \
     && rm -rf colmap
+
+
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    awscli git ca-certificates curl \
+    python3 python3-venv \
+    libboost-program-options1.74.0 libboost-graph1.74.0 libboost-system1.74.0 libboost-filesystem1.74.0 \
+    libopenimageio2.2 openimageio-tools \
+    libmetis5 libgoogle-glog0v5 libgflags2.2 \
+    libsqlite3-0 libglew2.2 libopengl0 \
+    libcgal-dev libgmp10 libmpfr6 \
+    libsuitesparseconfig5 libcholmod3 libspqr2 libcamd2 libccolamd2 libcolamd2 libamd2 \
+    libcurl4 libssl3 libtbb12 \
+    libblas3 liblapack3 libopenblas0-openmp \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i cuda-keyring_1.1-1_all.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends cudss-cuda-12 \
+    && rm -rf /var/lib/apt/lists/* cuda-keyring_1.1-1_all.deb
+
+COPY --from=builder /opt/ceres-cuda /opt/ceres-cuda
+COPY --from=builder /opt/colmap-cuda /opt/colmap-cuda
 
 ENV PATH=/opt/colmap-cuda/bin:${PATH}
 ENV LD_LIBRARY_PATH=/opt/ceres-cuda/lib:/opt/colmap-cuda/lib:${LD_LIBRARY_PATH}

@@ -14,7 +14,7 @@ ENV MAX_JOBS=${BUILD_JOBS}
 ENV CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl wget ca-certificates \
+    git curl wget ca-certificates awscli \
     build-essential cmake ninja-build pkg-config \
     gcc-11 g++-11 \
     python3 python3-pip python3-venv \
@@ -36,7 +36,8 @@ WORKDIR /workspace/opt
 
 RUN git clone https://github.com/nerfstudio-project/nerfstudio.git \
     && cd nerfstudio \
-    && git checkout "${NS_REF}"
+    && git checkout "${NS_REF}" \
+    && rm -rf .git
 
 WORKDIR /workspace/opt/nerfstudio
 
@@ -45,7 +46,21 @@ RUN pixi run post-install
 RUN pixi run python -c "import torch; print(torch.__version__, torch.version.cuda)" \
     && pixi run python -c "import nerfstudio; print('nerfstudio OK')" \
     && pixi run ns-train --help >/tmp/ns_train_help.txt \
-    && pixi run ns-process-data images --help >/tmp/ns_process_data_images_help.txt
+    && pixi run ns-process-data images --help >/tmp/ns_process_data_images_help.txt \
+    && pixi run ns-export gaussian-splat --help >/tmp/ns_export_gaussian_splat_help.txt
+
+RUN rm -rf \
+      /root/.cache/pip \
+      /root/.cache/pixi \
+      /root/.cache/torch \
+      /root/.cache/nv \
+      /workspace/opt/nerfstudio/.pixi/pkgs \
+      /tmp/* \
+    && find /workspace/opt/nerfstudio -type d -name "__pycache__" -prune -exec rm -rf {} + \
+    && find /workspace/opt/nerfstudio -type f -name "*.pyc" -delete \
+    && pixi run python -c "import torch, nerfstudio; print('post-cleanup OK', torch.cuda.is_available())" \
+    && pixi run ns-train --help >/tmp/ns_train_help_post_cleanup.txt \
+    && pixi run ns-export gaussian-splat --help >/tmp/ns_export_gaussian_splat_help_post_cleanup.txt
 
 WORKDIR /workspace
 
