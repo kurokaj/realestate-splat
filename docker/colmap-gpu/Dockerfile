@@ -87,7 +87,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libopenexr-3-1 libimath-3-1-29 \
     libmetis5 libgoogle-glog0v5 libgflags2.2 \
     libsqlite3-0 libglew2.2 libopengl0 \
-    libcgal13 libgmp10 libmpfr6 \
+    libcgal-dev libgmp10 libmpfr6 \
     libsuitesparseconfig5 libcholmod3 libspqr2 libcamd2 libccolamd2 libcolamd2 libamd2 \
     libcurl4 libssl3 libtbb12 \
     libblas3 liblapack3 libopenblas0-openmp \
