@@ -2,20 +2,10 @@
 
 Canonical Dockerfile for the verified COLMAP GPU image.
 
-The current Dockerfile is a multi-stage R2-runner recipe:
-
-```text
-builder:
-  nvidia/cuda:12.4.1-devel-ubuntu22.04
-  compilers, headers, CMake/Ninja
-  builds Ceres + COLMAP
-
-runtime:
-  nvidia/cuda:12.4.1-runtime-ubuntu22.04
-  awscli + git + Python
-  runtime shared libraries
-  copied /opt/ceres-cuda and /opt/colmap-cuda
-```
+The current Dockerfile is a cleaned single-stage R2-runner recipe. A
+multi-stage runtime experiment was larger than the original image, so the
+current practical path keeps the known-good build shape and adds only the
+needed runner improvements.
 
 The repository is not baked into this image. Clone the repo branch at pod start
 while the stage wrappers are still changing.
@@ -26,7 +16,7 @@ Build from this directory so Docker does not send local run data as context:
 cd docker/colmap-gpu
 
 export IMAGE_NAME="docker.io/blackjokuro/buildvision3d-colmap-gpu"
-export IMAGE_TAG="cuda12.4-colmap-r2-runtime-sm75-sm86-sm89-r2"
+export IMAGE_TAG="cuda12.4-colmap-r2-single-sm75-sm86-sm89-r2"
 export CUDA_ARCHS="75;86;89"
 export BUILD_JOBS=8
 
@@ -60,7 +50,7 @@ runtime and run the wrapper from the repository root with
 The stage-runner image revision must include `awscli`, because the storage
 helper uses `aws s3 sync` for R2.
 
-The runtime stage verifies:
+The image verifies:
 
 ```text
 ldd /opt/colmap-cuda/bin/colmap has no "not found" libraries
@@ -69,3 +59,6 @@ colmap global_mapper -h works
 colmap view_graph_calibrator -h works
 aws --version works
 ```
+
+The Dockerfile removes apt package lists and deletes the Ceres/COLMAP source
+trees after installation.

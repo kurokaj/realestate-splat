@@ -84,7 +84,7 @@ as build context:
 cd docker/colmap-gpu
 
 export IMAGE_NAME="docker.io/blackjokuro/buildvision3d-colmap-gpu"
-export IMAGE_TAG="cuda12.4-colmap-r2-runtime-sm75-sm86-sm89-r2"
+export IMAGE_TAG="cuda12.4-colmap-r2-single-sm75-sm86-sm89-r2"
 export CUDA_ARCHS="75;86;89"
 export BUILD_JOBS=8
 
@@ -95,24 +95,20 @@ docker build --network=host \
   .
 ```
 
-The current Dockerfile is a multi-stage R2-runner recipe:
+The current Dockerfile is a cleaned single-stage R2-runner recipe:
 
 ```text
-builder stage:
+base:
   nvidia/cuda:12.4.1-devel-ubuntu22.04
-  compiler/build tools
-  Ceres and COLMAP source trees
-
-runtime stage:
-  nvidia/cuda:12.4.1-runtime-ubuntu22.04
-  awscli, git, Python
-  copied /opt/ceres-cuda and /opt/colmap-cuda
+  known-good COLMAP/Ceres/cuDSS build environment
+  awscli, git, Python for R2 stage wrappers
   no repository code baked in
 ```
 
-The runtime stage removes apt caches and does not carry the Ceres/COLMAP source
-trees forward. Build will fail if `ldd /opt/colmap-cuda/bin/colmap` reports a
-missing shared library.
+The Dockerfile removes apt caches and deletes the Ceres/COLMAP source trees
+after install. A multi-stage runtime experiment reached 6.99GB, larger than the
+5.9GB original image, so it is not the current recommendation. Build will fail
+if `ldd /opt/colmap-cuda/bin/colmap` reports a missing shared library.
 
 ### Option namespaces
 
