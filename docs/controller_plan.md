@@ -87,9 +87,9 @@ the controller should be able to show the failed stage and rerun it from R2.
 
 ## First Architecture
 
-Start with a single local backend/controller process and SQLite or Postgres.
-Postgres is preferred if the UI work starts immediately, because it matches the
-future durable setup and makes state inspection easy.
+Start with one local stack: Postgres, a FastAPI backend, and a separate
+worker-controller process. Postgres is preferred over SQLite because it matches
+the future durable setup and makes state inspection easy.
 
 ```text
 Local browser UI
@@ -110,6 +110,65 @@ FastAPI backend + controller loop
 
 Do not add Prefect or Temporal now. The pipeline is small enough that a direct
 controller loop is easier to understand and cheaper to host.
+
+## Development Runtime Path
+
+Use a terminal-first shape before moving the same commands into full Compose.
+This keeps debugging simple while avoiding code that only works on one local
+machine path.
+
+Phase 1:
+
+```text
+Postgres runs in Docker.
+FastAPI runs from the terminal.
+Worker/controller runs from the terminal.
+```
+
+Command shape:
+
+```bash
+docker compose up postgres
+uvicorn controller_api.main:app --reload --host 0.0.0.0 --port 8000
+python -m controller_worker
+```
+
+Phase 2:
+
+```text
+Postgres, FastAPI, and worker/controller all run under docker compose.
+The API and worker use the same commands as Phase 1.
+The repo is mounted into the API and worker containers for live Python edits.
+```
+
+Compose service shape:
+
+```yaml
+api:
+  build: .
+  command: uvicorn controller_api.main:app --reload --host 0.0.0.0 --port 8000
+  volumes:
+    - .:/app
+  env_file:
+    - .env
+  depends_on:
+    - postgres
+
+worker:
+  build: .
+  command: python -m controller_worker
+  volumes:
+    - .:/app
+  env_file:
+    - .env
+  depends_on:
+    - postgres
+```
+
+The migration from Phase 1 to Phase 2 should be mostly moving process startup
+into `docker-compose.yml`. Keep paths workspace-relative and put settings in
+environment variables, especially `DATABASE_URL`, R2 credentials, and provider
+tokens.
 
 ## Initial Data Model
 
@@ -354,7 +413,8 @@ stage_run CRUD/read endpoints
 controller loop that claims fake queued stages
 events table and event writer
 local fake provider adapter
-README with startup commands
+README with terminal-first startup commands
+notes for moving the same API/worker commands into full docker compose
 ```
 
 Success check:
@@ -473,7 +533,8 @@ Should controller live inside the FastAPI process at first, or as a separate wor
 Recommendation for the next task:
 
 ```text
-Start with Postgres + FastAPI + separate worker-controller process in one docker-compose file.
+Start with Postgres in docker compose, then run FastAPI and the separate worker-controller from terminal.
+Keep API and worker commands Compose-ready from the first commit.
 Use a YAML provider config first.
 Store short structured events in Postgres.
 Store full logs in R2 only for failed runs or active log tails.

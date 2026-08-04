@@ -1,0 +1,78 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: buildvision3d
+      POSTGRES_USER: buildvision3d
+      POSTGRES_PASSWORD: buildvision3d
+    ports:
+      - "5432:5432"
+    volumes:
+      - controller_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U buildvision3d -d buildvision3d"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.controller
+    command: uvicorn controller_api.main:app --reload --host 0.0.0.0 --port 8000
+    working_dir: /app
+    environment:
+      DATABASE_URL: postgresql://buildvision3d:buildvision3d@postgres:5432/buildvision3d
+      CONTROLLER_ID: ${CONTROLLER_ID:-compose-api}
+      CONTROLLER_POLL_INTERVAL_SECONDS: ${CONTROLLER_POLL_INTERVAL_SECONDS:-2}
+      CONTROLLER_STAGE_PYTHON_BIN: python
+      FAKE_STAGE_DURATION_SECONDS: ${FAKE_STAGE_DURATION_SECONDS:-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-auto}
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_BUCKET: ${R2_BUCKET:-buildvision3d-pipeline}
+      RUNPOD_API_KEY: ${RUNPOD_API_KEY:-}
+      VAST_API_KEY: ${VAST_API_KEY:-}
+      VERDA_API_KEY: ${VERDA_API_KEY:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.controller
+    command: python -m controller_worker
+    working_dir: /app
+    environment:
+      DATABASE_URL: postgresql://buildvision3d:buildvision3d@postgres:5432/buildvision3d
+      CONTROLLER_ID: ${CONTROLLER_ID:-compose-worker}
+      CONTROLLER_POLL_INTERVAL_SECONDS: ${CONTROLLER_POLL_INTERVAL_SECONDS:-2}
+      CONTROLLER_STAGE_PYTHON_BIN: python
+      FAKE_STAGE_DURATION_SECONDS: ${FAKE_STAGE_DURATION_SECONDS:-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-auto}
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_BUCKET: ${R2_BUCKET:-buildvision3d-pipeline}
+      RUNPOD_API_KEY: ${RUNPOD_API_KEY:-}
+      VAST_API_KEY: ${VAST_API_KEY:-}
+      VERDA_API_KEY: ${VERDA_API_KEY:-}
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  controller_postgres_data:

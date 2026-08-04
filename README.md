@@ -217,6 +217,45 @@ outside the local machine or Verda block volume. New production runs should use
 R2 as the durable project store. Local `runs/<project>/` directories remain a
 development cache and legacy compatibility shape.
 
+## Milestone 8A: local controller skeleton
+
+The first controller milestone can run terminal-first or as a local Compose
+stack. Terminal mode is still useful for debugging individual processes:
+
+```bash
+docker compose up postgres
+uvicorn controller_api.main:app --reload --host 0.0.0.0 --port 8000
+python -m controller_worker
+```
+
+For the bundled local stack:
+
+```bash
+docker compose up --build
+```
+
+The skeleton includes project, stage-run, event, and approval tables plus a
+fake local provider so queued stages can be claimed and completed without
+starting GPU pods. See `docs/controller_8a.md` for startup and smoke-test
+commands.
+
+Current controller development is still terminal-first. It now includes
+approval, reject, retry, cancel, richer fake progress events, and a
+`local_preprocess` worker path that shells into `scripts/run_preprocess_stage.py`.
+Compose now bundles Postgres, API, and worker with the same process commands.
+Postgres stores controller state, approvals, compact events, progress, and
+artifact pointers; full stdout/stderr logs should stay in files or R2, not in
+the database.
+Real preprocessing is wired through the controller with R2-only durable inputs
+and outputs: `local_preprocess` requires `r2://` raw and preprocess URIs, then
+loads the compact `preprocess_summary.json` back from R2 for controller state.
+Raw media upload is available at `POST /projects/{project_id}/raw`; it accepts
+multipart files, creates `sources_manifest.json`, uploads to R2, and marks the
+project `raw_uploaded`.
+The upload endpoint also accepts `metadata_json` so a drag-and-drop UI can mark
+loose phone images as `hero_image` with a location, without requiring a
+`hero/<location>/` folder structure.
+
 The first helper can mirror an existing run directory to a local path or
 S3-compatible object storage and writes an `artifact_manifest.json`. This is
 mainly for smoke testing the storage contract and inspecting old test runs; it
