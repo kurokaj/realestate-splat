@@ -646,12 +646,27 @@ def wait_for_runpod_stage_result(
     started = time.monotonic()
     result_uri = f"{output_base_uri.rstrip('/')}/current/stage_result.json"
     last_pod_status = None
+    stale_result_run_id = None
     running_status = f"{stage}_running"
     stage_label = stage.upper()
     while True:
         if stage_was_cancelled(stage_run_id):
             raise RuntimeError(f"Stage was cancelled while RunPod {stage_label} was running")
         stage_result = load_optional_json_from_r2(result_uri)
+        if stage_result:
+            result_stage_run_id = stage_result.get("stage_run_id")
+            if result_stage_run_id and result_stage_run_id != stage_run_id:
+                if stale_result_run_id != result_stage_run_id:
+                    stale_result_run_id = str(result_stage_run_id)
+                    record_progress(
+                        stage_run_id,
+                        25,
+                        f"Ignoring stale {stage_label} stage_result.json from {result_stage_run_id}",
+                        kind=f"runpod_{stage}_stale_stage_result",
+                    )
+                stage_result = {}
+            else:
+                stale_result_run_id = None
         if stage_result:
             status = stage_result.get("status")
             record_progress(stage_run_id, 95, f"Found {stage_label} stage_result.json with status {status}", kind=f"runpod_{stage}_stage_result")
