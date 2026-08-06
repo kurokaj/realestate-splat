@@ -219,8 +219,16 @@ def build_preprocess_command(stage_run: dict[str, Any], inputs: dict[str, Any]) 
     if inputs.get("dry_run"):
         command.append("--dry-run")
     for preprocess_arg in inputs.get("preprocess_args", []):
-        command.extend(["--preprocess-arg", preprocess_arg])
+        append_argparse_value(command, "--preprocess-arg", preprocess_arg)
     return command
+
+
+def append_argparse_value(command: list[str], option: str, value: Any) -> None:
+    text = str(value)
+    if text.startswith("-"):
+        command.append(f"{option}={text}")
+    else:
+        command.extend([option, text])
 
 
 def run_runpod_colmap(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -343,7 +351,7 @@ def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str
         inputs.get("colmap_bin", "/opt/colmap-cuda/bin/colmap"),
     ]
     for colmap_arg in inputs.get("colmap_args", []):
-        command.extend(["--colmap-arg", colmap_arg])
+        append_argparse_value(command, "--colmap-arg", colmap_arg)
 
     return "\n".join(
         [

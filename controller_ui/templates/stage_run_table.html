@@ -10,7 +10,14 @@
         <th>Status</th>
         <th>Provider</th>
         <th>Progress</th>
-        <th>Output</th>
+        {% if stage_table_variant == "preprocess" %}
+          <th>Selected</th>
+          <th>Fallback</th>
+          <th>Gaps</th>
+          <th>Warnings</th>
+        {% else %}
+          <th>Output</th>
+        {% endif %}
         <th>Actions</th>
       </tr>
     </thead>
@@ -22,15 +29,22 @@
             <span class="subline">attempt {{ run.attempt }} · {{ run.created_at }}</span>
           </td>
           <td>{{ run.stage }}</td>
-          <td><span class="status status-{{ run.status }}">{{ run.status }}</span></td>
+          <td><span class="status status-{{ run.status_css or run.status }}">{{ run.status_label or run.status }}</span></td>
           <td>{{ run.provider }}</td>
           <td>
             <progress max="100" value="{{ run.progress_json.percent or 0 }}"></progress>
             <span class="subline">{{ run.progress_json.message or "" }}</span>
           </td>
-          <td class="uri-cell">{{ run.output_uri or "" }}</td>
+          {% if stage_table_variant == "preprocess" %}
+            <td>{{ run.selected_total }}</td>
+            <td>{{ run.fallback_total }}</td>
+            <td>{{ run.gap_total }}</td>
+            <td>{{ run.warning_summary }}</td>
+          {% else %}
+            <td class="uri-cell">{{ run.output_uri or "" }}</td>
+          {% endif %}
           <td>
-            {% if run.status in ["awaiting_preprocess_approval", "awaiting_colmap_approval"] %}
+            {% if run.is_latest_stage_run and run.status in ["awaiting_preprocess_approval", "awaiting_colmap_approval"] %}
               <form method="post" action="/ui/stage-runs/{{ run.id }}/approve" class="inline-form">
                 <input name="notes" placeholder="notes">
                 <button type="submit">Approve</button>
@@ -40,13 +54,13 @@
                 <button type="submit" class="secondary">Reject</button>
               </form>
             {% endif %}
-            {% if run.status in ["failed", "cancelled", "preprocess_rejected", "colmap_rejected"] %}
+            {% if run.is_latest_stage_run and run.status in ["failed", "cancelled", "preprocess_rejected", "colmap_rejected"] %}
               <form method="post" action="/ui/stage-runs/{{ run.id }}/retry" class="inline-form">
                 <input name="notes" placeholder="notes">
                 <button type="submit" class="secondary">Retry</button>
               </form>
             {% endif %}
-            {% if run.status not in ["completed", "approved", "failed", "cancelled", "preprocess_rejected", "colmap_rejected"] %}
+            {% if run.is_latest_stage_run and run.status not in ["completed", "approved", "failed", "cancelled", "preprocess_rejected", "colmap_rejected"] %}
               <form method="post" action="/ui/stage-runs/{{ run.id }}/cancel" class="inline-form">
                 <input name="notes" placeholder="notes">
                 <button type="submit" class="danger">Cancel</button>
@@ -55,7 +69,7 @@
           </td>
         </tr>
         <tr class="details-row">
-          <td colspan="7">
+          <td colspan="{{ 10 if stage_table_variant == 'preprocess' else 7 }}">
             <details>
               <summary>Inputs, summary, and errors</summary>
               <div class="grid three">

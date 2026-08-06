@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
@@ -23,6 +24,7 @@ from controller_common.db import (
     rows_to_json,
 )
 from src.realestate_splat.storage import aws_base_command, aws_sync_arg, parse_storage_uri
+from scripts.preprocess_video import PROFILE_DEFAULTS
 
 
 router = APIRouter(include_in_schema=False)
@@ -100,7 +102,7 @@ def project_detail(request: Request, project_id: str) -> HTMLResponse:
     data = load_project_detail(project_id)
     if data["project"] is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    review = preprocess_review_context(data["stage_runs"])
+    review = preprocess_review_context(data["project"], data["stage_runs"])
     return templates.TemplateResponse(
         request,
         "project_detail.html",
@@ -129,8 +131,14 @@ def ui_queue_preprocess(
     max_brightness: Optional[float] = Form(default=None),
     min_contrast: Optional[float] = Form(default=None),
     min_entropy: Optional[float] = Form(default=None),
+    force_keep_interval: Optional[float] = Form(default=None),
     coverage_window_seconds: Optional[float] = Form(default=None),
     min_frames_per_window: Optional[int] = Form(default=None),
+    coverage_hard_min_blur: Optional[float] = Form(default=None),
+    coverage_hard_min_brightness: Optional[float] = Form(default=None),
+    coverage_hard_max_brightness: Optional[float] = Form(default=None),
+    coverage_hard_min_contrast: Optional[float] = Form(default=None),
+    coverage_hard_min_entropy: Optional[float] = Form(default=None),
     dry_run: bool = Form(default=False),
 ) -> RedirectResponse:
     with connect() as conn:
@@ -158,8 +166,14 @@ def ui_queue_preprocess(
                     "max_brightness": max_brightness,
                     "min_contrast": min_contrast,
                     "min_entropy": min_entropy,
+                    "force_keep_interval": force_keep_interval,
                     "coverage_window_seconds": coverage_window_seconds,
                     "min_frames_per_window": min_frames_per_window,
+                    "coverage_hard_min_blur": coverage_hard_min_blur,
+                    "coverage_hard_min_brightness": coverage_hard_min_brightness,
+                    "coverage_hard_max_brightness": coverage_hard_max_brightness,
+                    "coverage_hard_min_contrast": coverage_hard_min_contrast,
+                    "coverage_hard_min_entropy": coverage_hard_min_entropy,
                 }
             ),
             "dry_run": dry_run,
@@ -316,10 +330,13 @@ def load_project_detail(project_id: str) -> dict[str, Any]:
         ).fetchall()
     stage_run_json = rows_to_json(stage_runs)
     approval_json = rows_to_json(approvals)
+    raw_stage_signature = stage_signature(stage_run_json)
     apply_historical_approval_status(stage_run_json, approval_json)
+    apply_stage_history_labels(stage_run_json)
     return {
         "project": row_to_json(project),
         "stage_runs": stage_run_json,
+        "stage_signature": raw_stage_signature,
         "events": rows_to_json(events),
         "approvals": approval_json,
     }
@@ -338,6 +355,39 @@ def apply_historical_approval_status(stage_runs: list[dict[str, Any]], approvals
             run["status"] = "approved"
 
 
+def apply_stage_history_labels(stage_runs: list[dict[str, Any]]) -> None:
+    latest_by_stage: dict[str, str] = {}
+    for run in stage_runs:
+        stage = run.get("stage")
+        run_id = run.get("id")
+        if stage and run_id and stage not in latest_by_stage:
+            latest_by_stage[stage] = run_id
+    for run in stage_runs:
+        is_latest = latest_by_stage.get(run.get("stage")) == run.get("id")
+        run["is_latest_stage_run"] = is_latest
+        if not is_latest:
+            run["status_label"] = "history run"
+            run["status_css"] = "history"
+
+
+def stage_signature(stage_runs: list[dict[str, Any]]) -> str:
+    parts = []
+    for run in stage_runs:
+        progress = run.get("progress_json") if isinstance(run.get("progress_json"), dict) else {}
+        parts.append(
+            ":".join(
+                [
+                    str(run.get("id") or ""),
+                    str(run.get("status") or ""),
+                    str(run.get("updated_at") or ""),
+                    str(progress.get("percent") or ""),
+                    str(progress.get("message") or ""),
+                ]
+            )
+        )
+    return "|".join(parts)
+
+
 def preprocess_args_from_form(values: dict[str, Any]) -> list[str]:
     flag_by_field = {
         "candidate_fps": "--candidate-fps",
@@ -348,8 +398,14 @@ def preprocess_args_from_form(values: dict[str, Any]) -> list[str]:
         "max_brightness": "--max-brightness",
         "min_contrast": "--min-contrast",
         "min_entropy": "--min-entropy",
+        "force_keep_interval": "--force-keep-interval",
         "coverage_window_seconds": "--coverage-window-seconds",
         "min_frames_per_window": "--min-frames-per-window",
+        "coverage_hard_min_blur": "--coverage-hard-min-blur",
+        "coverage_hard_min_brightness": "--coverage-hard-min-brightness",
+        "coverage_hard_max_brightness": "--coverage-hard-max-brightness",
+        "coverage_hard_min_contrast": "--coverage-hard-min-contrast",
+        "coverage_hard_min_entropy": "--coverage-hard-min-entropy",
     }
     args: list[str] = []
     for field, value in values.items():
@@ -359,7 +415,7 @@ def preprocess_args_from_form(values: dict[str, Any]) -> list[str]:
     return args
 
 
-def preprocess_review_context(stage_runs: list[dict[str, Any]]) -> dict[str, Any]:
+def preprocess_review_context(project: dict[str, Any], stage_runs: list[dict[str, Any]]) -> dict[str, Any]:
     preprocess_runs = [run for run in stage_runs if run.get("stage") == "preprocess"]
     latest_run = preprocess_runs[0] if preprocess_runs else None
     capture_report = load_capture_report(latest_run) if latest_run else {}
@@ -374,11 +430,91 @@ def preprocess_review_context(stage_runs: list[dict[str, Any]]) -> dict[str, Any
         "preprocess_capture_report": capture_report,
         "preprocess_summary": summary,
         "preprocess_settings": preprocess_settings(latest_run, capture_report),
+        "preprocess_form_values": preprocess_form_values(project, latest_run, capture_report),
         "preprocess_quality_rows": quality_distribution_rows(summary),
         "preprocess_timeline_blocks": timeline_blocks(capture_report, latest_run),
         "preprocess_video_rows": compact_video_rows(videos),
+        "preprocess_run_rows": preprocess_run_rows(preprocess_runs),
+        "preprocess_profile_defaults": ui_profile_defaults(),
+        "raw_source_summary": raw_source_summary(project),
         "colmap_stats_rows": colmap_stats_rows(stage_runs),
     }
+
+
+def ui_profile_defaults() -> dict[str, dict[str, Any]]:
+    visible_fields = {
+        "candidate_fps",
+        "target_min",
+        "target_max",
+        "min_blur",
+        "min_brightness",
+        "max_brightness",
+        "min_contrast",
+        "min_entropy",
+        "force_keep_interval",
+        "coverage_window_seconds",
+        "min_frames_per_window",
+        "coverage_hard_min_blur",
+        "coverage_hard_min_brightness",
+        "coverage_hard_max_brightness",
+        "coverage_hard_min_contrast",
+        "coverage_hard_min_entropy",
+    }
+    return {
+        profile: {key: value for key, value in defaults.items() if key in visible_fields}
+        for profile, defaults in sorted(PROFILE_DEFAULTS.items())
+    }
+
+
+def raw_source_summary(project: dict[str, Any]) -> dict[str, Any]:
+    raw_uri = project.get("raw_uri") if project else None
+    if not raw_uri:
+        return {"loaded": False, "source_count": 0, "rows": [], "sources": []}
+    try:
+        manifest = load_json_uri(f"{raw_uri.rstrip('/')}/sources_manifest.json")
+    except Exception as exc:
+        return {"loaded": False, "source_count": 0, "rows": [], "sources": [], "error": str(exc)}
+    sources = manifest.get("sources") if isinstance(manifest, dict) else []
+    if not isinstance(sources, list):
+        sources = []
+    return {
+        "loaded": True,
+        "source_count": len(sources),
+        "rows": raw_source_count_rows(sources),
+        "sources": compact_raw_sources(sources),
+    }
+
+
+def raw_source_count_rows(sources: list[Any]) -> list[dict[str, Any]]:
+    groups = [
+        ("Role", "role"),
+        ("Camera group", "camera_group"),
+        ("Location", "location"),
+        ("COLMAP", "colmap_policy"),
+    ]
+    rows = []
+    for label, key in groups:
+        counts = Counter(str(source.get(key) or "unset") for source in sources if isinstance(source, dict))
+        for value, count in sorted(counts.items()):
+            rows.append({"group": label, "value": value, "count": count})
+    return rows
+
+
+def compact_raw_sources(sources: list[Any]) -> list[dict[str, Any]]:
+    rows = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        rows.append(
+            {
+                "relative_path": source.get("relative_path"),
+                "role": source.get("role"),
+                "camera_group": source.get("camera_group"),
+                "location": source.get("location"),
+                "colmap_policy": source.get("colmap_policy"),
+            }
+        )
+    return rows
 
 
 def colmap_stats_rows(stage_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -454,17 +590,102 @@ def load_json_uri(uri: str) -> dict[str, Any]:
 
 
 def preprocess_settings(run: Optional[dict[str, Any]], capture_report: dict[str, Any]) -> dict[str, Any]:
-    settings = capture_report.get("settings", {}) if isinstance(capture_report, dict) else {}
-    if settings:
-        return settings
     if not run:
         return {}
+    input_json = run.get("input_uri_json") if isinstance(run.get("input_uri_json"), dict) else {}
+    profile = str(input_json.get("profile") or "indoor_room")
+    settings = dict(PROFILE_DEFAULTS.get(profile, {}))
+    settings["profile"] = profile
+    settings.update(parse_preprocess_args(input_json.get("preprocess_args")))
+
+    capture_settings = capture_report.get("settings", {}) if isinstance(capture_report, dict) else {}
+    if isinstance(capture_settings, dict) and capture_settings:
+        settings.update(capture_settings)
+
     summary = run.get("summary_json") or {}
     if isinstance(summary, dict):
-        settings = summary.get("settings") or {}
-        if isinstance(settings, dict):
-            return settings
-    return {}
+        summary_settings = summary.get("settings") or {}
+        if isinstance(summary_settings, dict) and summary_settings:
+            settings.update(summary_settings)
+    return settings
+
+
+def preprocess_form_values(project: dict[str, Any], run: Optional[dict[str, Any]], capture_report: dict[str, Any]) -> dict[str, Any]:
+    input_json = run.get("input_uri_json") if run and isinstance(run.get("input_uri_json"), dict) else {}
+    settings = preprocess_settings(run, capture_report)
+    return {
+        "raw_uri": input_json.get("raw_uri") or project.get("raw_uri") or "",
+        "output_uri": input_json.get("output_uri") or project.get("preprocess_current_uri", "").rsplit("/current", 1)[0] or "",
+        "endpoint_url": input_json.get("endpoint_url") or "",
+        "profile": settings.get("profile") or input_json.get("profile") or "indoor_room",
+        **settings,
+    }
+
+
+def parse_preprocess_args(values: Any) -> dict[str, Any]:
+    if not isinstance(values, list):
+        return {}
+    field_by_flag = {
+        "--candidate-fps": ("candidate_fps", float),
+        "--target-min": ("target_min", int),
+        "--target-max": ("target_max", int),
+        "--min-blur": ("min_blur", float),
+        "--min-brightness": ("min_brightness", float),
+        "--max-brightness": ("max_brightness", float),
+        "--min-contrast": ("min_contrast", float),
+        "--min-entropy": ("min_entropy", float),
+        "--force-keep-interval": ("force_keep_interval", float),
+        "--coverage-window-seconds": ("coverage_window_seconds", float),
+        "--min-frames-per-window": ("min_frames_per_window", int),
+        "--coverage-hard-min-blur": ("coverage_hard_min_blur", float),
+        "--coverage-hard-min-brightness": ("coverage_hard_min_brightness", float),
+        "--coverage-hard-max-brightness": ("coverage_hard_max_brightness", float),
+        "--coverage-hard-min-contrast": ("coverage_hard_min_contrast", float),
+        "--coverage-hard-min-entropy": ("coverage_hard_min_entropy", float),
+    }
+    parsed: dict[str, Any] = {}
+    index = 0
+    while index + 1 < len(values):
+        raw_flag = values[index]
+        if not isinstance(raw_flag, str):
+            index += 1
+            continue
+        field_spec = field_by_flag.get(raw_flag)
+        raw_value = values[index + 1]
+        if field_spec is None:
+            index += 2
+            continue
+        field_name, caster = field_spec
+        try:
+            parsed[field_name] = caster(raw_value)
+        except (TypeError, ValueError):
+            pass
+        index += 2
+    return parsed
+
+
+def preprocess_run_rows(stage_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for run in stage_runs:
+        run_copy = dict(run)
+        run_copy.update(preprocess_run_metrics(run_copy))
+        rows.append(run_copy)
+    return rows
+
+
+def preprocess_run_metrics(run: dict[str, Any]) -> dict[str, Any]:
+    summary = run.get("summary_json") if isinstance(run.get("summary_json"), dict) else {}
+    videos = summary.get("videos") if isinstance(summary.get("videos"), list) else []
+    rows = compact_video_rows(videos)
+    if not rows:
+        return {"selected_total": "", "fallback_total": "", "gap_total": "", "warning_summary": ""}
+    warning_count = sum(len(row.get("warnings", [])) for row in rows)
+    return {
+        "selected_total": sum(int(row.get("selected_frame_count") or 0) for row in rows),
+        "fallback_total": sum(int(row.get("fallback_count") or 0) for row in rows),
+        "gap_total": sum(int(row.get("coverage_gaps") or 0) for row in rows),
+        "warning_summary": f"{warning_count} warning{'s' if warning_count != 1 else ''}" if warning_count else "",
+    }
 
 
 def quality_distribution_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
