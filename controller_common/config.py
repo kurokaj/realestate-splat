@@ -6,6 +6,7 @@ import os
 import sys
 from typing import Optional
 
+from controller_common.runpod_gpus import DEFAULT_COLMAP_GPU, DEFAULT_TRAINING_GPU, normalize_gpu_types
 
 DEFAULT_DATABASE_URL = "postgresql://buildvision3d:buildvision3d@localhost:5432/buildvision3d"
 
@@ -50,6 +51,10 @@ def default_colmap_provider() -> str:
     return os.environ.get("CONTROLLER_DEFAULT_COLMAP_PROVIDER", "local_fake")
 
 
+def default_training_provider() -> str:
+    return os.environ.get("CONTROLLER_DEFAULT_TRAINING_PROVIDER", "runpod_training")
+
+
 def runpod_api_key() -> Optional[str]:
     return os.environ.get("RUNPOD_API_KEY")
 
@@ -70,8 +75,8 @@ def controller_git_ref() -> str:
 
 
 def runpod_colmap_gpu_types() -> list[str]:
-    raw_value = os.environ.get("RUNPOD_COLMAP_GPU_TYPES", "NVIDIA RTX A6000,NVIDIA RTX 4090,NVIDIA L40S,NVIDIA L4")
-    return [item.strip() for item in raw_value.split(",") if item.strip()]
+    raw_value = os.environ.get("RUNPOD_COLMAP_GPU_TYPES", DEFAULT_COLMAP_GPU)
+    return normalize_gpu_types(raw_value.split(","))
 
 
 def runpod_colmap_cloud_type() -> str:
@@ -100,3 +105,43 @@ def runpod_colmap_timeout_seconds() -> float:
         return max(300.0, float(raw_value))
     except ValueError:
         return 7200.0
+
+
+def runpod_training_image() -> str:
+    return os.environ.get(
+        "RUNPOD_TRAINING_IMAGE",
+        "docker.io/blackjokuro/buildvision3d-nerfstudio-splatfacto-gpu:cuda11.8-pixi-splatfacto-r2-clean-sm75-sm86-sm89-r2",
+    )
+
+
+def runpod_training_gpu_types() -> list[str]:
+    raw_value = os.environ.get("RUNPOD_TRAINING_GPU_TYPES", DEFAULT_TRAINING_GPU)
+    return normalize_gpu_types(raw_value.split(","))
+
+
+def runpod_training_cloud_type() -> str:
+    return os.environ.get("RUNPOD_TRAINING_CLOUD_TYPE", "SECURE")
+
+
+def runpod_training_container_disk_gb() -> int:
+    raw_value = os.environ.get("RUNPOD_TRAINING_CONTAINER_DISK_GB", "160")
+    try:
+        return max(40, int(raw_value))
+    except ValueError:
+        return 160
+
+
+def runpod_training_poll_seconds() -> float:
+    raw_value = os.environ.get("RUNPOD_TRAINING_POLL_SECONDS", "30")
+    try:
+        return max(5.0, float(raw_value))
+    except ValueError:
+        return 30.0
+
+
+def runpod_training_timeout_seconds() -> float:
+    raw_value = os.environ.get("RUNPOD_TRAINING_TIMEOUT_SECONDS", "14400")
+    try:
+        return max(600.0, float(raw_value))
+    except ValueError:
+        return 14400.0

@@ -18,6 +18,7 @@ if str(SRC_DIR) not in sys.path:
 from realestate_splat.cli import CommandResult, run_logged_command, utc_now, write_json  # noqa: E402
 from realestate_splat.stage_contract import StageResult, write_stage_result  # noqa: E402
 from realestate_splat.storage import sync_directory  # noqa: E402
+from controller_common.colmap_viewer import write_sparse_viewer_payload  # noqa: E402
 
 
 DEFAULT_COLMAP_BIN = Path("/opt/colmap-cuda/bin/colmap")
@@ -277,6 +278,7 @@ def prepare_upload_payloads(
     report = read_json(report_path)
     write_json(current_dir / "reconstruction_report.json", report)
     write_json(history_dir / "reconstruction_report.json", report)
+    generate_viewer_payloads(current_dir=current_dir, history_dir=history_dir)
 
     finished_at = utc_now()
     result = StageResult(
@@ -315,6 +317,14 @@ def copy_colmap_outputs(local_run_dir: Path, current_dir: Path) -> None:
     copy_if_exists(colmap_dir / "database_global.db", current_dir / "database_global.db")
     copy_tree(colmap_dir / "sparse", current_dir / "sparse")
     copy_tree(colmap_dir / "sparse_txt", current_dir / "sparse_txt")
+
+
+def generate_viewer_payloads(*, current_dir: Path, history_dir: Path) -> None:
+    sparse_txt_dir = current_dir / "sparse_txt"
+    if not sparse_txt_dir.exists():
+        return
+    viewer_path = write_sparse_viewer_payload(sparse_txt_dir, current_dir / "viewer" / "sparse_scene.json")
+    copy_if_exists(viewer_path, history_dir / "viewer" / "sparse_scene.json")
 
 
 def prepare_failed_payloads(

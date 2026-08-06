@@ -11,7 +11,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from controller_common.config import database_url, default_colmap_provider, default_r2_bucket
+from controller_common.config import database_url, default_r2_bucket
 
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
@@ -280,22 +280,9 @@ def enqueue_next_stage_after_approval(
     if stage == "preprocess":
         if stage_run["status"] != "awaiting_preprocess_approval":
             raise ValueError("Preprocess stage is not awaiting approval")
-        next_stage = "colmap"
-        next_provider = default_colmap_provider()
-        input_uri_json = {
-            "preprocess_uri": stage_run["output_uri"] or default_current_uri(stage_run["project_id"], "preprocess"),
-            "output_uri": default_stage_output_uri(stage_run["project_id"], "colmap"),
-        }
     elif stage == "colmap":
         if stage_run["status"] != "awaiting_colmap_approval":
             raise ValueError("COLMAP stage is not awaiting approval")
-        project = conn.execute("SELECT * FROM projects WHERE id = %s", (stage_run["project_id"],)).fetchone()
-        next_stage = "training"
-        next_provider = "local_fake"
-        input_uri_json = {
-            "preprocess_uri": (project or {}).get("preprocess_current_uri"),
-            "colmap_uri": stage_run["output_uri"] or default_current_uri(stage_run["project_id"], "colmap"),
-        }
     else:
         raise ValueError(f"Stage does not have an approval transition: {stage}")
 
@@ -312,25 +299,30 @@ def enqueue_next_stage_after_approval(
         stage_run_id=stage_run_id,
         kind="stage_approved",
         message=f"Approved {stage} stage",
-        payload={"notes": notes, "next_stage": next_stage},
+        payload={"notes": notes},
     )
-    conn.execute(
+    row = conn.execute(
         """
         UPDATE stage_runs
         SET status = 'approved',
             updated_at = now()
         WHERE id = %s
+        RETURNING *
         """,
         (stage_run_id,),
+    ).fetchone()
+    conn.execute(
+        """
+        UPDATE projects
+        SET status = 'approved',
+            updated_at = now()
+        WHERE id = %s
+        """,
+        (stage_run["project_id"],),
     )
-    return create_stage_run(
-        conn,
-        project_id=stage_run["project_id"],
-        stage=next_stage,
-        provider=next_provider,
-        input_uri_json={key: value for key, value in input_uri_json.items() if value},
-        output_uri=default_current_uri(stage_run["project_id"], next_stage),
-    )
+    if row is None:
+        raise RuntimeError(f"Failed to approve stage run: {stage_run_id}")
+    return row
 
 
 def reject_stage_run(conn: psycopg.Connection, *, stage_run_id: str, notes: Optional[str] = None) -> dict[str, Any]:

@@ -84,6 +84,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("#preprocess-queue-form").forEach(setupPreprocessProfileDefaults);
   setupTabs();
   setupAutoRefresh();
+  document.querySelectorAll("[data-colmap-viewer-url]").forEach(setupColmapViewer);
 });
 
 function setupTabs() {
@@ -144,6 +145,7 @@ function setupAutoRefresh() {
     "colmap_pod_starting",
     "colmap_running",
     "training_queued",
+    "training_pod_starting",
     "training_running",
   ]);
 
@@ -175,4 +177,356 @@ function setupAutoRefresh() {
   }
 
   const timer = window.setInterval(poll, 5000);
+}
+
+async function setupColmapViewer(root) {
+  const canvas = root.querySelector(".viewer-canvas");
+  const status = root.querySelector(".viewer-status");
+  const modeButtons = root.querySelectorAll("[data-viewer-mode]");
+  const resetButton = root.querySelector("[data-viewer-reset]");
+  if (!canvas || !status) return;
+
+  try {
+    const response = await fetch(root.dataset.colmapViewerUrl, { headers: { accept: "application/json" } });
+    if (!response.ok) {
+      status.textContent = "Viewer artifact not available yet.";
+      return;
+    }
+    const scene = await response.json();
+    const viewer = renderSparseViewer(canvas, scene);
+    modeButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        viewer.setMode(button.dataset.viewerMode || "orbit");
+        modeButtons.forEach((item) => item.classList.toggle("is-active", item === button));
+      });
+    });
+    resetButton?.addEventListener("click", () => viewer.reset());
+    const pointCount = scene.point_sample_count || (scene.points || []).length || 0;
+    const cameraCount = scene.camera_count || (scene.cameras || []).length || 0;
+    status.textContent = `${pointCount} sampled points · ${cameraCount} cameras`;
+  } catch (error) {
+    status.textContent = `Viewer load failed: ${error}`;
+  }
+}
+
+function renderSparseViewer(canvas, scene) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return { setMode() {}, reset() {} };
+
+  const points = Array.isArray(scene.points) ? scene.points : [];
+  const cameras = Array.isArray(scene.cameras) ? scene.cameras : [];
+  const bounds = scene.bounds || { center: [0, 0, 0], radius: 1 };
+  const center = Array.isArray(bounds.center) ? bounds.center : [0, 0, 0];
+  const radius = Number(bounds.radius || 1);
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  let mode = "orbit";
+  let dragging = false;
+  let dragMode = "orbit";
+  let lastX = 0;
+  let lastY = 0;
+  let animationFrame = 0;
+  let lastTick = 0;
+  const pressed = new Set();
+
+  const orbitDefaults = {
+    yaw: 0.85,
+    pitch: -0.45,
+    distance: radius * 2.2,
+    target: [...center],
+  };
+  const freeDefaults = {
+    yaw: 0.85,
+    pitch: -0.3,
+    position: [center[0] - radius * 1.2, center[1] + radius * 0.35, center[2] + radius * 1.2],
+    speed: Math.max(0.08, radius * 0.02),
+  };
+  const orbitState = { ...orbitDefaults };
+  const freeState = { ...freeDefaults };
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function add(a, b) {
+    return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+  }
+
+  function subtract(a, b) {
+    return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  }
+
+  function scale(vector, factor) {
+    return [vector[0] * factor, vector[1] * factor, vector[2] * factor];
+  }
+
+  function dot(a, b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  }
+
+  function cross(a, b) {
+    return [
+      a[1] * b[2] - a[2] * b[1],
+      a[2] * b[0] - a[0] * b[2],
+      a[0] * b[1] - a[1] * b[0],
+    ];
+  }
+
+  function length(vector) {
+    return Math.sqrt(dot(vector, vector));
+  }
+
+  function normalize(vector) {
+    const vectorLength = length(vector) || 1;
+    return [vector[0] / vectorLength, vector[1] / vectorLength, vector[2] / vectorLength];
+  }
+
+  function directionFromAngles(yaw, pitch) {
+    const cosPitch = Math.cos(pitch);
+    return normalize([
+      Math.sin(yaw) * cosPitch,
+      Math.sin(pitch),
+      Math.cos(yaw) * cosPitch,
+    ]);
+  }
+
+  function resizeCanvas() {
+    const rect = canvas.getBoundingClientRect();
+    const nextWidth = Math.max(1, Math.round(rect.width * dpr));
+    const nextHeight = Math.max(1, Math.round(rect.height * dpr));
+    if (canvas.width !== nextWidth || canvas.height !== nextHeight) {
+      canvas.width = nextWidth;
+      canvas.height = nextHeight;
+    }
+  }
+
+  function cameraFrame() {
+    if (mode === "free") {
+      const forward = directionFromAngles(freeState.yaw, freeState.pitch);
+      const worldUp = [0, 1, 0];
+      const right = normalize(cross(forward, worldUp));
+      const up = normalize(cross(right, forward));
+      return {
+        position: freeState.position,
+        forward,
+        right,
+        up,
+      };
+    }
+
+    const forward = directionFromAngles(orbitState.yaw, orbitState.pitch);
+    const worldUp = [0, 1, 0];
+    const position = subtract(orbitState.target, scale(forward, orbitState.distance));
+    const right = normalize(cross(forward, worldUp));
+    const up = normalize(cross(right, forward));
+    return {
+      position,
+      forward,
+      right,
+      up,
+    };
+  }
+
+  function project(position) {
+    const frame = cameraFrame();
+    const relative = subtract(position, frame.position);
+    const cameraX = dot(relative, frame.right);
+    const cameraY = dot(relative, frame.up);
+    const cameraZ = dot(relative, frame.forward);
+    if (cameraZ <= radius * 0.02) return null;
+
+    const focal = Math.min(canvas.width, canvas.height) * 0.72;
+    return {
+      x: canvas.width * 0.5 + (cameraX / cameraZ) * focal,
+      y: canvas.height * 0.5 - (cameraY / cameraZ) * focal,
+      depth: cameraZ,
+    };
+  }
+
+  function draw() {
+    resizeCanvas();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#0b1012";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const projectedPoints = points
+      .map((point) => ({ point, projection: project(point.position) }))
+      .filter((entry) => entry.projection)
+      .sort((a, b) => b.projection.depth - a.projection.depth);
+
+    for (const entry of projectedPoints) {
+      const [r, g, b] = entry.point.color || [180, 200, 210];
+      const alpha = clamp(1.1 - entry.projection.depth / (radius * 7), 0.18, 0.95);
+      const size = clamp((radius * 0.5) / Math.max(entry.projection.depth, radius * 0.1), 1.2, 3.6) * dpr;
+      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+      ctx.fillRect(entry.projection.x, entry.projection.y, size, size);
+    }
+
+    for (const camera of cameras) {
+      const origin = project(camera.position);
+      if (!origin) continue;
+      const forward = camera.forward || [0, 0, 1];
+      const tip = project([
+        camera.position[0] + forward[0] * radius * 0.08,
+        camera.position[1] + forward[1] * radius * 0.08,
+        camera.position[2] + forward[2] * radius * 0.08,
+      ]);
+      if (!tip) continue;
+      ctx.strokeStyle = "rgba(255, 196, 88, 0.95)";
+      ctx.lineWidth = 1.2 * dpr;
+      ctx.beginPath();
+      ctx.moveTo(origin.x, origin.y);
+      ctx.lineTo(tip.x, tip.y);
+      ctx.stroke();
+      ctx.fillStyle = "#ffd88b";
+      ctx.beginPath();
+      ctx.arc(origin.x, origin.y, 2.6 * dpr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function panOrbit(dx, dy) {
+    const frame = cameraFrame();
+    const factor = orbitState.distance * 0.0016;
+    const offset = add(scale(frame.right, -dx * factor), scale(frame.up, dy * factor));
+    orbitState.target = add(orbitState.target, offset);
+  }
+
+  function moveFree(dx, dy, dz) {
+    const frame = cameraFrame();
+    const next = add(
+      add(scale(frame.right, dx), scale(frame.up, dy)),
+      scale(frame.forward, dz),
+    );
+    freeState.position = add(freeState.position, next);
+  }
+
+  function reset() {
+    mode = "orbit";
+    orbitState.yaw = orbitDefaults.yaw;
+    orbitState.pitch = orbitDefaults.pitch;
+    orbitState.distance = orbitDefaults.distance;
+    orbitState.target = [...orbitDefaults.target];
+    freeState.yaw = freeDefaults.yaw;
+    freeState.pitch = freeDefaults.pitch;
+    freeState.position = [...freeDefaults.position];
+    freeState.speed = freeDefaults.speed;
+    draw();
+  }
+
+  function setMode(nextMode) {
+    mode = nextMode === "free" ? "free" : "orbit";
+    draw();
+  }
+
+  function tick(timestamp) {
+    animationFrame = 0;
+    const deltaSeconds = lastTick ? Math.min(0.05, (timestamp - lastTick) / 1000) : 0.016;
+    lastTick = timestamp;
+    let changed = false;
+    if (mode === "free") {
+      const stride = freeState.speed * deltaSeconds * (pressed.has("shift") ? 3.5 : 1);
+      if (pressed.has("w")) {
+        moveFree(0, 0, stride);
+        changed = true;
+      }
+      if (pressed.has("s")) {
+        moveFree(0, 0, -stride);
+        changed = true;
+      }
+      if (pressed.has("a")) {
+        moveFree(-stride, 0, 0);
+        changed = true;
+      }
+      if (pressed.has("d")) {
+        moveFree(stride, 0, 0);
+        changed = true;
+      }
+      if (pressed.has("q")) {
+        moveFree(0, -stride, 0);
+        changed = true;
+      }
+      if (pressed.has("e")) {
+        moveFree(0, stride, 0);
+        changed = true;
+      }
+    }
+    if (changed) draw();
+    if (pressed.size) animationFrame = window.requestAnimationFrame(tick);
+  }
+
+  function ensureAnimation() {
+    if (!animationFrame) {
+      animationFrame = window.requestAnimationFrame(tick);
+    }
+  }
+
+  canvas.addEventListener("mousedown", (event) => {
+    if (event.button === 2) event.preventDefault();
+    canvas.focus();
+    dragging = true;
+    dragMode = event.shiftKey || event.button === 2 ? "pan" : "look";
+    lastX = event.clientX;
+    lastY = event.clientY;
+  });
+  window.addEventListener("mouseup", () => {
+    dragging = false;
+  });
+  window.addEventListener("mousemove", (event) => {
+    if (!dragging) return;
+    const dx = event.clientX - lastX;
+    const dy = event.clientY - lastY;
+    lastX = event.clientX;
+    lastY = event.clientY;
+    if (mode === "free") {
+      if (dragMode === "pan") {
+        moveFree(-dx * freeState.speed * 0.02, dy * freeState.speed * 0.02, 0);
+      } else {
+        freeState.yaw += dx * 0.008;
+        freeState.pitch = clamp(freeState.pitch - dy * 0.008, -1.5, 1.5);
+      }
+    } else {
+      if (dragMode === "pan") {
+        panOrbit(dx, dy);
+      } else {
+        orbitState.yaw += dx * 0.008;
+        orbitState.pitch = clamp(orbitState.pitch - dy * 0.008, -1.5, 1.5);
+      }
+    }
+    draw();
+  });
+  canvas.addEventListener(
+    "wheel",
+    (event) => {
+      event.preventDefault();
+      if (mode === "free") {
+        moveFree(0, 0, (event.deltaY > 0 ? -1 : 1) * freeState.speed * 1.8);
+      } else {
+        const factor = event.deltaY > 0 ? 1.12 : 0.89;
+        orbitState.distance = clamp(orbitState.distance * factor, radius * 0.08, radius * 10);
+      }
+      draw();
+    },
+    { passive: false },
+  );
+  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+  canvas.addEventListener("keydown", (event) => {
+    const key = event.key.toLowerCase();
+    if (!["w", "a", "s", "d", "q", "e", "shift"].includes(key)) return;
+    pressed.add(key);
+    ensureAnimation();
+    event.preventDefault();
+  });
+  canvas.addEventListener("keyup", (event) => {
+    pressed.delete(event.key.toLowerCase());
+  });
+  canvas.addEventListener("blur", () => {
+    pressed.clear();
+  });
+  if (typeof ResizeObserver !== "undefined") {
+    const observer = new ResizeObserver(() => draw());
+    observer.observe(canvas);
+  }
+
+  draw();
+  return { setMode, reset };
 }

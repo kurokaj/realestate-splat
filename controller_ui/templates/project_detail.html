@@ -25,8 +25,8 @@
 
   <nav class="tabs" aria-label="Workflow tabs">
     <button type="button" class="tab-button is-active" data-tab-target="preprocess">Preprocess</button>
-    <button type="button" class="tab-button" data-tab-target="colmap">COLMAP</button>
-    <button type="button" class="tab-button" data-tab-target="training">Training</button>
+    <button type="button" class="tab-button" data-tab-target="colmap">COLMAP{% if not colmap_gate_open %} (Locked){% endif %}</button>
+    <button type="button" class="tab-button" data-tab-target="training">Training{% if not training_gate_open %} (Locked){% endif %}</button>
     <button type="button" class="tab-button" data-tab-target="activity">Activity</button>
   </nav>
 
@@ -400,65 +400,76 @@
     <section class="panel">
       <div class="panel-heading">
         <h2>Queue COLMAP</h2>
-        <span class="muted">RunPod-backed GPU stage</span>
+        <span class="muted">Manual launch after preprocess approval</span>
       </div>
+      {% if colmap_gate_open %}
       <form method="post" action="/ui/projects/{{ project.id }}/colmap" class="stack">
         <div class="grid two tight">
           <label>
             <span class="label-title">Preprocess URI <span class="info-dot" tabindex="0" data-tip="R2 preprocess/current prefix that contains frames_selected, image_manifest, capture_report, and preprocess_summary.">i</span></span>
-            <input name="preprocess_uri" value="{{ project.preprocess_current_uri or default_preprocess_uri ~ '/current' }}">
+            <input name="preprocess_uri" value="{{ colmap_form_values.preprocess_uri or project.preprocess_current_uri or default_preprocess_uri ~ '/current' }}">
           </label>
           <label>
             <span class="label-title">Output URI <span class="info-dot" tabindex="0" data-tip="Base R2 prefix for COLMAP output. The wrapper writes current/ and runs/<stage_run_id>/ under this prefix.">i</span></span>
-            <input name="output_uri" value="{{ project.colmap_current_uri.rsplit('/current', 1)[0] if project.colmap_current_uri else 'r2://' ~ default_bucket ~ '/projects/' ~ project.id ~ '/colmap' }}">
+            <input name="output_uri" value="{{ colmap_form_values.output_uri or (project.colmap_current_uri.rsplit('/current', 1)[0] if project.colmap_current_uri else 'r2://' ~ default_bucket ~ '/projects/' ~ project.id ~ '/colmap') }}">
           </label>
         </div>
         <div class="grid three tight">
           <label>
             <span class="label-title">Provider <span class="info-dot" tabindex="0" data-tip="runpod_colmap creates a disposable RunPod GPU pod. local_fake remains available for controller-only tests.">i</span></span>
             <select name="provider">
-              <option value="runpod_colmap" selected>runpod_colmap</option>
-              <option value="local_fake">local_fake</option>
+              <option value="runpod_colmap" {% if colmap_form_values.provider != "local_fake" %}selected{% endif %}>runpod_colmap</option>
+              <option value="local_fake" {% if colmap_form_values.provider == "local_fake" %}selected{% endif %}>local_fake</option>
             </select>
           </label>
           <label>
             <span class="label-title">Mode <span class="info-dot" tabindex="0" data-tip="COLMAP mapper route. Global is currently the verified faster path for the car_single smoke input.">i</span></span>
             <select name="mode">
-              <option value="global" selected>global</option>
-              <option value="incremental">incremental</option>
+              <option value="global" {% if colmap_form_values.mode != "incremental" %}selected{% endif %}>global</option>
+              <option value="incremental" {% if colmap_form_values.mode == "incremental" %}selected{% endif %}>incremental</option>
             </select>
           </label>
           <label>
             <span class="label-title">Matcher <span class="info-dot" tabindex="0" data-tip="Feature matching strategy passed to scripts/run_colmap_stage.py. Exhaustive is the verified default.">i</span></span>
             <select name="matcher">
-              <option value="exhaustive" selected>exhaustive</option>
-              <option value="sequential">sequential</option>
-              <option value="vocab_tree">vocab_tree</option>
+              <option value="exhaustive" {% if colmap_form_values.matcher == "exhaustive" %}selected{% endif %}>exhaustive</option>
+              <option value="sequential" {% if colmap_form_values.matcher == "sequential" %}selected{% endif %}>sequential</option>
+              <option value="vocab_tree" {% if colmap_form_values.matcher == "vocab_tree" %}selected{% endif %}>vocab_tree</option>
             </select>
           </label>
         </div>
         <div class="grid three tight">
           <label>
             <span class="label-title">Camera model <span class="info-dot" tabindex="0" data-tip="COLMAP ImageReader camera model. SIMPLE_RADIAL is the current wrapper default.">i</span></span>
-            <input name="camera_model" value="SIMPLE_RADIAL">
+            <input name="camera_model" value="{{ colmap_form_values.camera_model or 'SIMPLE_RADIAL' }}">
+          </label>
+          <label>
+            <span class="label-title">GPU <span class="info-dot" tabindex="0" data-tip="Only sub-$1.50/hour GPUs that match the current COLMAP image architecture shortlist are shown here.">i</span></span>
+            <select name="gpu_type_id">
+              {% for gpu in colmap_gpu_options %}
+                <option value="{{ gpu.value }}" {% if colmap_form_values.gpu_type_id == gpu.value %}selected{% endif %}>{{ gpu.label }} · ${{ '%.2f'|format(gpu.price_per_hour) }}/hr · {{ gpu.vram_gb }}GB</option>
+              {% endfor %}
+            </select>
           </label>
           <label>
             <span class="label-title">Image <span class="info-dot" tabindex="0" data-tip="Optional image override. Leave empty to use RUNPOD_COLMAP_IMAGE from the controller environment.">i</span></span>
-            <input name="image" placeholder="Optional RunPod image override">
-          </label>
-          <label>
-            <span class="label-title">Git ref <span class="info-dot" tabindex="0" data-tip="Branch, tag, or commit the pod should checkout after cloning CONTROLLER_REPO_URL.">i</span></span>
-            <input name="git_ref" placeholder="Optional; defaults to CONTROLLER_GIT_REF">
+            <input name="image" value="{{ colmap_form_values.image or '' }}" placeholder="Optional RunPod image override">
           </label>
         </div>
         <div class="grid two tight">
           <label>
             <span class="label-title">Repo URL <span class="info-dot" tabindex="0" data-tip="Optional repo clone URL. Leave empty to use CONTROLLER_REPO_URL. The pod needs access to this repository.">i</span></span>
-            <input name="repo_url" placeholder="Optional; defaults to CONTROLLER_REPO_URL">
+            <input name="repo_url" value="{{ colmap_form_values.repo_url or '' }}" placeholder="Optional; defaults to CONTROLLER_REPO_URL">
           </label>
           <label>
+            <span class="label-title">Git ref <span class="info-dot" tabindex="0" data-tip="Branch, tag, or commit the pod should checkout after cloning CONTROLLER_REPO_URL.">i</span></span>
+            <input name="git_ref" value="{{ colmap_form_values.git_ref or '' }}" placeholder="Optional; defaults to CONTROLLER_GIT_REF">
+          </label>
+        </div>
+        <div class="grid one tight">
+          <label>
             <span class="label-title">R2 endpoint override <span class="info-dot" tabindex="0" data-tip="Optional S3-compatible endpoint override for this COLMAP run. Leave empty to use environment R2_ENDPOINT.">i</span></span>
-            <input name="endpoint_url" placeholder="Optional; normally from environment">
+            <input name="endpoint_url" value="{{ colmap_form_values.endpoint_url or '' }}" placeholder="Optional; normally from environment">
           </label>
         </div>
         <div class="button-row">
@@ -469,30 +480,44 @@
           <button type="submit">Queue COLMAP</button>
         </div>
       </form>
+      {% else %}
+        <p class="empty">Approve the latest preprocess run first to unlock manual COLMAP queueing.</p>
+      {% endif %}
     </section>
 
     <section class="panel">
       <div class="panel-heading">
         <h2>COLMAP Inspection</h2>
-        {% if colmap_runs %}
-          <span class="status status-{{ colmap_runs[0].status }}">{{ colmap_runs[0].status }}</span>
+        {% if latest_colmap_run %}
+          <span class="status status-{{ latest_colmap_run.status }}">{{ latest_colmap_run.status }}</span>
         {% endif %}
       </div>
       <div class="inspection-grid">
-        <div class="viewer-placeholder">
-          Point cloud and camera poses will render here once the COLMAP stage publishes viewer data in R2.
+        <div class="viewer-surface" data-colmap-viewer-url="/ui/projects/{{ project.id }}/colmap-viewer">
+          <canvas class="viewer-canvas" tabindex="0" aria-label="COLMAP sparse viewer"></canvas>
+          <div class="viewer-overlay">
+            <span class="viewer-status">Loading sparse viewer...</span>
+          </div>
+          <div class="viewer-toolbar">
+            <button type="button" class="viewer-button is-active" data-viewer-mode="orbit">Orbit</button>
+            <button type="button" class="viewer-button" data-viewer-mode="free">Free View</button>
+            <button type="button" class="viewer-button" data-viewer-reset>Reset</button>
+          </div>
+          <div class="viewer-help">
+            Drag to look, Shift-drag or right-drag to pan, wheel to move. In Free View use WASD + Q/E.
+          </div>
         </div>
         <div>
-          <h3>COLMAP Stats</h3>
-          {% if colmap_stats_rows %}
+          <h3>COLMAP Run Info</h3>
+          {% if colmap_info_rows %}
             <dl class="stat-list">
-              {% for stat in colmap_stats_rows %}
+              {% for stat in colmap_info_rows %}
                 <dt>{{ stat.label }}</dt>
                 <dd>{{ stat.value }}</dd>
               {% endfor %}
             </dl>
           {% else %}
-            <p class="empty">No COLMAP stats yet.</p>
+            <p class="empty">No COLMAP run info yet.</p>
           {% endif %}
         </div>
       </div>
@@ -517,6 +542,7 @@
           <span class="muted">{{ colmap_runs|length }} total</span>
         </div>
         {% set stage_table_runs = colmap_runs %}
+        {% set stage_table_variant = "colmap" %}
         {% include "stage_run_table.html" %}
       </section>
     {% endif %}
@@ -525,18 +551,147 @@
   <section class="tab-panel" data-tab-panel="training">
     <section class="panel">
       <div class="panel-heading">
-        <h2>Training</h2>
-        {% if training_runs %}
-          <span class="status status-{{ training_runs[0].status }}">{{ training_runs[0].status }}</span>
+        <h2>Queue Training</h2>
+        {% if latest_training_run %}
+          <span class="status status-{{ latest_training_run.status }}">{{ latest_training_run.status }}</span>
         {% endif %}
       </div>
-      {% if training_runs %}
-        {% set stage_table_runs = training_runs %}
-        {% include "stage_run_table.html" %}
+      {% if training_gate_open %}
+      <form method="post" action="/ui/projects/{{ project.id }}/training" class="stack">
+        <div class="grid three tight">
+          <label>
+            <span class="label-title">Preprocess URI <span class="info-dot" tabindex="0" data-tip="Approved preprocess/current input used for Nerfstudio data preparation.">i</span></span>
+            <input name="preprocess_uri" value="{{ training_form_values.preprocess_uri or project.preprocess_current_uri or '' }}">
+          </label>
+          <label>
+            <span class="label-title">COLMAP URI <span class="info-dot" tabindex="0" data-tip="Approved colmap/current input with sparse reconstruction used for training.">i</span></span>
+            <input name="colmap_uri" value="{{ training_form_values.colmap_uri or project.colmap_current_uri or '' }}">
+          </label>
+          <label>
+            <span class="label-title">Output URI <span class="info-dot" tabindex="0" data-tip="Base R2 prefix for training outputs. current/ stores the latest exported splat and training summary.">i</span></span>
+            <input name="output_uri" value="{{ training_form_values.output_uri or ('r2://' ~ default_bucket ~ '/projects/' ~ project.id ~ '/training') }}">
+          </label>
+        </div>
+        <div class="grid three tight">
+          <label>
+            <span class="label-title">Provider <span class="info-dot" tabindex="0" data-tip="runpod_training starts a disposable GPU pod and runs scripts/run_training_stage.py inside it.">i</span></span>
+            <select name="provider">
+              <option value="runpod_training" {% if training_form_values.provider != "local_fake" %}selected{% endif %}>runpod_training</option>
+              <option value="local_fake" {% if training_form_values.provider == "local_fake" %}selected{% endif %}>local_fake</option>
+            </select>
+          </label>
+          <label>
+            <span class="label-title">Method <span class="info-dot" tabindex="0" data-tip="Nerfstudio method. splatfacto is the current supported default.">i</span></span>
+            <input name="method" value="{{ training_form_values.method or 'splatfacto' }}">
+          </label>
+          <label>
+            <span class="label-title">GPU <span class="info-dot" tabindex="0" data-tip="Manual GPU choice for the training pod. Defaults help, but launch is always explicit from this tab.">i</span></span>
+            <select name="gpu_type_id">
+              {% for gpu in training_gpu_options %}
+                <option value="{{ gpu.value }}" {% if training_form_values.gpu_type_id == gpu.value %}selected{% endif %}>{{ gpu.label }} · ${{ '%.2f'|format(gpu.price_per_hour) }}/hr · {{ gpu.vram_gb }}GB</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+        <div class="grid three tight">
+          <label>
+            <span class="label-title">Max steps <span class="info-dot" tabindex="0" data-tip="Maximum Nerfstudio training iterations for this run.">i</span></span>
+            <input name="max_steps" type="number" value="{{ training_form_values.max_steps or 100 }}">
+          </label>
+          <label>
+            <span class="label-title">Save every <span class="info-dot" tabindex="0" data-tip="Checkpoint save interval in training steps.">i</span></span>
+            <input name="save_every" type="number" value="{{ training_form_values.save_every or 50 }}">
+          </label>
+          <label>
+            <span class="label-title">Eval every <span class="info-dot" tabindex="0" data-tip="Evaluation interval used for training metrics and snapshots.">i</span></span>
+            <input name="eval_every" type="number" value="{{ training_form_values.eval_every or 50 }}">
+          </label>
+        </div>
+        <div class="grid three tight">
+          <label>
+            <span class="label-title">Num downscales <span class="info-dot" tabindex="0" data-tip="Downscale levels created during Nerfstudio data preparation.">i</span></span>
+            <input name="num_downscales" type="number" value="{{ training_form_values.num_downscales or 1 }}">
+          </label>
+          <label>
+            <span class="label-title">Image <span class="info-dot" tabindex="0" data-tip="Optional image override. Leave empty to use RUNPOD_TRAINING_IMAGE from the controller environment.">i</span></span>
+            <input name="image" value="{{ training_form_values.image or '' }}" placeholder="Optional training image override">
+          </label>
+          <label>
+            <span class="label-title">R2 endpoint override <span class="info-dot" tabindex="0" data-tip="Optional S3-compatible endpoint override for this training run.">i</span></span>
+            <input name="endpoint_url" value="{{ training_form_values.endpoint_url or '' }}" placeholder="Optional; normally from environment">
+          </label>
+        </div>
+        <div class="grid two tight">
+          <label>
+            <span class="label-title">Repo URL <span class="info-dot" tabindex="0" data-tip="Optional repo clone URL used inside the RunPod training pod.">i</span></span>
+            <input name="repo_url" value="{{ training_form_values.repo_url or '' }}" placeholder="Optional; defaults to CONTROLLER_REPO_URL">
+          </label>
+          <label>
+            <span class="label-title">Git ref <span class="info-dot" tabindex="0" data-tip="Branch, tag, or commit the training pod should checkout before running scripts/run_training_stage.py.">i</span></span>
+            <input name="git_ref" value="{{ training_form_values.git_ref or '' }}" placeholder="Optional; defaults to CONTROLLER_GIT_REF">
+          </label>
+        </div>
+        <div class="button-row">
+          <label class="checkbox-row">
+            <input type="checkbox" name="export" value="true" {% if training_form_values.export != false %}checked{% endif %}>
+            Export PLY
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" name="dry_run" value="true">
+            Dry run
+          </label>
+          <button type="submit">Queue Training</button>
+        </div>
+      </form>
       {% else %}
-        <p class="empty">No training run yet.</p>
+        <p class="empty">Approve the latest COLMAP run first to unlock manual training queueing.</p>
       {% endif %}
     </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>Training Run Info</h2>
+        <span class="muted">Latest queued or completed training metadata</span>
+      </div>
+      {% if training_info_rows %}
+        <dl class="stat-list">
+          {% for stat in training_info_rows %}
+            <dt>{{ stat.label }}</dt>
+            <dd>{{ stat.value }}</dd>
+          {% endfor %}
+        </dl>
+      {% else %}
+        <p class="empty">No training run info yet.</p>
+      {% endif %}
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>Latest Training Summary</h2>
+        <span class="muted">Raw stage summary JSON</span>
+      </div>
+      {% if latest_training_run %}
+        <pre>{{ latest_training_run.summary_json|json_pretty }}</pre>
+      {% else %}
+        <pre>No training run yet.</pre>
+      {% endif %}
+    </section>
+
+      {% if training_runs %}
+      <section class="panel">
+        <div class="panel-heading">
+          <h2>Training Runs</h2>
+          <span class="muted">{{ training_runs|length }} total</span>
+        </div>
+        {% set stage_table_runs = training_runs %}
+        {% set stage_table_variant = "training" %}
+        {% include "stage_run_table.html" %}
+      </section>
+      {% else %}
+      <section class="panel">
+        <p class="empty">No training run yet.</p>
+      </section>
+      {% endif %}
   </section>
 
   <section class="tab-panel" data-tab-panel="activity">
@@ -546,6 +701,7 @@
         <span class="muted">{{ stage_runs|length }} total</span>
       </div>
       {% set stage_table_runs = stage_runs %}
+      {% set stage_table_variant = "activity" %}
       {% include "stage_run_table.html" %}
     </section>
 

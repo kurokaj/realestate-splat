@@ -28,10 +28,17 @@ from controller_common.config import (
     runpod_colmap_image,
     runpod_colmap_poll_seconds,
     runpod_colmap_timeout_seconds,
+    runpod_training_cloud_type,
+    runpod_training_container_disk_gb,
+    runpod_training_gpu_types,
+    runpod_training_image,
+    runpod_training_poll_seconds,
+    runpod_training_timeout_seconds,
     stage_python_bin,
 )
 from controller_common.db import claim_next_queued_stage, complete_stage_run, connect, create_event, ensure_schema
 from controller_common.fake_provider import FakeProvider
+from controller_common.runpod_gpus import normalize_gpu_types
 from controller_common.runpod_provider import RunpodClient
 
 
@@ -58,6 +65,8 @@ def run_once(*, worker_id: str) -> bool:
             summary, output_uri = run_local_preprocess(stage_run)
         elif stage_run["provider"] == "runpod_colmap" and stage_run["stage"] == "colmap":
             summary, output_uri = run_runpod_colmap(stage_run)
+        elif stage_run["provider"] == "runpod_training" and stage_run["stage"] == "training":
+            summary, output_uri = run_runpod_training(stage_run)
         else:
             summary, output_uri = run_fake_stage(stage_run)
 
@@ -324,6 +333,111 @@ def run_runpod_colmap(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]:
             delete_runpod_pod(client, stage_run_id=stage_run_id, pod_id=pod.id, reason="stage_finished")
 
 
+def run_runpod_training(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    stage_run_id = stage_run["id"]
+    inputs = stage_run["input_uri_json"] or {}
+    preprocess_uri = inputs.get("preprocess_uri")
+    colmap_uri = inputs.get("colmap_uri")
+    output_base_uri = inputs.get("output_uri")
+    if not preprocess_uri:
+        raise ValueError("runpod_training requires input_uri_json.preprocess_uri")
+    if not colmap_uri:
+        raise ValueError("runpod_training requires input_uri_json.colmap_uri")
+    if not output_base_uri:
+        raise ValueError("runpod_training requires input_uri_json.output_uri")
+    require_r2_uri(preprocess_uri, "preprocess_uri")
+    require_r2_uri(colmap_uri, "colmap_uri")
+    require_r2_uri(output_base_uri, "output_uri")
+
+    remote_command = build_training_stage_shell_command(stage_run, inputs)
+    current_uri = f"{output_base_uri.rstrip('/')}/current"
+    image = stage_run.get("image") or inputs.get("image") or runpod_training_image()
+    with connect() as conn:
+        create_event(
+            conn,
+            stage_run_id=stage_run_id,
+            kind="runpod_training_prepared",
+            message="Prepared RunPod training pod command",
+            payload={
+                "image": image,
+                "gpu_type_ids": inputs.get("gpu_type_ids") or runpod_training_gpu_types(),
+                "dry_run": bool(inputs.get("dry_run")),
+            },
+        )
+        conn.execute(
+            """
+            UPDATE stage_runs
+            SET command = %s,
+                image = %s,
+                progress_json = %s,
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (
+                remote_command,
+                image,
+                Jsonb({"percent": 10, "message": "RunPod training command prepared"}),
+                stage_run_id,
+            ),
+        )
+
+    if inputs.get("dry_run"):
+        return (
+            {
+                "provider": "runpod_training",
+                "stage": "training",
+                "dry_run": True,
+                "image": image,
+                "method": inputs.get("method", "splatfacto"),
+                "max_steps": inputs.get("max_steps", 100),
+                "stage_result_uri": f"{current_uri}/stage_result.json",
+                "training_summary_uri": f"{current_uri}/training_summary.json",
+            },
+            current_uri,
+        )
+
+    pod_payload = build_runpod_training_pod_payload(stage_run, inputs, image=image, remote_command=remote_command)
+    client = RunpodClient()
+    pod = client.create_pod(pod_payload)
+    with connect() as conn:
+        create_event(
+            conn,
+            stage_run_id=stage_run_id,
+            kind="runpod_pod_created",
+            message="Created RunPod training pod",
+            payload={"pod_id": pod.id, "image": image},
+        )
+        conn.execute(
+            """
+            UPDATE stage_runs
+            SET provider_job_id = %s,
+                provider_pod_id = %s,
+                status = 'training_pod_starting',
+                progress_json = %s,
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (pod.id, pod.id, Jsonb({"percent": 20, "message": "RunPod training pod created"}), stage_run_id),
+        )
+
+    keep_pod = bool(inputs.get("keep_pod"))
+    try:
+        stage_result = wait_for_runpod_stage_result(
+            stage_run_id,
+            client,
+            pod.id,
+            output_base_uri,
+            stage="training",
+            poll_seconds=runpod_training_poll_seconds(),
+            timeout_seconds=runpod_training_timeout_seconds(),
+        )
+        training_summary = load_optional_json_from_r2(f"{current_uri}/training_summary.json")
+        return compact_training_summary(stage_result, training_summary, provider_job_id=pod.id), current_uri
+    finally:
+        if not keep_pod:
+            delete_runpod_pod(client, stage_run_id=stage_run_id, pod_id=pod.id, reason="stage_finished")
+
+
 def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str, Any]) -> str:
     repo_url = inputs.get("repo_url") or controller_repo_url()
     if not repo_url:
@@ -368,6 +482,58 @@ def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str
     )
 
 
+def build_training_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str, Any]) -> str:
+    repo_url = inputs.get("repo_url") or controller_repo_url()
+    if not repo_url:
+        raise ValueError("CONTROLLER_REPO_URL or input_uri_json.repo_url is required for runpod_training")
+    git_ref = inputs.get("git_ref") or controller_git_ref()
+    output_uri = inputs["output_uri"].rstrip("/")
+    command = [
+        "python3",
+        "scripts/run_training_stage.py",
+        "--project-id",
+        stage_run["project_id"],
+        "--stage-run-id",
+        stage_run["id"],
+        "--preprocess-uri",
+        inputs["preprocess_uri"],
+        "--colmap-uri",
+        inputs["colmap_uri"],
+        "--output-uri",
+        output_uri,
+        "--method",
+        inputs.get("method", "splatfacto"),
+        "--max-steps",
+        str(inputs.get("max_steps", 100)),
+        "--save-every",
+        str(inputs.get("save_every", 50)),
+        "--eval-every",
+        str(inputs.get("eval_every", 50)),
+        "--num-downscales",
+        str(inputs.get("num_downscales", 1)),
+    ]
+    if inputs.get("export", True):
+        command.append("--export")
+    else:
+        command.append("--no-export")
+    for train_arg in inputs.get("train_options", []):
+        append_argparse_value(command, "--train-option", train_arg)
+
+    return "\n".join(
+        [
+            "set -euo pipefail",
+            "mkdir -p /workspace",
+            "cd /workspace",
+            f"if [ ! -d Buildvision3D/.git ]; then git clone --branch {shlex.quote(git_ref)} {shlex.quote(repo_url)} Buildvision3D; fi",
+            "cd /workspace/Buildvision3D",
+            f"git fetch origin {shlex.quote(git_ref)} || true",
+            f"git checkout {shlex.quote(git_ref)}",
+            "git pull --ff-only || true",
+            " ".join(shlex.quote(part) for part in command),
+        ]
+    )
+
+
 def build_runpod_colmap_pod_payload(
     stage_run: dict[str, Any],
     inputs: dict[str, Any],
@@ -386,7 +552,10 @@ def build_runpod_colmap_pod_payload(
     if missing_env:
         raise ValueError(f"Missing required RunPod/R2 environment variables: {', '.join(missing_env)}")
 
-    gpu_type_ids = inputs.get("gpu_type_ids") or runpod_colmap_gpu_types()
+    raw_gpu_type_ids = inputs.get("gpu_type_ids") or runpod_colmap_gpu_types()
+    if isinstance(raw_gpu_type_ids, str):
+        raw_gpu_type_ids = [raw_gpu_type_ids]
+    gpu_type_ids = normalize_gpu_types(raw_gpu_type_ids)
     return {
         "name": f"buildvision3d-colmap-{stage_run['project_id']}-{stage_run['id']}"[:80],
         "imageName": image,
@@ -406,27 +575,89 @@ def build_runpod_colmap_pod_payload(
     }
 
 
+def build_runpod_training_pod_payload(
+    stage_run: dict[str, Any],
+    inputs: dict[str, Any],
+    *,
+    image: str,
+    remote_command: str,
+) -> dict[str, Any]:
+    env = {
+        "AWS_ACCESS_KEY_ID": os.environ.get("AWS_ACCESS_KEY_ID", ""),
+        "AWS_SECRET_ACCESS_KEY": os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
+        "AWS_DEFAULT_REGION": os.environ.get("AWS_DEFAULT_REGION", "auto"),
+        "R2_ENDPOINT": inputs.get("endpoint_url") or r2_endpoint() or "",
+        "R2_BUCKET": os.environ.get("R2_BUCKET", ""),
+    }
+    missing_env = [key for key, value in env.items() if key != "AWS_DEFAULT_REGION" and not value]
+    if missing_env:
+        raise ValueError(f"Missing required RunPod/R2 environment variables: {', '.join(missing_env)}")
+
+    raw_gpu_type_ids = inputs.get("gpu_type_ids") or runpod_training_gpu_types()
+    if isinstance(raw_gpu_type_ids, str):
+        raw_gpu_type_ids = [raw_gpu_type_ids]
+    gpu_type_ids = normalize_gpu_types(raw_gpu_type_ids)
+    return {
+        "name": f"buildvision3d-training-{stage_run['project_id']}-{stage_run['id']}"[:80],
+        "imageName": image,
+        "computeType": "GPU",
+        "cloudType": inputs.get("cloud_type") or runpod_training_cloud_type(),
+        "gpuCount": int(inputs.get("gpu_count") or 1),
+        "gpuTypeIds": gpu_type_ids,
+        "gpuTypePriority": inputs.get("gpu_type_priority") or "availability",
+        "containerDiskInGb": int(inputs.get("container_disk_gb") or runpod_training_container_disk_gb()),
+        "minVCPUPerGPU": int(inputs.get("min_vcpu_per_gpu") or 8),
+        "minRAMPerGPU": int(inputs.get("min_ram_per_gpu") or 32),
+        "dockerEntrypoint": ["bash", "-lc"],
+        "dockerStartCmd": [remote_command],
+        "env": env,
+        "ports": [],
+        "supportPublicIp": False,
+    }
+
+
 def wait_for_colmap_stage_result(
     stage_run_id: str,
     client: RunpodClient,
     pod_id: str,
     output_base_uri: str,
 ) -> dict[str, Any]:
+    return wait_for_runpod_stage_result(
+        stage_run_id,
+        client,
+        pod_id,
+        output_base_uri,
+        stage="colmap",
+        poll_seconds=runpod_colmap_poll_seconds(),
+        timeout_seconds=runpod_colmap_timeout_seconds(),
+    )
+
+
+def wait_for_runpod_stage_result(
+    stage_run_id: str,
+    client: RunpodClient,
+    pod_id: str,
+    output_base_uri: str,
+    *,
+    stage: str,
+    poll_seconds: float,
+    timeout_seconds: float,
+) -> dict[str, Any]:
     started = time.monotonic()
-    poll_seconds = runpod_colmap_poll_seconds()
-    timeout_seconds = runpod_colmap_timeout_seconds()
     result_uri = f"{output_base_uri.rstrip('/')}/current/stage_result.json"
     last_pod_status = None
+    running_status = f"{stage}_running"
+    stage_label = stage.upper()
     while True:
         if stage_was_cancelled(stage_run_id):
-            raise RuntimeError("Stage was cancelled while RunPod COLMAP was running")
+            raise RuntimeError(f"Stage was cancelled while RunPod {stage_label} was running")
         stage_result = load_optional_json_from_r2(result_uri)
         if stage_result:
             status = stage_result.get("status")
-            record_progress(stage_run_id, 95, f"Found COLMAP stage_result.json with status {status}", kind="runpod_colmap_stage_result")
+            record_progress(stage_run_id, 95, f"Found {stage_label} stage_result.json with status {status}", kind=f"runpod_{stage}_stage_result")
             if status == "completed":
                 return stage_result
-            raise RuntimeError(stage_result.get("error_message") or f"COLMAP stage_result status was {status}")
+            raise RuntimeError(stage_result.get("error_message") or f"{stage_label} stage_result status was {status}")
 
         pod_status = provider_pod_status(client, pod_id)
         if pod_status != last_pod_status:
@@ -437,17 +668,21 @@ def wait_for_colmap_stage_result(
                     stage_run_id=stage_run_id,
                     kind="runpod_pod_status",
                     message=f"RunPod pod status: {pod_status or 'unknown'}",
-                    payload={"pod_id": pod_id, "status": pod_status},
+                    payload={"pod_id": pod_id, "status": pod_status, "stage": stage},
                 )
                 conn.execute(
                     """
                     UPDATE stage_runs
-                    SET status = 'colmap_running',
+                    SET status = %s,
                         progress_json = %s,
                         updated_at = now()
                     WHERE id = %s
                     """,
-                    (Jsonb({"percent": 50, "message": f"Waiting for R2 stage_result.json ({pod_status or 'pod status unknown'})"}), stage_run_id),
+                    (
+                        running_status,
+                        Jsonb({"percent": 50, "message": f"Waiting for R2 stage_result.json ({pod_status or 'pod status unknown'})"}),
+                        stage_run_id,
+                    ),
                 )
 
         if time.monotonic() - started > timeout_seconds:
@@ -468,13 +703,13 @@ def cleanup_runpod_colmap_pods(*, worker_id: str) -> None:
         print(f"RunPod watchdog skipped: {exc}", flush=True)
         return
 
-    timeout_seconds = runpod_colmap_timeout_seconds()
+    timeout_seconds = max(runpod_colmap_timeout_seconds(), runpod_training_timeout_seconds())
     with connect() as conn:
         rows = conn.execute(
             """
             SELECT *
             FROM stage_runs
-            WHERE provider = 'runpod_colmap'
+            WHERE provider IN ('runpod_colmap', 'runpod_training')
               AND provider_pod_id IS NOT NULL
               AND (
                     status = ANY(%s)
@@ -494,8 +729,9 @@ def cleanup_runpod_colmap_pods(*, worker_id: str) -> None:
                     "cancelled",
                     "awaiting_colmap_approval",
                     "colmap_rejected",
+                    "awaiting_training_approval",
                 ],
-                ["colmap_pod_starting", "colmap_running"],
+                ["colmap_pod_starting", "colmap_running", "training_pod_starting", "training_running"],
                 timeout_seconds,
             ),
         ).fetchall()
@@ -515,7 +751,7 @@ def cleanup_runpod_colmap_pods(*, worker_id: str) -> None:
                     stage_run_id=stage_run_id,
                     kind="runpod_watchdog_timeout",
                     level="warning",
-                    message="RunPod COLMAP stage exceeded watchdog timeout",
+                    message=f"RunPod {row['stage']} stage exceeded watchdog timeout",
                     payload={"pod_id": pod_id, "worker_id": worker_id, "timeout_seconds": timeout_seconds},
                 )
                 conn.execute(
@@ -630,6 +866,29 @@ def compact_colmap_summary(
         "mean_reprojection_error_px": metrics.get("mean_reprojection_error_px"),
         "stage_result_uri": f"{stage_result.get('output_uris', [''])[0].rstrip('/')}/stage_result.json" if stage_result.get("output_uris") else None,
         "reconstruction_report_uri": stage_result.get("metrics_uri"),
+    }
+
+
+def compact_training_summary(
+    stage_result: dict[str, Any],
+    training_summary: dict[str, Any],
+    *,
+    provider_job_id: str,
+) -> dict[str, Any]:
+    metadata = stage_result.get("metadata") if isinstance(stage_result.get("metadata"), dict) else {}
+    wrapper_summary = metadata.get("summary") if isinstance(metadata.get("summary"), dict) else {}
+    return {
+        "provider": "runpod_training",
+        "provider_job_id": provider_job_id,
+        "stage": "training",
+        "status": stage_result.get("status"),
+        "method": wrapper_summary.get("method") or training_summary.get("method"),
+        "selected_config": training_summary.get("selected_config"),
+        "checkpoint_count": training_summary.get("checkpoint_count"),
+        "latest_checkpoint": training_summary.get("latest_checkpoint"),
+        "exported_ply": training_summary.get("exported_ply"),
+        "training_summary_uri": stage_result.get("metrics_uri"),
+        "stage_result_uri": f"{stage_result.get('output_uris', [''])[0].rstrip('/')}/stage_result.json" if stage_result.get("output_uris") else None,
     }
 
 

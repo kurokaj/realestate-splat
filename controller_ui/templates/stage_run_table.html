@@ -15,6 +15,14 @@
           <th>Fallback</th>
           <th>Gaps</th>
           <th>Warnings</th>
+        {% elif stage_table_variant == "colmap" %}
+          <th>GPU</th>
+          <th>Pod / Job</th>
+          <th>Artifacts</th>
+        {% elif stage_table_variant == "training" %}
+          <th>GPU</th>
+          <th>Pod / Job</th>
+          <th>Artifacts</th>
         {% else %}
           <th>Output</th>
         {% endif %}
@@ -40,6 +48,21 @@
             <td>{{ run.fallback_total }}</td>
             <td>{{ run.gap_total }}</td>
             <td>{{ run.warning_summary }}</td>
+          {% elif stage_table_variant in ["colmap", "training"] %}
+            <td>{{ ((run.input_uri_json.gpu_type_ids or [])[0]) if run.input_uri_json else "" }}</td>
+            <td>
+              <span class="mono">{{ run.provider_pod_id or run.provider_job_id or "" }}</span>
+              <span class="subline">{{ run.provider }}</span>
+            </td>
+            <td>
+              {% if stage_table_variant == "colmap" %}
+                {{ run.summary_json.point_count or "" }} pts
+                <span class="subline">{{ run.summary_json.registered_images or "" }} registered</span>
+              {% else %}
+                {{ run.summary_json.checkpoint_count or "" }} checkpoints
+                <span class="subline">{{ run.summary_json.exported_ply or "" }}</span>
+              {% endif %}
+            </td>
           {% else %}
             <td class="uri-cell">{{ run.output_uri or "" }}</td>
           {% endif %}
@@ -69,7 +92,7 @@
           </td>
         </tr>
         <tr class="details-row">
-          <td colspan="{{ 10 if stage_table_variant == 'preprocess' else 7 }}">
+          <td colspan="{{ 10 if stage_table_variant in ['preprocess', 'colmap', 'training'] else 7 }}">
             <details>
               <summary>Inputs, summary, and errors</summary>
               <div class="grid three">

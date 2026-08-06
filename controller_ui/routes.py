@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import json
-import subprocess
+import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from controller_common.config import default_r2_bucket
+from controller_common.config import default_colmap_provider, default_r2_bucket, default_training_provider
 from controller_common.db import (
     cancel_stage_run,
     connect,
@@ -23,7 +23,14 @@ from controller_common.db import (
     row_to_json,
     rows_to_json,
 )
-from src.realestate_splat.storage import aws_base_command, aws_sync_arg, parse_storage_uri
+from controller_common.runpod_gpus import (
+    COLMAP_GPU_OPTIONS,
+    DEFAULT_COLMAP_GPU,
+    DEFAULT_TRAINING_GPU,
+    TRAINING_GPU_OPTIONS,
+    normalize_gpu_name,
+)
+from src.realestate_splat.storage import copy_file, parse_storage_uri
 from scripts.preprocess_video import PROFILE_DEFAULTS
 
 
@@ -97,18 +104,37 @@ def ui_create_project(
     return RedirectResponse(url=f"/ui/projects/{cleaned_project_id}", status_code=303)
 
 
+@router.get("/projects/{project_id}/colmap-viewer")
+def project_colmap_viewer(project_id: str) -> JSONResponse:
+    with connect() as conn:
+        project = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    colmap_current_uri = project.get("colmap_current_uri")
+    if not colmap_current_uri:
+        raise HTTPException(status_code=404, detail="COLMAP current output is not available yet")
+    payload = load_json_uri(f"{colmap_current_uri.rstrip('/')}/viewer/sparse_scene.json")
+    if not payload:
+        raise HTTPException(status_code=404, detail="COLMAP viewer artifact is not available yet")
+    return JSONResponse(payload)
+
+
 @router.get("/projects/{project_id}", response_class=HTMLResponse)
 def project_detail(request: Request, project_id: str) -> HTMLResponse:
     data = load_project_detail(project_id)
     if data["project"] is None:
         raise HTTPException(status_code=404, detail="Project not found")
     review = preprocess_review_context(data["project"], data["stage_runs"])
+    colmap_review = colmap_review_context(data["project"], data["stage_runs"])
+    training_review = training_review_context(data["project"], data["stage_runs"])
     return templates.TemplateResponse(
         request,
         "project_detail.html",
         {
             **data,
             **review,
+            **colmap_review,
+            **training_review,
             "default_bucket": default_r2_bucket(),
             "default_raw_uri": f"r2://{default_r2_bucket()}/projects/{project_id}/raw",
             "default_preprocess_uri": f"r2://{default_r2_bucket()}/projects/{project_id}/preprocess",
@@ -198,16 +224,20 @@ def ui_queue_colmap(
     mode: str = Form(default="global"),
     matcher: str = Form(default="exhaustive"),
     camera_model: str = Form(default="SIMPLE_RADIAL"),
-    provider: str = Form(default="runpod_colmap"),
+    provider: str = Form(default=default_colmap_provider()),
     image: Optional[str] = Form(default=None),
     repo_url: Optional[str] = Form(default=None),
     git_ref: Optional[str] = Form(default=None),
+    gpu_type_id: str = Form(default=DEFAULT_COLMAP_GPU),
     dry_run: bool = Form(default=False),
 ) -> RedirectResponse:
     with connect() as conn:
         project = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
+        latest_preprocess = latest_stage_run(conn, project_id, "preprocess")
+        if not latest_preprocess or latest_preprocess.get("status") != "approved":
+            raise HTTPException(status_code=400, detail="Preprocess must be approved before COLMAP can be queued")
         resolved_preprocess_uri = empty_to_none(preprocess_uri) or project.get("preprocess_current_uri")
         if not resolved_preprocess_uri:
             raise HTTPException(status_code=400, detail="Project preprocess_current_uri is required to queue COLMAP")
@@ -223,12 +253,78 @@ def ui_queue_colmap(
             "camera_model": camera_model,
             "repo_url": empty_to_none(repo_url),
             "git_ref": empty_to_none(git_ref),
+            "gpu_type_ids": [normalize_gpu_name(gpu_type_id)],
             "dry_run": dry_run,
         }
         create_stage_run(
             conn,
             project_id=project_id,
             stage="colmap",
+            provider=provider,
+            image=empty_to_none(image),
+            input_uri_json={key: value for key, value in input_uri_json.items() if value not in (None, [])},
+            output_uri=f"{resolved_output_uri.rstrip('/')}/current",
+        )
+    return RedirectResponse(url=f"/ui/projects/{project_id}", status_code=303)
+
+
+@router.post("/projects/{project_id}/training")
+def ui_queue_training(
+    project_id: str,
+    preprocess_uri: Optional[str] = Form(default=None),
+    colmap_uri: Optional[str] = Form(default=None),
+    output_uri: Optional[str] = Form(default=None),
+    endpoint_url: Optional[str] = Form(default=None),
+    method: str = Form(default="splatfacto"),
+    max_steps: int = Form(default=100),
+    save_every: int = Form(default=50),
+    eval_every: int = Form(default=50),
+    num_downscales: int = Form(default=1),
+    provider: str = Form(default=default_training_provider()),
+    image: Optional[str] = Form(default=None),
+    repo_url: Optional[str] = Form(default=None),
+    git_ref: Optional[str] = Form(default=None),
+    gpu_type_id: str = Form(default=DEFAULT_TRAINING_GPU),
+    export: bool = Form(default=False),
+    dry_run: bool = Form(default=False),
+) -> RedirectResponse:
+    with connect() as conn:
+        project = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        latest_colmap = latest_stage_run(conn, project_id, "colmap")
+        if not latest_colmap or latest_colmap.get("status") != "approved":
+            raise HTTPException(status_code=400, detail="COLMAP must be approved before training can be queued")
+        resolved_preprocess_uri = empty_to_none(preprocess_uri) or project.get("preprocess_current_uri")
+        resolved_colmap_uri = empty_to_none(colmap_uri) or project.get("colmap_current_uri")
+        resolved_output_uri = empty_to_none(output_uri) or f"r2://{default_r2_bucket()}/projects/{project_id}/training"
+        if not resolved_preprocess_uri:
+            raise HTTPException(status_code=400, detail="Project preprocess_current_uri is required to queue training")
+        if not resolved_colmap_uri:
+            raise HTTPException(status_code=400, detail="Project colmap_current_uri is required to queue training")
+        require_r2_uri(resolved_preprocess_uri, "preprocess_uri")
+        require_r2_uri(resolved_colmap_uri, "colmap_uri")
+        require_r2_uri(resolved_output_uri, "output_uri")
+        input_uri_json = {
+            "preprocess_uri": resolved_preprocess_uri,
+            "colmap_uri": resolved_colmap_uri,
+            "output_uri": resolved_output_uri,
+            "endpoint_url": empty_to_none(endpoint_url),
+            "method": method,
+            "max_steps": max_steps,
+            "save_every": save_every,
+            "eval_every": eval_every,
+            "num_downscales": num_downscales,
+            "repo_url": empty_to_none(repo_url),
+            "git_ref": empty_to_none(git_ref),
+            "gpu_type_ids": [normalize_gpu_name(gpu_type_id)],
+            "export": export,
+            "dry_run": dry_run,
+        }
+        create_stage_run(
+            conn,
+            project_id=project_id,
+            stage="training",
             provider=provider,
             image=empty_to_none(image),
             input_uri_json={key: value for key, value in input_uri_json.items() if value not in (None, [])},
@@ -342,6 +438,19 @@ def load_project_detail(project_id: str) -> dict[str, Any]:
     }
 
 
+def latest_stage_run(conn: Any, project_id: str, stage: str) -> Optional[dict[str, Any]]:
+    return conn.execute(
+        """
+        SELECT *
+        FROM stage_runs
+        WHERE project_id = %s AND stage = %s
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (project_id, stage),
+    ).fetchone()
+
+
 def apply_historical_approval_status(stage_runs: list[dict[str, Any]], approvals: list[dict[str, Any]]) -> None:
     approved_run_ids = {
         approval.get("stage_run_id")
@@ -441,6 +550,68 @@ def preprocess_review_context(project: dict[str, Any], stage_runs: list[dict[str
     }
 
 
+def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, Any]]) -> dict[str, Any]:
+    preprocess_runs = [run for run in stage_runs if run.get("stage") == "preprocess"]
+    latest_preprocess = preprocess_runs[0] if preprocess_runs else None
+    colmap_runs = [run for run in stage_runs if run.get("stage") == "colmap"]
+    latest_run = colmap_runs[0] if colmap_runs else None
+    input_json = latest_run.get("input_uri_json") if latest_run and isinstance(latest_run.get("input_uri_json"), dict) else {}
+    selected_gpu = first_gpu_type(input_json.get("gpu_type_ids")) or DEFAULT_COLMAP_GPU
+    colmap_output_base = project.get("colmap_current_uri", "").rsplit("/current", 1)[0] if project.get("colmap_current_uri") else ""
+    return {
+        "colmap_gate_open": bool(latest_preprocess and latest_preprocess.get("status") == "approved"),
+        "latest_colmap_run": latest_run,
+        "colmap_form_values": {
+            "preprocess_uri": input_json.get("preprocess_uri") or project.get("preprocess_current_uri") or "",
+            "output_uri": input_json.get("output_uri") or colmap_output_base,
+            "endpoint_url": input_json.get("endpoint_url") or "",
+            "mode": input_json.get("mode") or "global",
+            "matcher": input_json.get("matcher") or "exhaustive",
+            "camera_model": input_json.get("camera_model") or "SIMPLE_RADIAL",
+            "provider": latest_run.get("provider") if latest_run else default_colmap_provider(),
+            "image": latest_run.get("image") if latest_run else "",
+            "repo_url": input_json.get("repo_url") or "",
+            "git_ref": input_json.get("git_ref") or "",
+            "gpu_type_id": selected_gpu,
+        },
+        "colmap_gpu_options": COLMAP_GPU_OPTIONS,
+        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "point_count", "matcher", "mode"]),
+    }
+
+
+def training_review_context(project: dict[str, Any], stage_runs: list[dict[str, Any]]) -> dict[str, Any]:
+    colmap_runs = [run for run in stage_runs if run.get("stage") == "colmap"]
+    latest_colmap = colmap_runs[0] if colmap_runs else None
+    training_runs = [run for run in stage_runs if run.get("stage") == "training"]
+    latest_run = training_runs[0] if training_runs else None
+    input_json = latest_run.get("input_uri_json") if latest_run and isinstance(latest_run.get("input_uri_json"), dict) else {}
+    selected_gpu = first_gpu_type(input_json.get("gpu_type_ids")) or DEFAULT_TRAINING_GPU
+    training_output_base = project.get("training_current_uri", "").rsplit("/current", 1)[0] if project.get("training_current_uri") else ""
+    return {
+        "training_gate_open": bool(latest_colmap and latest_colmap.get("status") == "approved"),
+        "latest_training_run": latest_run,
+        "training_form_values": {
+            "preprocess_uri": input_json.get("preprocess_uri") or project.get("preprocess_current_uri") or "",
+            "colmap_uri": input_json.get("colmap_uri") or project.get("colmap_current_uri") or "",
+            "output_uri": input_json.get("output_uri") or training_output_base,
+            "endpoint_url": input_json.get("endpoint_url") or "",
+            "method": input_json.get("method") or "splatfacto",
+            "max_steps": input_json.get("max_steps") or 100,
+            "save_every": input_json.get("save_every") or 50,
+            "eval_every": input_json.get("eval_every") or 50,
+            "num_downscales": input_json.get("num_downscales") or 1,
+            "provider": latest_run.get("provider") if latest_run else default_training_provider(),
+            "image": latest_run.get("image") if latest_run else "",
+            "repo_url": input_json.get("repo_url") or "",
+            "git_ref": input_json.get("git_ref") or "",
+            "gpu_type_id": selected_gpu,
+            "export": input_json.get("export", True),
+        },
+        "training_gpu_options": TRAINING_GPU_OPTIONS,
+        "training_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "method", "max_steps", "checkpoint_count", "exported_ply"]),
+    }
+
+
 def ui_profile_defaults() -> dict[str, dict[str, Any]]:
     visible_fields = {
         "candidate_fps",
@@ -517,6 +688,16 @@ def compact_raw_sources(sources: list[Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def first_gpu_type(value: Any) -> Optional[str]:
+    if isinstance(value, list) and value:
+        first = value[0]
+        if isinstance(first, str) and first.strip():
+            return normalize_gpu_name(first)
+    if isinstance(value, str) and value.strip():
+        return normalize_gpu_name(value)
+    return None
+
+
 def colmap_stats_rows(stage_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     colmap_runs = [run for run in stage_runs if run.get("stage") == "colmap"]
     if not colmap_runs:
@@ -556,6 +737,33 @@ def colmap_stats_rows(stage_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if row.get("value") not in (None, "", [], {})]
 
 
+def stage_info_rows(run: Optional[dict[str, Any]], *, preferred_keys: list[str]) -> list[dict[str, Any]]:
+    if not run:
+        return []
+    rows = [
+        {"label": "Run ID", "value": run.get("id")},
+        {"label": "Status", "value": run.get("status")},
+        {"label": "Provider", "value": run.get("provider")},
+        {"label": "Attempt", "value": run.get("attempt")},
+    ]
+    input_json = run.get("input_uri_json") if isinstance(run.get("input_uri_json"), dict) else {}
+    summary = run.get("summary_json") if isinstance(run.get("summary_json"), dict) else {}
+    merged = {**input_json, **summary}
+    used = set()
+    for key in preferred_keys:
+        if key in merged and merged.get(key) not in (None, "", [], {}):
+            rows.append({"label": humanize_key(key), "value": merged.get(key)})
+            used.add(key)
+    gpu_value = first_gpu_type(input_json.get("gpu_type_ids"))
+    if gpu_value:
+        rows.append({"label": "GPU", "value": gpu_value})
+    if run.get("image"):
+        rows.append({"label": "Image", "value": run.get("image")})
+    if run.get("output_uri"):
+        rows.append({"label": "Output URI", "value": run.get("output_uri")})
+    return rows
+
+
 def humanize_key(value: str) -> str:
     if value == "points3D":
         return "3D points"
@@ -581,12 +789,13 @@ def load_json_uri(uri: str) -> dict[str, Any]:
         if not path.exists():
             return {}
         return json.loads(path.read_text(encoding="utf-8"))
-    command = aws_base_command(storage_uri, endpoint_url=None)
-    command.extend(["s3", "cp", aws_sync_arg(storage_uri), "-"])
-    completed = subprocess.run(command, check=True, capture_output=True, text=True)
-    if not completed.stdout.strip():
+    suffix = Path(storage_uri.key).suffix or ".json"
+    with tempfile.NamedTemporaryFile("w+", suffix=suffix) as handle:
+        copy_file(uri, handle.name)
+        payload = Path(handle.name).read_text(encoding="utf-8").strip()
+    if not payload:
         return {}
-    return json.loads(completed.stdout)
+    return json.loads(payload)
 
 
 def preprocess_settings(run: Optional[dict[str, Any]], capture_report: dict[str, Any]) -> dict[str, Any]:
