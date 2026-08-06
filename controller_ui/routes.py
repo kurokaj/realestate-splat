@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -429,6 +430,7 @@ def load_project_detail(project_id: str) -> dict[str, Any]:
     raw_stage_signature = stage_signature(stage_run_json)
     apply_historical_approval_status(stage_run_json, approval_json)
     apply_stage_history_labels(stage_run_json)
+    apply_stage_durations(stage_run_json)
     return {
         "project": row_to_json(project),
         "stage_runs": stage_run_json,
@@ -477,6 +479,40 @@ def apply_stage_history_labels(stage_runs: list[dict[str, Any]]) -> None:
         if not is_latest:
             run["status_label"] = "history run"
             run["status_css"] = "history"
+
+
+def apply_stage_durations(stage_runs: list[dict[str, Any]]) -> None:
+    now = datetime.now(timezone.utc)
+    for run in stage_runs:
+        started_at = parse_iso_datetime(run.get("started_at")) or parse_iso_datetime(run.get("claimed_at"))
+        finished_at = parse_iso_datetime(run.get("finished_at"))
+        if not started_at:
+            run["duration_minutes_label"] = ""
+            continue
+        end_time = finished_at or now
+        seconds = max(0.0, (end_time - started_at).total_seconds())
+        run["duration_minutes"] = round(seconds / 60.0, 2)
+        run["duration_minutes_label"] = format_duration_label(seconds)
+
+
+def parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def format_duration_label(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(round(seconds))}s"
+    minutes = seconds / 60.0
+    if minutes < 120:
+        return f"{minutes:.1f}m"
+    hours = minutes / 60.0
+    return f"{hours:.1f}h"
 
 
 def stage_signature(stage_runs: list[dict[str, Any]]) -> str:

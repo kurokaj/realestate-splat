@@ -10,6 +10,7 @@
         <th>Status</th>
         <th>Provider</th>
         <th>Progress</th>
+        <th>Duration</th>
         {% if stage_table_variant == "preprocess" %}
           <th>Selected</th>
           <th>Fallback</th>
@@ -43,6 +44,7 @@
             <progress max="100" value="{{ run.progress_json.percent or 0 }}"></progress>
             <span class="subline">{{ run.progress_json.message or "" }}</span>
           </td>
+          <td>{{ run.duration_minutes_label or "" }}</td>
           {% if stage_table_variant == "preprocess" %}
             <td>{{ run.selected_total }}</td>
             <td>{{ run.fallback_total }}</td>
@@ -92,7 +94,7 @@
           </td>
         </tr>
         <tr class="details-row">
-          <td colspan="{{ 10 if stage_table_variant in ['preprocess', 'colmap', 'training'] else 7 }}">
+          <td colspan="{{ 11 if stage_table_variant in ['preprocess', 'colmap', 'training'] else 8 }}">
             <details>
               <summary>Inputs, summary, and errors</summary>
               <div class="grid three">

@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import tempfile
+from shutil import which
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -86,6 +88,8 @@ def stage_run_id() -> str:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    args.pixi_bin = str(resolve_pixi_bin(args.pixi_bin))
+    args.nerfstudio_dir = str(resolve_nerfstudio_dir(args.nerfstudio_dir))
     run_id = args.stage_run_id or f"training_{stage_run_id()}"
 
     if args.work_dir is not None:
@@ -163,6 +167,43 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             temp_dir.cleanup()
         elif args.keep_work_dir:
             print(f"Kept work directory: {work_dir}")
+
+
+def resolve_pixi_bin(configured: str) -> Path:
+    candidates = [
+        Path(configured),
+        DEFAULT_PIXI_BIN,
+        Path("/usr/local/bin/pixi"),
+        Path("/usr/bin/pixi"),
+        Path.home() / ".pixi" / "bin" / "pixi",
+    ]
+    path_hit = which("pixi")
+    if path_hit:
+        candidates.append(Path(path_hit))
+    for candidate in candidates:
+        expanded = candidate.expanduser()
+        if expanded.exists() and expanded.is_file():
+            return expanded
+    joined = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(f"Could not find pixi. Checked: {joined}")
+
+
+def resolve_nerfstudio_dir(configured: str) -> Path:
+    candidates = [
+        Path(configured),
+        DEFAULT_NERFSTUDIO_DIR,
+        Path("/opt/nerfstudio"),
+        Path("/workspace/nerfstudio"),
+    ]
+    env_value = os.environ.get("NERFSTUDIO_DIR")
+    if env_value:
+        candidates.append(Path(env_value))
+    for candidate in candidates:
+        expanded = candidate.expanduser()
+        if (expanded / "pixi.toml").exists():
+            return expanded
+    joined = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(f"Could not find Nerfstudio pixi.toml. Checked: {joined}")
 
 
 def print_plan(
