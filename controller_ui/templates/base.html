@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Buildvision3D Controller{% endblock %}</title>
+    <link rel="stylesheet" href="/ui/static/app.css">
+    <script src="/ui/static/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/ui/projects">Buildvision3D Controller</a>
+      <nav>
+        <a href="/ui/projects">Projects</a>
+        <a href="/docs">API</a>
+      </nav>
+    </header>
+    <main class="page">
+      {% block body %}{% endblock %}
+    </main>
+  </body>
+</html>

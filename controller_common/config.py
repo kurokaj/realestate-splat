@@ -44,3 +44,59 @@ def default_r2_bucket() -> str:
 
 def r2_endpoint() -> Optional[str]:
     return os.environ.get("R2_ENDPOINT")
+
+
+def default_colmap_provider() -> str:
+    return os.environ.get("CONTROLLER_DEFAULT_COLMAP_PROVIDER", "local_fake")
+
+
+def runpod_api_key() -> Optional[str]:
+    return os.environ.get("RUNPOD_API_KEY")
+
+
+def runpod_colmap_image() -> str:
+    return os.environ.get(
+        "RUNPOD_COLMAP_IMAGE",
+        "docker.io/blackjokuro/buildvision3d-colmap-gpu:cuda12.4-colmap-r2-runtime-sm75-sm86-sm89-r2",
+    )
+
+
+def controller_repo_url() -> Optional[str]:
+    return os.environ.get("CONTROLLER_REPO_URL")
+
+
+def controller_git_ref() -> str:
+    return os.environ.get("CONTROLLER_GIT_REF", "main")
+
+
+def runpod_colmap_gpu_types() -> list[str]:
+    raw_value = os.environ.get("RUNPOD_COLMAP_GPU_TYPES", "NVIDIA RTX A6000,NVIDIA RTX 4090,NVIDIA L40S,NVIDIA L4")
+    return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+
+def runpod_colmap_cloud_type() -> str:
+    return os.environ.get("RUNPOD_COLMAP_CLOUD_TYPE", "COMMUNITY")
+
+
+def runpod_colmap_container_disk_gb() -> int:
+    raw_value = os.environ.get("RUNPOD_COLMAP_CONTAINER_DISK_GB", "80")
+    try:
+        return max(20, int(raw_value))
+    except ValueError:
+        return 80
+
+
+def runpod_colmap_poll_seconds() -> float:
+    raw_value = os.environ.get("RUNPOD_COLMAP_POLL_SECONDS", "30")
+    try:
+        return max(5.0, float(raw_value))
+    except ValueError:
+        return 30.0
+
+
+def runpod_colmap_timeout_seconds() -> float:
+    raw_value = os.environ.get("RUNPOD_COLMAP_TIMEOUT_SECONDS", "7200")
+    try:
+        return max(300.0, float(raw_value))
+    except ValueError:
+        return 7200.0

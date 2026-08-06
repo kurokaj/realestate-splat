@@ -454,12 +454,13 @@ Deliverables:
 
 ```text
 RunPod provider adapter
-COLMAP pod template config
-GPU type allowlist and max price config
+COLMAP pod config from environment
+GPU type allowlist config
 pod command builder for scripts/run_colmap_stage.py
-log polling into events
+dry-run command-shape smoke path that does not require GPU
 R2 stage_result polling
-terminate pod on success/failure
+compact reconstruction summary storage in Postgres
+terminate/delete pod on success/failure
 manual retry
 ```
 

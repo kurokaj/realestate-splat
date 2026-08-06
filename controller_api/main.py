@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from psycopg.types.json import Jsonb
 
@@ -32,6 +33,7 @@ from controller_common.raw_upload import (
     uploaded_file_names,
     write_upload_file,
 )
+from controller_ui.routes import router as ui_router
 
 
 StageName = Literal["preprocess", "colmap", "training"]
@@ -91,6 +93,21 @@ class PreprocessQueueRequest(BaseModel):
     dry_run: bool = False
 
 
+class ColmapQueueRequest(BaseModel):
+    preprocess_uri: Optional[str] = None
+    output_uri: Optional[str] = None
+    endpoint_url: Optional[str] = None
+    mode: str = "global"
+    matcher: str = "exhaustive"
+    camera_model: str = "SIMPLE_RADIAL"
+    provider: str = "runpod_colmap"
+    image: Optional[str] = None
+    repo_url: Optional[str] = None
+    git_ref: Optional[str] = None
+    colmap_args: list[str] = Field(default_factory=list)
+    dry_run: bool = False
+
+
 class ApprovalCreate(BaseModel):
     stage: StageName
     stage_run_id: Optional[str] = None
@@ -107,6 +124,8 @@ class StageActionRequest(BaseModel):
 
 
 app = FastAPI(title="Buildvision3D Controller API", version="0.1.0")
+app.mount("/ui/static", StaticFiles(directory="controller_ui/static"), name="controller-ui-static")
+app.include_router(ui_router, prefix="/ui")
 
 
 @app.on_event("startup")
@@ -356,6 +375,42 @@ def queue_preprocess(project_id: str, payload: PreprocessQueueRequest) -> dict[s
             project_id=project_id,
             stage="preprocess",
             provider=payload.provider,
+            input_uri_json={key: value for key, value in input_uri_json.items() if value not in (None, [])},
+            output_uri=f"{output_uri.rstrip('/')}/current",
+        )
+    return row_to_json(row)
+
+
+@app.post("/projects/{project_id}/colmap", status_code=201)
+def queue_colmap(project_id: str, payload: ColmapQueueRequest) -> dict[str, Any]:
+    with connect() as conn:
+        project = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        preprocess_uri = payload.preprocess_uri or project.get("preprocess_current_uri")
+        if not preprocess_uri:
+            raise HTTPException(status_code=400, detail="Project preprocess_current_uri is required to queue COLMAP")
+        output_uri = payload.output_uri or f"r2://{default_r2_bucket()}/projects/{project_id}/colmap"
+        require_r2_uri(preprocess_uri, "preprocess_uri")
+        require_r2_uri(output_uri, "output_uri")
+        input_uri_json = {
+            "preprocess_uri": preprocess_uri,
+            "output_uri": output_uri,
+            "endpoint_url": payload.endpoint_url,
+            "mode": payload.mode,
+            "matcher": payload.matcher,
+            "camera_model": payload.camera_model,
+            "repo_url": payload.repo_url,
+            "git_ref": payload.git_ref,
+            "colmap_args": payload.colmap_args,
+            "dry_run": payload.dry_run,
+        }
+        row = insert_stage_run(
+            conn,
+            project_id=project_id,
+            stage="colmap",
+            provider=payload.provider,
+            image=payload.image,
             input_uri_json={key: value for key, value in input_uri_json.items() if value not in (None, [])},
             output_uri=f"{output_uri.rstrip('/')}/current",
         )

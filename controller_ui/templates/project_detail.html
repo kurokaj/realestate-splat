@@ -1,0 +1,488 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }} - Buildvision3D Controller{% endblock %}
+{% block body %}
+  {% set preprocess_runs = stage_runs|selectattr("stage", "equalto", "preprocess")|list %}
+  {% set colmap_runs = stage_runs|selectattr("stage", "equalto", "colmap")|list %}
+  {% set training_runs = stage_runs|selectattr("stage", "equalto", "training")|list %}
+
+  <section class="section-header">
+    <div>
+      <p class="eyebrow">Project</p>
+      <h1>{{ project.name }}</h1>
+      <p class="mono muted">{{ project.id }}</p>
+    </div>
+    <span class="status status-{{ project.status }}">{{ project.status }}</span>
+  </section>
+
+  <section class="panel compact-panel">
+    <dl class="kv four">
+      <dt>Raw</dt><dd>{{ project.raw_uri or "" }}</dd>
+      <dt>Preprocess</dt><dd>{{ project.preprocess_current_uri or "" }}</dd>
+      <dt>COLMAP</dt><dd>{{ project.colmap_current_uri or "" }}</dd>
+      <dt>Training</dt><dd>{{ project.training_current_uri or "" }}</dd>
+    </dl>
+  </section>
+
+  <nav class="tabs" aria-label="Workflow tabs">
+    <button type="button" class="tab-button is-active" data-tab-target="preprocess">Preprocess</button>
+    <button type="button" class="tab-button" data-tab-target="colmap">COLMAP</button>
+    <button type="button" class="tab-button" data-tab-target="training">Training</button>
+    <button type="button" class="tab-button" data-tab-target="activity">Activity</button>
+  </nav>
+
+  <section class="tab-panel is-active" data-tab-panel="preprocess">
+    <div class="grid two">
+      <div class="panel">
+        <div class="panel-heading">
+          <h2>Upload Raw Files</h2>
+          <span class="muted">R2 upload + sources manifest</span>
+        </div>
+        <form id="raw-upload-form" class="stack" data-project-id="{{ project.id }}">
+          <label>
+            Project display name
+            <input name="name" value="{{ project.name }}">
+          </label>
+          <label>
+            Destination URI
+            <input name="destination_uri" value="{{ project.raw_uri or default_raw_uri }}">
+          </label>
+          <label>
+            Files
+            <input name="files" type="file" multiple required>
+          </label>
+          <div class="upload-table-wrap" hidden>
+            <table class="compact" id="upload-metadata-table">
+              <thead>
+                <tr>
+                  <th>File</th>
+                  <th>Role</th>
+                  <th>Location</th>
+                  <th>COLMAP</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <input name="metadata_json" type="hidden">
+          <div class="button-row">
+            <label class="checkbox-row">
+              <input type="checkbox" name="dry_run" value="true">
+              Dry run
+            </label>
+            <button type="submit">Upload to R2</button>
+          </div>
+          <pre class="result" id="upload-result" hidden></pre>
+        </form>
+      </div>
+
+      <div class="panel">
+        <div class="panel-heading">
+          <h2>Queue Preprocess</h2>
+          {% if latest_preprocess_run %}
+            <span class="status status-{{ latest_preprocess_run.status }}">{{ latest_preprocess_run.status }}</span>
+          {% endif %}
+        </div>
+        <form method="post" action="/ui/projects/{{ project.id }}/preprocess" class="stack">
+          <div class="grid two tight">
+            <label>
+              <span class="label-title">Raw URI <span class="info-dot" tabindex="0" data-tip="R2 location containing the uploaded raw sources manifest and original videos/images.">i</span></span>
+              <input name="raw_uri" value="{{ project.raw_uri or default_raw_uri }}">
+            </label>
+            <label>
+              <span class="label-title">Output URI <span class="info-dot" tabindex="0" data-tip="Base R2 prefix for this preprocess run. The worker writes current/ and history artifacts under this prefix.">i</span></span>
+              <input name="output_uri" value="{{ default_preprocess_uri }}">
+            </label>
+          </div>
+          <div class="grid three tight">
+            <label>
+              <span class="label-title">Profile <span class="info-dot" tabindex="0" data-tip="Preset defaults for capture type. Indoor rooms, outdoor orbits, and object orbits use different frame selection thresholds.">i</span></span>
+              <select name="profile">
+                {% set profile = preprocess_settings.profile or "indoor_room" %}
+                <option value="indoor_room" {% if profile == "indoor_room" %}selected{% endif %}>indoor_room</option>
+                <option value="outdoor_orbit" {% if profile == "outdoor_orbit" %}selected{% endif %}>outdoor_orbit</option>
+                <option value="object_orbit" {% if profile == "object_orbit" %}selected{% endif %}>object_orbit</option>
+              </select>
+            </label>
+            <label>
+              <span class="label-title">Candidate FPS <span class="info-dot" tabindex="0" data-tip="How many candidate frames per second to score from each video before quality filtering. Higher values inspect more frames and take longer.">i</span></span>
+              <input name="candidate_fps" type="number" step="0.1" value="{{ preprocess_settings.candidate_fps or '' }}">
+            </label>
+            <label>
+              <span class="label-title">Target min/max <span class="info-dot" tabindex="0" data-tip="Desired selected frame count range. Min protects coverage; max keeps COLMAP/training input from becoming unnecessarily large.">i</span></span>
+              <span class="split-inputs">
+                <input name="target_min" type="number" value="{{ preprocess_settings.target_min or '' }}" placeholder="min">
+                <input name="target_max" type="number" value="{{ preprocess_settings.target_max or '' }}" placeholder="max">
+              </span>
+            </label>
+          </div>
+          <div class="grid three tight">
+            <label>
+              <span class="label-title">Min blur <span class="info-dot" tabindex="0" data-tip="Minimum Laplacian variance blur score. Raise it to reject more soft frames; lower it if too many usable frames are rejected.">i</span></span>
+              <input name="min_blur" type="number" step="0.1" value="{{ preprocess_settings.min_blur or '' }}">
+            </label>
+            <label>
+              <span class="label-title">Brightness min/max <span class="info-dot" tabindex="0" data-tip="Allowed mean grayscale brightness range. Tighten this to reject underexposed or blown-out frames.">i</span></span>
+              <span class="split-inputs">
+                <input name="min_brightness" type="number" step="0.1" value="{{ preprocess_settings.min_brightness or '' }}" placeholder="min">
+                <input name="max_brightness" type="number" step="0.1" value="{{ preprocess_settings.max_brightness or '' }}" placeholder="max">
+              </span>
+            </label>
+            <label>
+              <span class="label-title">Min contrast <span class="info-dot" tabindex="0" data-tip="Minimum grayscale standard deviation. Raise it to remove flatter, low-detail frames.">i</span></span>
+              <input name="min_contrast" type="number" step="0.1" value="{{ preprocess_settings.min_contrast or '' }}">
+            </label>
+          </div>
+          <div class="grid three tight">
+            <label>
+              <span class="label-title">Min entropy <span class="info-dot" tabindex="0" data-tip="Minimum image entropy. Useful for rejecting frames without enough visual information for matching.">i</span></span>
+              <input name="min_entropy" type="number" step="0.1" value="{{ preprocess_settings.min_entropy or '' }}">
+            </label>
+            <label>
+              <span class="label-title">Coverage window <span class="info-dot" tabindex="0" data-tip="Timeline window size in seconds used to detect gaps in selected frames. Smaller windows enforce denser temporal coverage.">i</span></span>
+              <input name="coverage_window_seconds" type="number" step="0.1" value="{{ preprocess_settings.coverage_window_seconds or '' }}">
+            </label>
+            <label>
+              <span class="label-title">Min frames/window <span class="info-dot" tabindex="0" data-tip="Minimum selected frames required in each coverage window before fallback selection is attempted.">i</span></span>
+              <input name="min_frames_per_window" type="number" value="{{ preprocess_settings.min_frames_per_window or '' }}">
+            </label>
+          </div>
+          <label>
+            <span class="label-title">R2 endpoint override <span class="info-dot" tabindex="0" data-tip="Optional S3-compatible endpoint override for this queued run. Leave empty to use the Compose environment value.">i</span></span>
+            <input name="endpoint_url" placeholder="Optional; normally from environment">
+          </label>
+          <div class="button-row">
+            <label class="checkbox-row">
+              <input type="checkbox" name="dry_run" value="true">
+              Dry run
+            </label>
+            <button type="submit">Queue preprocess rerun</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="grid two">
+      <div class="panel">
+        <div class="panel-heading">
+          <h2>Quality Distribution</h2>
+          <span class="muted">Use these percentiles when tuning thresholds</span>
+        </div>
+        <div class="table-wrap">
+          <table class="compact">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>Min</th>
+                <th>P10</th>
+                <th>P50</th>
+                <th>Mean</th>
+                <th>P90</th>
+                <th>Max</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in preprocess_quality_rows %}
+                <tr>
+                  <th>{{ row.label }}</th>
+                  <td>{{ row.distribution.min }}</td>
+                  <td>{{ row.distribution.p10 }}</td>
+                  <td>{{ row.distribution.p50 }}</td>
+                  <td>{{ row.distribution.mean }}</td>
+                  <td>{{ row.distribution.p90 }}</td>
+                  <td>{{ row.distribution.max }}</td>
+                </tr>
+              {% else %}
+                <tr><td colspan="7" class="empty">No quality distribution available yet.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-heading">
+          <h2>Video Summary</h2>
+          <span class="muted">{{ preprocess_video_rows|length }} sources</span>
+        </div>
+        <div class="table-wrap">
+          <table class="compact">
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>Duration</th>
+                <th>Candidates</th>
+                <th>Selected</th>
+                <th>Fallback</th>
+                <th>Gaps</th>
+                <th>Warnings</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for video in preprocess_video_rows %}
+                <tr>
+                  <td>{{ video.source_id }}</td>
+                  <td>{{ video.duration_seconds }}</td>
+                  <td>{{ video.candidate_frame_count }}</td>
+                  <td>{{ video.selected_frame_count }}</td>
+                  <td>{{ video.fallback_count }}</td>
+                  <td>{{ video.coverage_gaps }}{% if video.largest_gap_seconds %}<span class="subline">largest {{ video.largest_gap_seconds }}s</span>{% endif %}</td>
+                  <td>{{ video.warnings|join(", ") }}</td>
+                </tr>
+              {% else %}
+                <tr><td colspan="7" class="empty">No video summary available yet.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>Image Timeline</h2>
+        {% if preprocess_capture_report %}
+          <span class="muted">Full candidate timeline from R2 capture_report.json</span>
+        {% elif preprocess_timeline_blocks %}
+          <span class="muted">Compact selected-frame timeline from summary_json</span>
+        {% else %}
+          <span class="muted">Waiting for preprocess output</span>
+        {% endif %}
+      </div>
+      <div class="legend">
+        <span style="--legend-color:#2267c7;">quality selected</span>
+        <span style="--legend-color:#13a36f;">coverage fallback</span>
+        <span style="--legend-color:rgba(101,112,128,0.45);">rejected</span>
+        <span style="--legend-color:#b7791f;">trimmed</span>
+        <span style="--legend-color:rgba(201,60,60,0.25);">coverage gap</span>
+      </div>
+      {% for block in preprocess_timeline_blocks %}
+        <section class="timeline-card">
+          <h3>{{ block.source_id }}</h3>
+          <div class="timeline-meta">
+            selected {{ block.meta.selected }}
+            {% if block.meta.quality is not none %}| quality {{ block.meta.quality }}{% endif %}
+            {% if block.meta.fallback is not none %}| fallback {{ block.meta.fallback }}{% endif %}
+            {% if block.meta.coverage_gaps is not none %}| coverage gaps {{ block.meta.coverage_gaps }}{% endif %}
+            {% if block.meta.largest_gap_seconds is not none %}| largest gap {{ block.meta.largest_gap_seconds }}s{% endif %}
+          </div>
+          <div class="timeline-wrap">
+            <div class="timeline-track">
+              {% for gap in block.gaps %}
+                <span class="gap-window" style="left:{{ '%.3f'|format(gap.left) }}%;width:{{ '%.3f'|format(gap.width) }}%;" title="{{ gap.title }}"></span>
+              {% endfor %}
+              {% for tick in block.ticks %}
+                <span class="tick tick-{{ tick.decision }}" style="left:{{ '%.3f'|format(tick.left) }}%;" title="{{ tick.title }}"></span>
+              {% endfor %}
+            </div>
+            <div class="time-markers">
+              {% for marker in block.markers %}
+                <span style="left:{{ '%.3f'|format(marker.left) }}%;">{{ marker.label }}</span>
+              {% endfor %}
+            </div>
+          </div>
+        </section>
+      {% else %}
+        <div class="timeline-empty">No timeline available yet.</div>
+      {% endfor %}
+    </section>
+
+    {% if preprocess_runs %}
+      <section class="panel">
+        <div class="panel-heading">
+          <h2>Preprocess Runs</h2>
+          <span class="muted">{{ preprocess_runs|length }} total</span>
+        </div>
+        {% include "stage_run_table.html" with context %}
+      </section>
+    {% endif %}
+  </section>
+
+  <section class="tab-panel" data-tab-panel="colmap">
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>Queue COLMAP</h2>
+        <span class="muted">RunPod-backed GPU stage</span>
+      </div>
+      <form method="post" action="/ui/projects/{{ project.id }}/colmap" class="stack">
+        <div class="grid two tight">
+          <label>
+            <span class="label-title">Preprocess URI <span class="info-dot" tabindex="0" data-tip="R2 preprocess/current prefix that contains frames_selected, image_manifest, capture_report, and preprocess_summary.">i</span></span>
+            <input name="preprocess_uri" value="{{ project.preprocess_current_uri or default_preprocess_uri ~ '/current' }}">
+          </label>
+          <label>
+            <span class="label-title">Output URI <span class="info-dot" tabindex="0" data-tip="Base R2 prefix for COLMAP output. The wrapper writes current/ and runs/<stage_run_id>/ under this prefix.">i</span></span>
+            <input name="output_uri" value="{{ project.colmap_current_uri.rsplit('/current', 1)[0] if project.colmap_current_uri else 'r2://' ~ default_bucket ~ '/projects/' ~ project.id ~ '/colmap' }}">
+          </label>
+        </div>
+        <div class="grid three tight">
+          <label>
+            <span class="label-title">Provider <span class="info-dot" tabindex="0" data-tip="runpod_colmap creates a disposable RunPod GPU pod. local_fake remains available for controller-only tests.">i</span></span>
+            <select name="provider">
+              <option value="runpod_colmap" selected>runpod_colmap</option>
+              <option value="local_fake">local_fake</option>
+            </select>
+          </label>
+          <label>
+            <span class="label-title">Mode <span class="info-dot" tabindex="0" data-tip="COLMAP mapper route. Global is currently the verified faster path for the car_single smoke input.">i</span></span>
+            <select name="mode">
+              <option value="global" selected>global</option>
+              <option value="incremental">incremental</option>
+            </select>
+          </label>
+          <label>
+            <span class="label-title">Matcher <span class="info-dot" tabindex="0" data-tip="Feature matching strategy passed to scripts/run_colmap_stage.py. Exhaustive is the verified default.">i</span></span>
+            <select name="matcher">
+              <option value="exhaustive" selected>exhaustive</option>
+              <option value="sequential">sequential</option>
+              <option value="vocab_tree">vocab_tree</option>
+            </select>
+          </label>
+        </div>
+        <div class="grid three tight">
+          <label>
+            <span class="label-title">Camera model <span class="info-dot" tabindex="0" data-tip="COLMAP ImageReader camera model. SIMPLE_RADIAL is the current wrapper default.">i</span></span>
+            <input name="camera_model" value="SIMPLE_RADIAL">
+          </label>
+          <label>
+            <span class="label-title">Image <span class="info-dot" tabindex="0" data-tip="Optional image override. Leave empty to use RUNPOD_COLMAP_IMAGE from the controller environment.">i</span></span>
+            <input name="image" placeholder="Optional RunPod image override">
+          </label>
+          <label>
+            <span class="label-title">Git ref <span class="info-dot" tabindex="0" data-tip="Branch, tag, or commit the pod should checkout after cloning CONTROLLER_REPO_URL.">i</span></span>
+            <input name="git_ref" placeholder="Optional; defaults to CONTROLLER_GIT_REF">
+          </label>
+        </div>
+        <div class="grid two tight">
+          <label>
+            <span class="label-title">Repo URL <span class="info-dot" tabindex="0" data-tip="Optional repo clone URL. Leave empty to use CONTROLLER_REPO_URL. The pod needs access to this repository.">i</span></span>
+            <input name="repo_url" placeholder="Optional; defaults to CONTROLLER_REPO_URL">
+          </label>
+          <label>
+            <span class="label-title">R2 endpoint override <span class="info-dot" tabindex="0" data-tip="Optional S3-compatible endpoint override for this COLMAP run. Leave empty to use environment R2_ENDPOINT.">i</span></span>
+            <input name="endpoint_url" placeholder="Optional; normally from environment">
+          </label>
+        </div>
+        <div class="button-row">
+          <label class="checkbox-row">
+            <input type="checkbox" name="dry_run" value="true">
+            Dry run
+          </label>
+          <button type="submit">Queue COLMAP</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>COLMAP Inspection</h2>
+        {% if colmap_runs %}
+          <span class="status status-{{ colmap_runs[0].status }}">{{ colmap_runs[0].status }}</span>
+        {% endif %}
+      </div>
+      <div class="inspection-grid">
+        <div class="viewer-placeholder">
+          Point cloud and camera poses will render here once the COLMAP stage publishes viewer data in R2.
+        </div>
+        <div>
+          <h3>COLMAP Stats</h3>
+          {% if colmap_stats_rows %}
+            <dl class="stat-list">
+              {% for stat in colmap_stats_rows %}
+                <dt>{{ stat.label }}</dt>
+                <dd>{{ stat.value }}</dd>
+              {% endfor %}
+            </dl>
+          {% else %}
+            <p class="empty">No COLMAP stats yet.</p>
+          {% endif %}
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>Latest COLMAP Summary</h2>
+        <span class="muted">Raw stage summary JSON</span>
+      </div>
+      {% if colmap_runs %}
+        <pre>{{ colmap_runs[0].summary_json|json_pretty }}</pre>
+      {% else %}
+        <pre>No COLMAP run yet.</pre>
+      {% endif %}
+    </section>
+
+    {% if colmap_runs %}
+      <section class="panel">
+        <div class="panel-heading">
+          <h2>COLMAP Runs</h2>
+          <span class="muted">{{ colmap_runs|length }} total</span>
+        </div>
+        {% set stage_table_runs = colmap_runs %}
+        {% include "stage_run_table.html" %}
+      </section>
+    {% endif %}
+  </section>
+
+  <section class="tab-panel" data-tab-panel="training">
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>Training</h2>
+        {% if training_runs %}
+          <span class="status status-{{ training_runs[0].status }}">{{ training_runs[0].status }}</span>
+        {% endif %}
+      </div>
+      {% if training_runs %}
+        {% set stage_table_runs = training_runs %}
+        {% include "stage_run_table.html" %}
+      {% else %}
+        <p class="empty">No training run yet.</p>
+      {% endif %}
+    </section>
+  </section>
+
+  <section class="tab-panel" data-tab-panel="activity">
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>All Stage Runs</h2>
+        <span class="muted">{{ stage_runs|length }} total</span>
+      </div>
+      {% set stage_table_runs = stage_runs %}
+      {% include "stage_run_table.html" %}
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>Events</h2>
+        <span class="muted">Compact controller events only</span>
+      </div>
+      <div class="table-wrap">
+        <table class="compact">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Stage</th>
+              <th>Level</th>
+              <th>Kind</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for event in events %}
+              <tr>
+                <td>{{ event.created_at }}</td>
+                <td>{{ event.stage }}</td>
+                <td>{{ event.level }}</td>
+                <td>{{ event.kind }}</td>
+                <td>{{ event.message }}</td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="5" class="empty">No events yet.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+{% endblock %}

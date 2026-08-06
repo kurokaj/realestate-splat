@@ -11,14 +11,14 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from controller_common.config import database_url, default_r2_bucket
+from controller_common.config import database_url, default_colmap_provider, default_r2_bucket
 
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
 QUEUED_STATUSES = ("preprocess_queued", "colmap_queued", "training_queued")
-TERMINAL_STATUSES = ("completed", "failed", "cancelled")
+TERMINAL_STATUSES = ("approved", "completed", "failed", "cancelled")
 REJECTED_STATUS_BY_STAGE = {
     "preprocess": "preprocess_rejected",
     "colmap": "colmap_rejected",
@@ -213,7 +213,7 @@ def complete_stage_run(
         stage_run_id=stage_run_id,
         kind="stage_completed",
         message=f"{stage} stage completed",
-        payload={"summary": summary, "output_uri": output_uri},
+        payload={"output_uri": output_uri},
     )
     return updated
 
@@ -281,14 +281,17 @@ def enqueue_next_stage_after_approval(
         if stage_run["status"] != "awaiting_preprocess_approval":
             raise ValueError("Preprocess stage is not awaiting approval")
         next_stage = "colmap"
+        next_provider = default_colmap_provider()
         input_uri_json = {
             "preprocess_uri": stage_run["output_uri"] or default_current_uri(stage_run["project_id"], "preprocess"),
+            "output_uri": default_stage_output_uri(stage_run["project_id"], "colmap"),
         }
     elif stage == "colmap":
         if stage_run["status"] != "awaiting_colmap_approval":
             raise ValueError("COLMAP stage is not awaiting approval")
         project = conn.execute("SELECT * FROM projects WHERE id = %s", (stage_run["project_id"],)).fetchone()
         next_stage = "training"
+        next_provider = "local_fake"
         input_uri_json = {
             "preprocess_uri": (project or {}).get("preprocess_current_uri"),
             "colmap_uri": stage_run["output_uri"] or default_current_uri(stage_run["project_id"], "colmap"),
@@ -311,11 +314,20 @@ def enqueue_next_stage_after_approval(
         message=f"Approved {stage} stage",
         payload={"notes": notes, "next_stage": next_stage},
     )
+    conn.execute(
+        """
+        UPDATE stage_runs
+        SET status = 'approved',
+            updated_at = now()
+        WHERE id = %s
+        """,
+        (stage_run_id,),
+    )
     return create_stage_run(
         conn,
         project_id=stage_run["project_id"],
         stage=next_stage,
-        provider="local_fake",
+        provider=next_provider,
         input_uri_json={key: value for key, value in input_uri_json.items() if value},
         output_uri=default_current_uri(stage_run["project_id"], next_stage),
     )

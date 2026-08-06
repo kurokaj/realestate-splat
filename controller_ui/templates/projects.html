@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Projects - Buildvision3D Controller{% endblock %}
+{% block body %}
+  <section class="section-header">
+    <div>
+      <p class="eyebrow">Controller</p>
+      <h1>Projects</h1>
+    </div>
+    <span class="muted">Default bucket: {{ default_bucket }}</span>
+  </section>
+
+  <section class="panel">
+    <div class="panel-heading">
+      <h2>Create Project</h2>
+      <span class="muted">Start a new UI-driven run</span>
+    </div>
+    <form method="post" action="/ui/projects" class="grid three tight">
+      <label>
+        Project ID
+        <input name="project_id" placeholder="apartment_smoke_001" required>
+      </label>
+      <label>
+        Name
+        <input name="name" placeholder="Apartment smoke 001" required>
+      </label>
+      <label>
+        Existing raw URI
+        <input name="raw_uri" placeholder="Optional r2://.../raw">
+      </label>
+      <div class="button-row">
+        <button type="submit">Create</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Project</th>
+            <th>Status</th>
+            <th>Raw</th>
+            <th>Runs</th>
+            <th>Updated</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for project in projects %}
+            <tr>
+              <td>
+                <a class="strong-link" href="/ui/projects/{{ project.id }}">{{ project.name }}</a>
+                <span class="mono subline">{{ project.id }}</span>
+              </td>
+              <td><span class="status status-{{ project.status }}">{{ project.status }}</span></td>
+              <td class="uri-cell">{{ project.raw_uri or "" }}</td>
+              <td>{{ project.stage_run_count }}</td>
+              <td>{{ project.updated_at }}</td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="5" class="empty">No projects yet. Upload raw files from a project page or create one through the API.</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

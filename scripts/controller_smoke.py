@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from controller_api.main import (  # noqa: E402
+    ColmapQueueRequest,
     PreprocessQueueRequest,
     ProjectCreate,
     StageActionRequest,
@@ -21,6 +22,7 @@ from controller_api.main import (  # noqa: E402
     create_project,
     create_stage_run,
     queue_preprocess,
+    queue_colmap,
     startup,
 )
 
@@ -43,6 +45,21 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     preprocess.add_argument("--python-bin")
     preprocess.add_argument("--dry-run", action="store_true")
     preprocess.add_argument("--preprocess-arg", action="append", default=[])
+
+    colmap = subparsers.add_parser("queue-colmap", help="Create or update a project and queue COLMAP.")
+    colmap.add_argument("--project-id", required=True)
+    colmap.add_argument("--name")
+    colmap.add_argument("--preprocess-uri", required=True)
+    colmap.add_argument("--output-uri")
+    colmap.add_argument("--provider", default="runpod_colmap")
+    colmap.add_argument("--mode", default="global")
+    colmap.add_argument("--matcher", default="exhaustive")
+    colmap.add_argument("--camera-model", default="SIMPLE_RADIAL")
+    colmap.add_argument("--image")
+    colmap.add_argument("--repo-url")
+    colmap.add_argument("--git-ref")
+    colmap.add_argument("--dry-run", action="store_true")
+    colmap.add_argument("--colmap-arg", action="append", default=[])
 
     approve_parser = subparsers.add_parser("approve", help="Approve a stage and enqueue its next stage.")
     approve_parser.add_argument("stage_run_id")
@@ -79,6 +96,28 @@ def queue_local_preprocess(args: argparse.Namespace) -> None:
     print(f"queued {stage['id']} {stage['status']}")
 
 
+def queue_real_colmap(args: argparse.Namespace) -> None:
+    startup()
+    create_project(ProjectCreate(id=args.project_id, name=args.name or args.project_id))
+    stage = queue_colmap(
+        args.project_id,
+        ColmapQueueRequest(
+            preprocess_uri=args.preprocess_uri,
+            output_uri=args.output_uri,
+            provider=args.provider,
+            mode=args.mode,
+            matcher=args.matcher,
+            camera_model=args.camera_model,
+            image=args.image,
+            repo_url=args.repo_url,
+            git_ref=args.git_ref,
+            colmap_args=args.colmap_arg,
+            dry_run=args.dry_run,
+        ),
+    )
+    print(f"queued {stage['id']} {stage['status']} {stage['provider']}")
+
+
 def approve(stage_run_id: str) -> None:
     startup()
     next_stage = approve_stage_run(stage_run_id, StageActionRequest())
@@ -91,6 +130,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         fake_chain(args)
     elif args.command == "queue-preprocess":
         queue_local_preprocess(args)
+    elif args.command == "queue-colmap":
+        queue_real_colmap(args)
     elif args.command == "approve":
         approve(args.stage_run_id)
     return 0

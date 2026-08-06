@@ -334,3 +334,120 @@ worker:
 ```
 
 The repository is mounted into `/app` for live edits.
+
+## RunPod COLMAP Controller Integration
+
+The COLMAP artifact publish side already lives in `scripts/run_colmap_stage.py`.
+The controller queues and launches that wrapper; it should not duplicate COLMAP
+artifacts in Postgres.
+
+Queue COLMAP through the API:
+
+```bash
+curl -s -X POST http://localhost:8000/projects/preprocess_smoke/colmap \
+  -H 'content-type: application/json' \
+  -d '{
+    "preprocess_uri": "r2://buildvision3d-pipeline/projects/preprocess_smoke/preprocess/current",
+    "output_uri": "r2://buildvision3d-pipeline/projects/preprocess_smoke/colmap",
+    "provider": "runpod_colmap",
+    "repo_url": "https://github.com/<owner>/<repo>.git",
+    "git_ref": "main"
+  }'
+```
+
+For a non-GPU command-shape smoke test, use `dry_run=true`. This exercises API
+queueing, worker claim/dispatch, RunPod command construction, and compact
+summary storage without creating a pod:
+
+```bash
+curl -s -X POST http://localhost:8000/projects/colmap_dry/colmap \
+  -H 'content-type: application/json' \
+  -d '{
+    "preprocess_uri": "r2://buildvision3d-pipeline/projects/colmap_dry/preprocess/current",
+    "output_uri": "r2://buildvision3d-pipeline/projects/colmap_dry/colmap",
+    "provider": "runpod_colmap",
+    "repo_url": "https://example.invalid/Buildvision3D.git",
+    "git_ref": "main",
+    "dry_run": true
+  }'
+```
+
+RunPod configuration is environment-driven:
+
+```text
+RUNPOD_API_KEY
+RUNPOD_COLMAP_IMAGE
+RUNPOD_COLMAP_GPU_TYPES
+RUNPOD_COLMAP_CLOUD_TYPE
+RUNPOD_COLMAP_CONTAINER_DISK_GB
+RUNPOD_COLMAP_POLL_SECONDS
+RUNPOD_COLMAP_TIMEOUT_SECONDS
+CONTROLLER_REPO_URL
+CONTROLLER_GIT_REF
+```
+
+If `CONTROLLER_DEFAULT_COLMAP_PROVIDER=runpod_colmap`, approving preprocess
+automatically queues RunPod COLMAP. The default remains `local_fake` so cheap
+controller smoke tests still work without GPU capacity.
+
+On real success, the worker reads only the compact result from R2 and stores a
+small `stage_runs.summary_json`:
+
+```text
+provider
+provider_job_id
+stage/status
+mode/matcher
+image_count
+selected_sparse_model
+registered_images / registered_frames
+point_count
+mean_track_length
+mean_observations_per_image
+mean_reprojection_error_px
+stage_result_uri
+reconstruction_report_uri
+```
+
+Full reports, sparse models, databases, and failed-run logs remain in R2 under
+`colmap/current/` and `colmap/runs/<stage_run_id>/`.
+
+### RunPod cleanup watchdog
+
+The primary pod cleanup path is the worker's `finally` block around
+`runpod_colmap`: success, failure, timeout, or user cancellation inside the
+active wait loop attempts to delete the RunPod pod and clears
+`stage_runs.provider_pod_id` after successful deletion. `provider_job_id`
+remains as historical trace.
+
+The worker also runs a light watchdog at startup. It finds `runpod_colmap`
+stage runs with `provider_pod_id` still set when:
+
+```text
+status is approved/completed/failed/cancelled/awaiting_colmap_approval/colmap_rejected
+or
+status is colmap_pod_starting/colmap_running and updated_at is older than RUNPOD_COLMAP_TIMEOUT_SECONDS
+```
+
+Those pods are deleted through the RunPod API. Timed-out active rows are marked
+failed before deletion. This protects against common restarts/crashes, but it is
+not a replacement for checking the RunPod console during the first paid smoke
+tests.
+
+### Progress bar accuracy
+
+The RunPod COLMAP progress bar is currently coarse controller progress, not
+true COLMAP algorithm progress:
+
+```text
+10% command prepared
+20% pod created
+50% waiting for R2 stage_result.json / pod running
+95% stage_result.json found
+100% controller marked stage complete
+```
+
+The worker does not yet parse COLMAP logs into feature extraction, matching,
+mapper, model conversion, and analyzer checkpoints. Add structured checkpoint
+events later if the pod wrapper uploads progress markers or if controller log
+tailing is added.
