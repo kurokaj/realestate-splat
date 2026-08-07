@@ -858,9 +858,10 @@ def preprocess_settings(run: Optional[dict[str, Any]], capture_report: dict[str,
 def preprocess_form_values(project: dict[str, Any], run: Optional[dict[str, Any]], capture_report: dict[str, Any]) -> dict[str, Any]:
     input_json = run.get("input_uri_json") if run and isinstance(run.get("input_uri_json"), dict) else {}
     settings = preprocess_settings(run, capture_report)
+    preprocess_current_uri = project.get("preprocess_current_uri") or ""
     return {
         "raw_uri": input_json.get("raw_uri") or project.get("raw_uri") or "",
-        "output_uri": input_json.get("output_uri") or project.get("preprocess_current_uri", "").rsplit("/current", 1)[0] or "",
+        "output_uri": input_json.get("output_uri") or preprocess_current_uri.rsplit("/current", 1)[0] or "",
         "endpoint_url": input_json.get("endpoint_url") or "",
         "profile": settings.get("profile") or input_json.get("profile") or "indoor_room",
         **settings,
