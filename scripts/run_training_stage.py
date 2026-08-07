@@ -170,6 +170,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 def resolve_pixi_bin(configured: str) -> Path:
+    path_hit = which("pixi")
+    if path_hit:
+        return Path(path_hit)
+
     candidates = [
         Path(configured),
         DEFAULT_PIXI_BIN,
@@ -177,9 +181,6 @@ def resolve_pixi_bin(configured: str) -> Path:
         Path("/usr/bin/pixi"),
         Path.home() / ".pixi" / "bin" / "pixi",
     ]
-    path_hit = which("pixi")
-    if path_hit:
-        candidates.append(Path(path_hit))
     for candidate in candidates:
         expanded = candidate.expanduser()
         if expanded.exists() and expanded.is_file():

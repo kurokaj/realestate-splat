@@ -431,8 +431,10 @@ def load_project_detail(project_id: str) -> dict[str, Any]:
     apply_historical_approval_status(stage_run_json, approval_json)
     apply_stage_history_labels(stage_run_json)
     apply_stage_durations(stage_run_json)
+    project_json = row_to_json(project)
+    project_json["display_status"] = derive_project_display_status(project_json, stage_run_json)
     return {
-        "project": row_to_json(project),
+        "project": project_json,
         "stage_runs": stage_run_json,
         "stage_signature": raw_stage_signature,
         "events": rows_to_json(events),
@@ -451,6 +453,33 @@ def latest_stage_run(conn: Any, project_id: str, stage: str) -> Optional[dict[st
         """,
         (project_id, stage),
     ).fetchone()
+
+
+def derive_project_display_status(project: dict[str, Any], stage_runs: list[dict[str, Any]]) -> str:
+    latest_by_stage: dict[str, dict[str, Any]] = {}
+    for run in stage_runs:
+        stage = run.get("stage")
+        if stage and stage not in latest_by_stage:
+            latest_by_stage[stage] = run
+
+    priority = ("training", "colmap", "preprocess")
+    active_prefixes = ("_running", "_queued")
+    active_statuses = {
+        "approved",
+        "awaiting_preprocess_approval",
+        "awaiting_colmap_approval",
+    }
+    for stage in priority:
+        run = latest_by_stage.get(stage)
+        if not run:
+            continue
+        status = str(run.get("status") or "")
+        if status.endswith(active_prefixes) or status in active_statuses:
+            return status
+
+    if stage_runs:
+        return str(stage_runs[0].get("status") or project.get("status") or "created")
+    return str(project.get("status") or "created")
 
 
 def apply_historical_approval_status(stage_runs: list[dict[str, Any]], approvals: list[dict[str, Any]]) -> None:
