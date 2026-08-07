@@ -300,6 +300,16 @@ button.danger {
   overflow-x: auto;
 }
 
+.scroll-table-wrap {
+  max-height: 320px;
+  overflow-x: auto;
+  overflow-y: auto;
+}
+
+.scroll-table-wrap table {
+  margin-bottom: 0;
+}
+
 .viewer-surface {
   background: #0b1012;
   border: 1px solid #20292d;
