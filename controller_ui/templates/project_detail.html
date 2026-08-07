@@ -336,10 +336,10 @@
 
     <section class="panel">
       <div class="panel-heading">
-        <h2>Image Timeline</h2>
+        <h2>Coverage Videos</h2>
         {% if preprocess_capture_report %}
-          <span class="muted">Full candidate timeline from R2 capture_report.json</span>
-        {% elif preprocess_timeline_blocks %}
+          <span class="muted">Each video source gets its own timeline bar</span>
+        {% elif preprocess_video_timeline_blocks %}
           <span class="muted">Compact selected-frame timeline from summary_json</span>
         {% else %}
           <span class="muted">Waiting for preprocess output</span>
@@ -352,7 +352,7 @@
         <span style="--legend-color:#b7791f;">trimmed</span>
         <span style="--legend-color:rgba(201,60,60,0.25);">coverage gap</span>
       </div>
-      {% for block in preprocess_timeline_blocks %}
+      {% for block in preprocess_video_timeline_blocks %}
         <section class="timeline-card">
           <h3>{{ block.source_id }}</h3>
           <div class="timeline-meta">
@@ -379,8 +379,38 @@
           </div>
         </section>
       {% else %}
-        <div class="timeline-empty">No timeline available yet.</div>
+        <div class="timeline-empty">No coverage video timeline available yet.</div>
       {% endfor %}
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>Coverage Images</h2>
+        {% if preprocess_image_grid["items"] %}
+          <span class="muted">
+            {{ preprocess_image_grid["counts"].get("selected", 0) }} selected
+            {% if preprocess_image_grid["counts"].get("coverage_fallback") %}| {{ preprocess_image_grid["counts"].get("coverage_fallback") }} fallback{% endif %}
+            {% if preprocess_image_grid["counts"].get("rejected") %}| {{ preprocess_image_grid["counts"].get("rejected") }} rejected{% endif %}
+          </span>
+        {% else %}
+          <span class="muted">No coverage image set detected</span>
+        {% endif %}
+      </div>
+      <div class="legend">
+        <span style="--legend-color:#2267c7;">selected</span>
+        <span style="--legend-color:#13a36f;">fallback</span>
+        <span style="--legend-color:rgba(101,112,128,0.45);">rejected</span>
+        <span style="--legend-color:#b7791f;">trimmed</span>
+      </div>
+      {% if preprocess_image_grid["items"] %}
+        <div class="image-selection-grid">
+          {% for item in preprocess_image_grid["items"] %}
+            <span class="image-selection-dot tick-{{ item.decision }}" title="{{ item.title }}"></span>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="timeline-empty">No coverage image decisions available yet.</div>
+      {% endif %}
     </section>
 
     {% if preprocess_runs %}

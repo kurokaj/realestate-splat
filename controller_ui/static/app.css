@@ -385,6 +385,23 @@ button.danger {
   position: absolute;
 }
 
+.image-selection-grid {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(12px, 12px));
+  justify-content: start;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.image-selection-dot {
+  border-radius: 3px;
+  display: block;
+  height: 12px;
+  width: 12px;
+}
+
 table {
   border-collapse: collapse;
   min-width: 960px;

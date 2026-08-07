@@ -577,7 +577,8 @@ def preprocess_review_context(project: dict[str, Any], stage_runs: list[dict[str
         "preprocess_settings": preprocess_settings(latest_run, capture_report),
         "preprocess_form_values": preprocess_form_values(project, latest_run, capture_report),
         "preprocess_quality_rows": quality_distribution_rows(summary),
-        "preprocess_timeline_blocks": timeline_blocks(capture_report, latest_run),
+        "preprocess_video_timeline_blocks": video_timeline_blocks(capture_report, latest_run),
+        "preprocess_image_grid": coverage_image_grid(capture_report),
         "preprocess_video_rows": compact_video_rows(videos),
         "preprocess_run_rows": preprocess_run_rows(preprocess_runs),
         "preprocess_profile_defaults": ui_profile_defaults(),
@@ -980,12 +981,36 @@ def compact_video_rows(videos: list[Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def timeline_blocks(capture_report: dict[str, Any], run: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
+def video_timeline_blocks(capture_report: dict[str, Any], run: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
     if isinstance(capture_report, dict) and capture_report.get("videos"):
         return full_timeline_blocks(capture_report)
     if run:
         return compact_selected_timeline_blocks(run.get("summary_json") or {})
     return []
+
+
+def coverage_image_grid(capture_report: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(capture_report, dict):
+        return {"items": [], "counts": {}}
+    frames = capture_report.get("frames", [])
+    if not isinstance(frames, list):
+        return {"items": [], "counts": {}}
+    image_frames = [
+        frame for frame in frames
+        if isinstance(frame, dict) and str(frame.get("source_id") or "") == "coverage_images"
+    ]
+    items = []
+    counts = Counter()
+    for frame in image_frames:
+        decision = image_decision(frame)
+        counts[decision] += 1
+        items.append(
+            {
+                "decision": decision,
+                "title": image_hover_title(frame, decision),
+            }
+        )
+    return {"items": items, "counts": dict(counts)}
 
 
 def full_timeline_blocks(capture_report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1056,20 +1081,10 @@ def timeline_tick(frame: dict[str, Any], max_time: float) -> dict[str, Any]:
     decision = str(frame.get("decision") or frame.get("selected_by") or "selected")
     if decision == "quality":
         decision = "selected"
-    title_parts = [
-        f"{frame.get('timestamp_seconds')}s",
-        decision,
-    ]
-    if frame.get("blur_score") is not None:
-        title_parts.append(f"blur {frame.get('blur_score')}")
-    if frame.get("brightness") is not None:
-        title_parts.append(f"brightness {frame.get('brightness')}")
-    if frame.get("output_file") or frame.get("reject_reason"):
-        title_parts.append(str(frame.get("output_file") or frame.get("reject_reason")))
     return {
         "left": percent(timestamp, max_time),
         "decision": decision,
-        "title": " | ".join(title_parts),
+        "title": video_hover_title(frame, decision),
     }
 
 
@@ -1083,6 +1098,31 @@ def timeline_gap(gap: dict[str, Any], max_time: float) -> dict[str, Any]:
         "width": width,
         "title": f"{gap.get('start_seconds')}s-{gap.get('end_seconds')}s | {gap.get('candidate_frames')} candidates | {gap.get('selected_frames')} selected",
     }
+
+
+def video_hover_title(frame: dict[str, Any], decision: str) -> str:
+    timestamp = frame.get("timestamp_seconds")
+    blur_score = frame.get("blur_score")
+    parts = [f"{timestamp}s", f"blur {blur_score}"]
+    if decision not in {"selected", "coverage_fallback"}:
+        parts.append(str(frame.get("reject_reason") or decision))
+    return " | ".join(parts)
+
+
+def image_hover_title(frame: dict[str, Any], decision: str) -> str:
+    filename = frame.get("source_image") or frame.get("output_file") or frame.get("frame_index") or "image"
+    blur_score = frame.get("blur_score")
+    parts = [Path(str(filename)).name, f"blur {blur_score}"]
+    if decision not in {"selected", "coverage_fallback"}:
+        parts.append(str(frame.get("reject_reason") or decision))
+    return " | ".join(parts)
+
+
+def image_decision(frame: dict[str, Any]) -> str:
+    decision = str(frame.get("decision") or frame.get("selected_by") or "selected")
+    if decision == "quality":
+        return "selected"
+    return decision
 
 
 def time_markers(max_time: float) -> list[dict[str, Any]]:
