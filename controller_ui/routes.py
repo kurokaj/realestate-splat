@@ -1120,9 +1120,9 @@ def image_hover_title(frame: dict[str, Any], decision: str) -> str:
 
 def image_decision(frame: dict[str, Any]) -> str:
     decision = str(frame.get("decision") or frame.get("selected_by") or "selected")
-    if decision == "quality":
+    if decision in {"quality", "selected", "coverage_fallback"}:
         return "selected"
-    return decision
+    return "rejected"
 
 
 def time_markers(max_time: float) -> list[dict[str, Any]]:
