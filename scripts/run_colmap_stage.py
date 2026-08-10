@@ -20,7 +20,7 @@ if str(SRC_DIR) not in sys.path:
 
 from realestate_splat.cli import CommandResult, run_logged_command, utc_now, write_json  # noqa: E402
 from realestate_splat.stage_contract import StageResult, write_stage_result  # noqa: E402
-from realestate_splat.storage import sync_directory  # noqa: E402
+from realestate_splat.storage import copy_file, sync_directory  # noqa: E402
 from controller_common.colmap_viewer import write_sparse_viewer_payload  # noqa: E402
 
 
@@ -402,6 +402,22 @@ def upload_payloads(args: argparse.Namespace, stage_run_id: str, current_dir: Pa
         delete=True,
         exclude=["reconstruction_report.html"],
     )
+    write_upload_complete_markers(args, stage_run_id, current_dir, history_dir)
+
+
+def write_upload_complete_markers(args: argparse.Namespace, stage_run_id: str, current_dir: Path, history_dir: Path) -> None:
+    marker_payload = {
+        "stage": "colmap",
+        "stage_run_id": stage_run_id,
+        "uploaded_at": utc_now(),
+    }
+    current_marker = current_dir / "upload_complete.json"
+    history_marker = history_dir / "upload_complete.json"
+    write_json(current_marker, marker_payload)
+    write_json(history_marker, marker_payload)
+    output = args.output_uri.rstrip("/")
+    copy_file(current_marker, f"{output}/current/upload_complete.json", endpoint_url=args.endpoint_url)
+    copy_file(history_marker, f"{output}/runs/{stage_run_id}/upload_complete.json", endpoint_url=args.endpoint_url)
 
 
 def copy_if_exists(source: Path, destination: Path) -> None:

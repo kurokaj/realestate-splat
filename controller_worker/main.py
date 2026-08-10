@@ -81,6 +81,8 @@ def run_once(*, worker_id: str) -> bool:
         print(f"Completed stage run {stage_run_id}", flush=True)
         return True
     except Exception as exc:
+        if stage_run["provider"] in {"runpod_colmap", "runpod_training"}:
+            cleanup_stage_multipart_uploads(stage_run)
         with connect() as conn:
             create_event(
                 conn,
@@ -645,8 +647,10 @@ def wait_for_runpod_stage_result(
 ) -> dict[str, Any]:
     started = time.monotonic()
     result_uri = f"{output_base_uri.rstrip('/')}/current/stage_result.json"
+    upload_complete_uri = f"{output_base_uri.rstrip('/')}/current/upload_complete.json"
     last_pod_status = None
     stale_result_run_id = None
+    stale_upload_run_id = None
     running_status = f"{stage}_running"
     stage_label = stage.upper()
     while True:
@@ -671,7 +675,32 @@ def wait_for_runpod_stage_result(
             status = stage_result.get("status")
             record_progress(stage_run_id, 95, f"Found {stage_label} stage_result.json with status {status}", kind=f"runpod_{stage}_stage_result")
             if status == "completed":
-                return stage_result
+                upload_complete = load_optional_json_from_r2(upload_complete_uri)
+                if upload_complete:
+                    upload_run_id = upload_complete.get("stage_run_id")
+                    if upload_run_id and upload_run_id != stage_run_id:
+                        if stale_upload_run_id != upload_run_id:
+                            stale_upload_run_id = str(upload_run_id)
+                            record_progress(
+                                stage_run_id,
+                                96,
+                                f"Ignoring stale {stage_label} upload_complete.json from {upload_run_id}",
+                                kind=f"runpod_{stage}_stale_upload_complete",
+                            )
+                        upload_complete = {}
+                    else:
+                        stale_upload_run_id = None
+                if upload_complete:
+                    record_progress(stage_run_id, 100, f"Found {stage_label} upload_complete.json", kind=f"runpod_{stage}_upload_complete")
+                    return stage_result
+                record_progress(
+                    stage_run_id,
+                    96,
+                    f"Waiting for {stage_label} upload_complete.json after completed stage_result",
+                    kind=f"runpod_{stage}_waiting_upload_complete",
+                )
+                time.sleep(poll_seconds)
+                continue
             raise RuntimeError(stage_result.get("error_message") or f"{stage_label} stage_result status was {status}")
 
         pod_status = provider_pod_status(client, pod_id)
@@ -758,7 +787,7 @@ def cleanup_runpod_colmap_pods(*, worker_id: str) -> None:
         stage_run_id = row["id"]
         pod_id = row["provider_pod_id"]
         status = row["status"]
-        timed_out = status in {"colmap_pod_starting", "colmap_running"}
+        timed_out = status in {"colmap_pod_starting", "colmap_running", "training_pod_starting", "training_running"}
         if timed_out:
             with connect() as conn:
                 create_event(
@@ -780,6 +809,7 @@ def cleanup_runpod_colmap_pods(*, worker_id: str) -> None:
                     """,
                     (f"RunPod watchdog timed out after {timeout_seconds:.0f} seconds", stage_run_id),
                 )
+            cleanup_stage_multipart_uploads(row)
         delete_runpod_pod(client, stage_run_id=stage_run_id, pod_id=pod_id, reason="watchdog_cleanup")
 
 
@@ -833,6 +863,40 @@ def delete_runpod_pod(client: RunpodClient, *, stage_run_id: str, pod_id: str, r
                 message=message,
                 payload={"pod_id": pod_id, "reason": reason},
             )
+
+
+def cleanup_stage_multipart_uploads(stage_run: dict[str, Any]) -> None:
+    inputs = stage_run.get("input_uri_json") or {}
+    output_base_uri = inputs.get("output_uri")
+    if not output_base_uri or not str(output_base_uri).startswith("r2://"):
+        return
+    prefixes = [
+        f"{output_base_uri.rstrip('/')}/current",
+        f"{output_base_uri.rstrip('/')}/runs/{stage_run['id']}",
+    ]
+    for prefix in prefixes:
+        try:
+            aborted = abort_multipart_uploads_for_prefix(prefix)
+            if aborted:
+                with connect() as conn:
+                    create_event(
+                        conn,
+                        stage_run_id=stage_run["id"],
+                        kind="multipart_uploads_aborted",
+                        level="warning",
+                        message=f"Aborted {aborted} dangling multipart upload(s)",
+                        payload={"prefix": prefix, "aborted": aborted},
+                    )
+        except Exception as exc:
+            with connect() as conn:
+                create_event(
+                    conn,
+                    stage_run_id=stage_run["id"],
+                    kind="multipart_upload_cleanup_failed",
+                    level="warning",
+                    message=str(exc),
+                    payload={"prefix": prefix},
+                )
 
 
 def provider_pod_status(client: RunpodClient, pod_id: str) -> Optional[str]:
@@ -945,6 +1009,53 @@ def load_json_from_r2(uri: str) -> dict[str, Any]:
     if not completed.stdout.strip():
         return {}
     return json.loads(completed.stdout)
+
+
+def abort_multipart_uploads_for_prefix(uri: str) -> int:
+    parsed = urlparse(uri)
+    if parsed.scheme != "r2" or not parsed.netloc:
+        raise ValueError(f"Expected r2:// URI: {uri}")
+    command = ["aws"]
+    endpoint_url = r2_endpoint()
+    if endpoint_url:
+        command.extend(["--endpoint-url", endpoint_url])
+    command.extend(
+        [
+            "s3api",
+            "list-multipart-uploads",
+            "--bucket",
+            parsed.netloc,
+            "--prefix",
+            parsed.path.lstrip("/"),
+        ]
+    )
+    completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    payload = json.loads(completed.stdout or "{}")
+    uploads = payload.get("Uploads") or []
+    aborted = 0
+    for upload in uploads:
+        key = upload.get("Key")
+        upload_id = upload.get("UploadId")
+        if not key or not upload_id:
+            continue
+        abort_command = ["aws"]
+        if endpoint_url:
+            abort_command.extend(["--endpoint-url", endpoint_url])
+        abort_command.extend(
+            [
+                "s3api",
+                "abort-multipart-upload",
+                "--bucket",
+                parsed.netloc,
+                "--key",
+                str(key),
+                "--upload-id",
+                str(upload_id),
+            ]
+        )
+        subprocess.run(abort_command, check=True)
+        aborted += 1
+    return aborted
 
 
 def aws_cp_stdout_command(uri: str) -> list[str]:

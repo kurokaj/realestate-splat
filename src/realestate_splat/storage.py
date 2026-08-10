@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import fnmatch
+import json
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -145,6 +146,58 @@ def copy_file(
     command = aws_base_command(object_uri, endpoint_url)
     command.extend(["s3", "cp", aws_sync_arg(source_uri), aws_sync_arg(destination_uri)])
     run_command(command, dry_run)
+
+
+def abort_multipart_uploads(
+    prefix: str | Path,
+    *,
+    endpoint_url: Optional[str] = None,
+    dry_run: bool = False,
+) -> int:
+    prefix_uri = parse_storage_uri(prefix)
+    if not prefix_uri.is_object_storage or not prefix_uri.bucket:
+        raise ValueError(f"Multipart upload cleanup requires object storage URI: {prefix}")
+
+    list_command = aws_base_command(prefix_uri, endpoint_url)
+    list_command.extend(
+        [
+            "s3api",
+            "list-multipart-uploads",
+            "--bucket",
+            prefix_uri.bucket,
+            "--prefix",
+            prefix_uri.key,
+        ]
+    )
+    print("$ " + " ".join(list_command), flush=True)
+    if dry_run:
+        return 0
+
+    result = subprocess.run(list_command, check=True, capture_output=True, text=True)
+    payload = json.loads(result.stdout or "{}")
+    uploads = payload.get("Uploads") or []
+    count = 0
+    for upload in uploads:
+        key = upload.get("Key")
+        upload_id = upload.get("UploadId")
+        if not key or not upload_id:
+            continue
+        abort_command = aws_base_command(prefix_uri, endpoint_url)
+        abort_command.extend(
+            [
+                "s3api",
+                "abort-multipart-upload",
+                "--bucket",
+                prefix_uri.bucket,
+                "--key",
+                str(key),
+                "--upload-id",
+                str(upload_id),
+            ]
+        )
+        run_command(abort_command, dry_run=False)
+        count += 1
+    return count
 
 
 def aws_sync_arg(uri: StorageUri) -> str:
