@@ -5,7 +5,7 @@ ARG NS_REF="v1.1.4"
 ARG BUILD_JOBS=8
 
 ENV CUDA_HOME=/usr/local/cuda
-ENV PATH=/workspace/pixi/bin:/usr/local/cuda/bin:${PATH}
+ENV PATH=/opt/buildvision/pixi/bin:/usr/local/cuda/bin:${PATH}
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64:${LD_LIBRARY_PATH}
 
 ENV TCNN_CUDA_ARCHITECTURES=75\;86\;89
@@ -29,17 +29,17 @@ ENV CC=/usr/bin/gcc-11
 ENV CXX=/usr/bin/g++-11
 ENV CUDAHOSTCXX=/usr/bin/g++-11
 
-RUN mkdir -p /workspace/pixi \
-    && curl -fsSL https://pixi.sh/install.sh | PIXI_HOME=/workspace/pixi bash
+RUN mkdir -p /opt/buildvision/pixi \
+    && curl -fsSL https://pixi.sh/install.sh | PIXI_HOME=/opt/buildvision/pixi bash
 
-WORKDIR /workspace/opt
+WORKDIR /opt/buildvision
 
 RUN git clone https://github.com/nerfstudio-project/nerfstudio.git \
     && cd nerfstudio \
     && git checkout "${NS_REF}" \
     && rm -rf .git
 
-WORKDIR /workspace/opt/nerfstudio
+WORKDIR /opt/buildvision/nerfstudio
 
 RUN pixi run post-install
 
@@ -54,14 +54,14 @@ RUN rm -rf \
       /root/.cache/pixi \
       /root/.cache/torch \
       /root/.cache/nv \
-      /workspace/opt/nerfstudio/.pixi/pkgs \
+      /opt/buildvision/nerfstudio/.pixi/pkgs \
       /tmp/* \
-    && find /workspace/opt/nerfstudio -type d -name "__pycache__" -prune -exec rm -rf {} + \
-    && find /workspace/opt/nerfstudio -type f -name "*.pyc" -delete \
+    && find /opt/buildvision/nerfstudio -type d -name "__pycache__" -prune -exec rm -rf {} + \
+    && find /opt/buildvision/nerfstudio -type f -name "*.pyc" -delete \
     && pixi run python -c "import torch, nerfstudio; print('post-cleanup OK', torch.cuda.is_available())" \
     && pixi run ns-train --help >/tmp/ns_train_help_post_cleanup.txt \
     && pixi run ns-export gaussian-splat --help >/tmp/ns_export_gaussian_splat_help_post_cleanup.txt
 
 WORKDIR /workspace
 
-CMD ["/workspace/pixi/bin/pixi", "run", "--manifest-path", "/workspace/opt/nerfstudio/pixi.toml", "ns-train", "--help"]
+CMD ["/opt/buildvision/pixi/bin/pixi", "run", "--manifest-path", "/opt/buildvision/nerfstudio/pixi.toml", "ns-train", "--help"]

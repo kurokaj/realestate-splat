@@ -22,8 +22,10 @@ from realestate_splat.stage_contract import StageResult, write_stage_result  # n
 from realestate_splat.storage import sync_directory  # noqa: E402
 
 
-DEFAULT_PIXI_BIN = Path("/workspace/pixi/bin/pixi")
-DEFAULT_NERFSTUDIO_DIR = Path("/workspace/opt/nerfstudio")
+DEFAULT_PIXI_BIN = Path("/opt/buildvision/pixi/bin/pixi")
+LEGACY_PIXI_BIN = Path("/workspace/pixi/bin/pixi")
+DEFAULT_NERFSTUDIO_DIR = Path("/opt/buildvision/nerfstudio")
+LEGACY_NERFSTUDIO_DIR = Path("/workspace/opt/nerfstudio")
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -177,6 +179,7 @@ def resolve_pixi_bin(configured: str) -> Path:
     candidates = [
         Path(configured),
         DEFAULT_PIXI_BIN,
+        LEGACY_PIXI_BIN,
         Path("/usr/local/bin/pixi"),
         Path("/usr/bin/pixi"),
         Path.home() / ".pixi" / "bin" / "pixi",
@@ -193,6 +196,7 @@ def resolve_nerfstudio_dir(configured: str) -> Path:
     candidates = [
         Path(configured),
         DEFAULT_NERFSTUDIO_DIR,
+        LEGACY_NERFSTUDIO_DIR,
         Path("/opt/nerfstudio"),
         Path("/workspace/nerfstudio"),
     ]
