@@ -513,6 +513,8 @@ def build_training_stage_shell_command(stage_run: dict[str, Any], inputs: dict[s
         str(inputs.get("eval_every", 50)),
         "--num-downscales",
         str(inputs.get("num_downscales", 1)),
+        "--checkpoint-export-mode",
+        inputs.get("checkpoint_export_mode", "all"),
     ]
     if inputs.get("export", True):
         command.append("--export")
@@ -691,6 +693,17 @@ def wait_for_runpod_stage_result(
                     else:
                         stale_upload_run_id = None
                 if upload_complete:
+                    required_objects = upload_complete.get("required_objects") if isinstance(upload_complete.get("required_objects"), list) else []
+                    missing_objects = missing_required_objects(output_base_uri, required_objects)
+                    if missing_objects:
+                        record_progress(
+                            stage_run_id,
+                            97,
+                            f"Waiting for {len(missing_objects)} required {stage_label} object(s)",
+                            kind=f"runpod_{stage}_waiting_required_objects",
+                        )
+                        time.sleep(poll_seconds)
+                        continue
                     record_progress(stage_run_id, 100, f"Found {stage_label} upload_complete.json", kind=f"runpod_{stage}_upload_complete")
                     return stage_result
                 record_progress(
@@ -1056,6 +1069,37 @@ def abort_multipart_uploads_for_prefix(uri: str) -> int:
         subprocess.run(abort_command, check=True)
         aborted += 1
     return aborted
+
+
+def missing_required_objects(output_base_uri: str, required_objects: list[str]) -> list[str]:
+    missing: list[str] = []
+    for relative_path in required_objects:
+        uri = f"{output_base_uri.rstrip('/')}/current/{relative_path.lstrip('/')}"
+        if not object_exists_in_r2(uri):
+            missing.append(relative_path)
+    return missing
+
+
+def object_exists_in_r2(uri: str) -> bool:
+    parsed = urlparse(uri)
+    if parsed.scheme != "r2" or not parsed.netloc:
+        raise ValueError(f"Expected r2:// URI: {uri}")
+    command = ["aws"]
+    endpoint_url = r2_endpoint()
+    if endpoint_url:
+        command.extend(["--endpoint-url", endpoint_url])
+    command.extend(
+        [
+            "s3api",
+            "head-object",
+            "--bucket",
+            parsed.netloc,
+            "--key",
+            parsed.path.lstrip("/"),
+        ]
+    )
+    completed = subprocess.run(command, capture_output=True, text=True)
+    return completed.returncode == 0
 
 
 def aws_cp_stdout_command(uri: str) -> list[str]:

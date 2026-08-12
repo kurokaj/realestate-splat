@@ -41,6 +41,14 @@ class ImagePose:
     name: str
 
 
+@dataclass(frozen=True)
+class Point3D:
+    point_id: int
+    xyz: Tuple[float, float, float]
+    rgb: Tuple[int, int, int]
+    error: float
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build a Nerfstudio transforms.json dataset from COLMAP TXT output.",
@@ -120,6 +128,25 @@ def read_images(path: Path) -> List[ImagePose]:
     return images
 
 
+def read_points3d(path: Path) -> List[Point3D]:
+    points: List[Point3D] = []
+    for line in useful_lines(path):
+        parts = line.split()
+        if len(parts) < 8:
+            raise SystemExit(f"Malformed COLMAP points3D line in {path}: {line}")
+        points.append(
+            Point3D(
+                point_id=int(parts[0]),
+                xyz=(float(parts[1]), float(parts[2]), float(parts[3])),
+                rgb=(int(parts[4]), int(parts[5]), int(parts[6])),
+                error=float(parts[7]),
+            )
+        )
+    if not points:
+        raise SystemExit(f"No COLMAP sparse points found in {path}; refusing random Splatfacto initialization.")
+    return points
+
+
 def qvec_to_rotmat(qvec: Sequence[float]) -> List[List[float]]:
     qw, qx, qy, qz = qvec
     return [
@@ -165,6 +192,11 @@ def colmap_pose_to_nerfstudio_transform(image: ImagePose) -> List[List[float]]:
         opengl_camera_to_world[3],
     ]
     return transform
+
+
+def colmap_point_to_nerfstudio(point: Point3D) -> Tuple[float, float, float]:
+    x, y, z = point.xyz
+    return (x, z, -y)
 
 
 def camera_intrinsics(camera: Camera) -> Dict[str, Any]:
@@ -335,6 +367,8 @@ def build_transforms(
     frames_dir: Path,
     images: Sequence[ImagePose],
     cameras: Mapping[int, Camera],
+    points: Sequence[Point3D],
+    point_cloud_path: Path,
 ) -> Dict[str, Any]:
     manifest = manifest_by_name(run_dir)
     validate_manifest_camera_count(cameras, manifest)
@@ -373,15 +407,56 @@ def build_transforms(
     return {
         "camera_model": "OPENCV",
         "orientation_override": "none",
+        "ply_file_path": point_cloud_path.name,
         "frames": frames,
         "buildvision3d": {
             "source": "colmap_sparse_txt",
             "registered_images": len(frames),
             "camera_count": len(cameras),
+            "colmap_sparse_point_count": len(points),
+            "point_cloud_path": point_cloud_path.name,
+            "point_cloud_stats": point_cloud_stats(points),
             "multi_camera": len(cameras) > 1,
             "intrinsics_mode": "colmap_camera",
         },
     }
+
+
+def point_cloud_stats(points: Sequence[Point3D]) -> Dict[str, Any]:
+    converted = [colmap_point_to_nerfstudio(point) for point in points]
+    xs = [point[0] for point in converted]
+    ys = [point[1] for point in converted]
+    zs = [point[2] for point in converted]
+    errors = sorted(point.error for point in points)
+    midpoint = len(errors) // 2
+    median_error = errors[midpoint] if len(errors) % 2 else (errors[midpoint - 1] + errors[midpoint]) / 2.0
+    return {
+        "count": len(points),
+        "xyz_min": [min(xs), min(ys), min(zs)],
+        "xyz_max": [max(xs), max(ys), max(zs)],
+        "reprojection_error_min": errors[0],
+        "reprojection_error_median": median_error,
+        "reprojection_error_max": errors[-1],
+    }
+
+
+def write_point_cloud_ply(path: Path, points: Sequence[Point3D]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        file.write("ply\n")
+        file.write("format ascii 1.0\n")
+        file.write(f"element vertex {len(points)}\n")
+        file.write("property float x\n")
+        file.write("property float y\n")
+        file.write("property float z\n")
+        file.write("property uchar red\n")
+        file.write("property uchar green\n")
+        file.write("property uchar blue\n")
+        file.write("end_header\n")
+        for point in points:
+            x, y, z = colmap_point_to_nerfstudio(point)
+            r, g, b = point.rgb
+            file.write(f"{x:.9g} {y:.9g} {z:.9g} {r} {g} {b}\n")
 
 
 def write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -399,10 +474,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     cameras_path = colmap_text_dir / "cameras.txt"
     images_path = colmap_text_dir / "images.txt"
-    if not cameras_path.exists() or not images_path.exists():
+    points_path = colmap_text_dir / "points3D.txt"
+    if not cameras_path.exists() or not images_path.exists() or not points_path.exists():
         raise SystemExit(
             "COLMAP text export is required for multi-camera Nerfstudio preparation. "
-            f"Expected {cameras_path} and {images_path}. Rerun COLMAP with --export-text."
+            f"Expected {cameras_path}, {images_path}, and {points_path}. Rerun COLMAP with --export-text."
         )
     if not frames_dir.exists():
         raise SystemExit(f"Frames directory does not exist: {frames_dir}")
@@ -413,16 +489,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     cameras = read_cameras(cameras_path)
     images = read_images(images_path)
+    points = read_points3d(points_path)
     images_dir = data_dir / "images"
+    point_cloud_path = data_dir / "colmap_points3D.ply"
     print(f"Preparing multi-camera Nerfstudio dataset from {colmap_text_dir}")
     print(f"  registered images: {len(images)}")
     print(f"  cameras: {len(cameras)}")
+    print(f"  sparse points: {len(points)}")
     print(f"  output: {data_dir}")
 
     data_dir.mkdir(parents=True, exist_ok=True)
     copy_registered_images(images, frames_dir, images_dir)
     build_downscales(images_dir, int(args.num_downscales))
-    transforms = build_transforms(run_dir=run_dir, frames_dir=frames_dir, images=images, cameras=cameras)
+    write_point_cloud_ply(point_cloud_path, points)
+    print(f"Wrote {point_cloud_path}")
+    transforms = build_transforms(
+        run_dir=run_dir,
+        frames_dir=frames_dir,
+        images=images,
+        cameras=cameras,
+        points=points,
+        point_cloud_path=point_cloud_path,
+    )
     write_json(data_dir / "transforms.json", transforms)
     print(f"Wrote {data_dir / 'transforms.json'}")
     return 0

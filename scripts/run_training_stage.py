@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -69,6 +70,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=True,
         help="Export the latest trained gaussian splat to training/current/exports/splat.ply.",
     )
+    parser.add_argument(
+        "--checkpoint-export-mode",
+        choices=["none", "latest", "all"],
+        default="all",
+        help="Export gaussian-splat PLYs from saved training checkpoints for diagnostics.",
+    )
     parser.add_argument("--export-name", default="splat.ply", help="Canonical exported PLY filename under exports/.")
     parser.add_argument(
         "--train-option",
@@ -90,8 +97,9 @@ def stage_run_id() -> str:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
-    args.pixi_bin = str(resolve_pixi_bin(args.pixi_bin))
-    args.nerfstudio_dir = str(resolve_nerfstudio_dir(args.nerfstudio_dir))
+    if not args.dry_run:
+        args.pixi_bin = str(resolve_pixi_bin(args.pixi_bin))
+        args.nerfstudio_dir = str(resolve_nerfstudio_dir(args.nerfstudio_dir))
     run_id = args.stage_run_id or f"training_{stage_run_id()}"
 
     if args.work_dir is not None:
@@ -238,6 +246,8 @@ def print_plan(
             )
         )
         print(f"$ copy exported .ply -> {local_run_dir / 'exports' / args.export_name}")
+        if args.checkpoint_export_mode != "none":
+            print(f"$ export checkpoint PLYs ({args.checkpoint_export_mode}) -> {local_run_dir / 'exports' / 'checkpoints'}")
     print(f"$ prepare current payload -> {current_dir}")
     print(f"$ prepare history payload -> {history_dir}")
     print(f"$ sync {current_dir} -> {args.output_uri.rstrip('/')}/current")
@@ -330,12 +340,30 @@ def build_export_command(args: argparse.Namespace, local_run_dir: Path, load_con
     ]
 
 
+def build_checkpoint_export_command(args: argparse.Namespace, local_run_dir: Path, load_config: Path, checkpoint_step: int, export_dir: Path) -> List[str]:
+    return [
+        args.pixi_bin,
+        "run",
+        "--manifest-path",
+        str(Path(args.nerfstudio_dir) / "pixi.toml"),
+        "ns-export",
+        "gaussian-splat",
+        "--load-config",
+        str(load_config),
+        "--load-step",
+        str(checkpoint_step),
+        "--output-dir",
+        str(export_dir),
+    ]
+
+
 def run_training(args: argparse.Namespace, local_run_dir: Path, logs_dir: Path) -> List[CommandResult]:
     gsplat_dir = local_run_dir / "gsplat"
     gsplat_dir.mkdir(parents=True, exist_ok=True)
     results = []
     prepare_command, train_command = build_training_commands(args, local_run_dir)
     results.append(run_logged_command("prepare_nerfstudio_data", prepare_command, logs_dir, Path.cwd()))
+    validate_nerfstudio_colmap_initialization(local_run_dir)
     results.append(run_logged_command("train_splatfacto", train_command, logs_dir, gsplat_dir))
     if args.export:
         config_path = latest_file(local_run_dir / "gsplat" / "outputs", "config.yml")
@@ -349,7 +377,107 @@ def run_training(args: argparse.Namespace, local_run_dir: Path, logs_dir: Path) 
         export_output = local_run_dir / "exports" / args.export_name
         export_output.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_ply, export_output)
+        results.extend(export_checkpoint_plys(args, local_run_dir, logs_dir, gsplat_dir, config_path))
     return results
+
+
+def validate_nerfstudio_colmap_initialization(local_run_dir: Path) -> None:
+    transforms_path = local_run_dir / "nerfstudio" / "transforms.json"
+    if not transforms_path.exists():
+        raise RuntimeError(f"Nerfstudio transforms.json is missing: {transforms_path}")
+    transforms = read_json(transforms_path)
+    ply_file_path = transforms.get("ply_file_path")
+    if not ply_file_path:
+        raise RuntimeError("Nerfstudio transforms.json is missing ply_file_path; refusing possible random initialization.")
+    point_cloud_path = (transforms_path.parent / str(ply_file_path)).resolve()
+    if not point_cloud_path.exists():
+        raise RuntimeError(f"Nerfstudio COLMAP initialization PLY is missing: {point_cloud_path}")
+    point_count = parse_ply_vertex_count(point_cloud_path)
+    if not point_count:
+        raise RuntimeError(f"Nerfstudio COLMAP initialization PLY has no vertices: {point_cloud_path}")
+    print(f"Verified COLMAP sparse initialization: {point_count} points from {point_cloud_path}", flush=True)
+
+
+def export_checkpoint_plys(
+    args: argparse.Namespace,
+    local_run_dir: Path,
+    logs_dir: Path,
+    gsplat_dir: Path,
+    config_path: Path,
+) -> List[CommandResult]:
+    if args.checkpoint_export_mode == "none":
+        return []
+    checkpoints = checkpoint_records(local_run_dir / "gsplat" / "outputs")
+    if not checkpoints:
+        write_checkpoint_export_manifest(local_run_dir, [])
+        return []
+    if args.checkpoint_export_mode == "latest":
+        checkpoints = checkpoints[-1:]
+
+    results: List[CommandResult] = []
+    records: List[Dict[str, Any]] = []
+    for checkpoint in checkpoints:
+        step = checkpoint["step"]
+        export_dir = local_run_dir / "gsplat" / "exports" / "checkpoint_exports" / f"step-{step:09d}"
+        command = build_checkpoint_export_command(args, local_run_dir, config_path, step, export_dir)
+        record: Dict[str, Any] = {
+            "step": step,
+            "checkpoint": relative_or_string(checkpoint["path"], local_run_dir),
+            "status": "pending",
+        }
+        try:
+            result = run_logged_command(f"export_checkpoint_step_{step:09d}", command, logs_dir, gsplat_dir)
+            results.append(result)
+            source_ply = find_exported_ply(export_dir)
+            if source_ply is None:
+                raise RuntimeError(f"ns-export finished but no checkpoint PLY was found under {export_dir}")
+            target = local_run_dir / "exports" / "checkpoints" / f"step-{step:09d}.ply"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_ply, target)
+            record.update(
+                {
+                    "status": "completed",
+                    "ply": relative_or_string(target, local_run_dir),
+                    "ply_vertices": parse_ply_vertex_count(target),
+                    "ply_size_mb": file_size_mb(target),
+                    "source_export": relative_or_string(source_ply, local_run_dir),
+                }
+            )
+        except Exception as exc:
+            record.update({"status": "failed", "error": str(exc)})
+            print(f"Checkpoint PLY export failed for step {step}: {exc}", file=sys.stderr, flush=True)
+        records.append(record)
+
+    write_checkpoint_export_manifest(local_run_dir, records)
+    return results
+
+
+def checkpoint_records(output_dir: Path) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for path in sorted(output_dir.glob("**/*.ckpt")):
+        step = checkpoint_step(path)
+        if step is None:
+            continue
+        records.append({"step": step, "path": path})
+    return sorted(records, key=lambda record: (record["step"], str(record["path"])))
+
+
+def checkpoint_step(path: Path) -> Optional[int]:
+    match = re.search(r"step-(\d+)\.ckpt$", path.name)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def write_checkpoint_export_manifest(local_run_dir: Path, records: Sequence[Dict[str, Any]]) -> None:
+    write_json(
+        local_run_dir / "exports" / "checkpoint_exports.json",
+        {
+            "schema_version": 1,
+            "created_at": utc_now(),
+            "exports": list(records),
+        },
+    )
 
 
 def prepare_upload_payloads(
@@ -376,6 +504,7 @@ def prepare_upload_payloads(
     copy_training_outputs(local_run_dir, current_dir)
     copy_tree(local_run_dir / "exports", current_dir / "exports")
     copy_if_exists(local_run_dir / "nerfstudio" / "transforms.json", current_dir / "nerfstudio" / "transforms.json")
+    copy_if_exists(local_run_dir / "nerfstudio" / "colmap_points3D.ply", current_dir / "nerfstudio" / "colmap_points3D.ply")
 
     finished_at = utc_now()
     result = StageResult(
@@ -457,14 +586,25 @@ def training_summary(local_run_dir: Path, command_results: Sequence[CommandResul
     dataparser_path = latest_file(output_dir, "dataparser_transforms.json")
     checkpoint_files = sorted(output_dir.glob("**/*.ckpt"))
     ply_files = sorted(exports_dir.glob("*.ply")) if exports_dir.exists() else []
+    transforms = read_json(local_run_dir / "nerfstudio" / "transforms.json")
+    buildvision3d = transforms.get("buildvision3d") if isinstance(transforms.get("buildvision3d"), dict) else {}
+    init_ply = local_run_dir / "nerfstudio" / str(transforms.get("ply_file_path") or "colmap_points3D.ply")
+    checkpoint_manifest = read_json(exports_dir / "checkpoint_exports.json")
+    checkpoint_exports = checkpoint_manifest.get("exports") if isinstance(checkpoint_manifest.get("exports"), list) else []
     return {
         "schema_version": 1,
         "created_at": utc_now(),
         "output_dir": relative_or_string(output_dir, local_run_dir),
         "exports_dir": relative_or_string(exports_dir, local_run_dir) if exports_dir.exists() else None,
         "exported_ply": relative_or_string(ply_files[-1] if ply_files else None, local_run_dir),
+        "exported_ply_vertices": parse_ply_vertex_count(ply_files[-1] if ply_files else None),
+        "checkpoint_exports": checkpoint_exports,
+        "checkpoint_export_count": len(checkpoint_exports),
         "selected_config": relative_or_string(config_path, local_run_dir),
         "dataparser_transforms": relative_or_string(dataparser_path, local_run_dir),
+        "colmap_init_ply": relative_or_string(init_ply if init_ply.exists() else None, local_run_dir),
+        "colmap_init_point_count": parse_ply_vertex_count(init_ply),
+        "colmap_init_stats": buildvision3d.get("point_cloud_stats", {}),
         "checkpoint_count": len(checkpoint_files),
         "latest_checkpoint": relative_or_string(checkpoint_files[-1] if checkpoint_files else None, local_run_dir),
         "commands": [
@@ -496,6 +636,32 @@ def find_exported_ply(export_dir: Path) -> Optional[Path]:
     return max(candidates, key=lambda path: (path.stat().st_size, path.stat().st_mtime))
 
 
+def parse_ply_vertex_count(path: Optional[Path]) -> Optional[int]:
+    if path is None or not path.exists():
+        return None
+    try:
+        with path.open("rb") as file:
+            for _ in range(200):
+                raw_line = file.readline()
+                if not raw_line:
+                    break
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                match = re.match(r"element\s+vertex\s+(\d+)", line)
+                if match:
+                    return int(match.group(1))
+                if line == "end_header":
+                    break
+    except OSError:
+        return None
+    return None
+
+
+def file_size_mb(path: Optional[Path]) -> Optional[float]:
+    if path is None or not path.exists():
+        return None
+    return round(path.stat().st_size / (1024 * 1024), 2)
+
+
 def upload_payloads(args: argparse.Namespace, stage_run_id: str, current_dir: Path, history_dir: Path) -> None:
     output = args.output_uri.rstrip("/")
     sync_directory(current_dir, f"{output}/current", endpoint_url=args.endpoint_url, delete=True)
@@ -508,6 +674,7 @@ def write_upload_complete_markers(args: argparse.Namespace, stage_run_id: str, c
         "stage": "training",
         "stage_run_id": stage_run_id,
         "uploaded_at": utc_now(),
+        "required_objects": required_upload_objects(current_dir),
     }
     current_marker = current_dir / "upload_complete.json"
     history_marker = history_dir / "upload_complete.json"
@@ -516,6 +683,28 @@ def write_upload_complete_markers(args: argparse.Namespace, stage_run_id: str, c
     output = args.output_uri.rstrip("/")
     copy_file(current_marker, f"{output}/current/upload_complete.json", endpoint_url=args.endpoint_url)
     copy_file(history_marker, f"{output}/runs/{stage_run_id}/upload_complete.json", endpoint_url=args.endpoint_url)
+
+
+def required_upload_objects(current_dir: Path) -> list[str]:
+    required = [
+        "stage_result.json",
+        "training_summary.json",
+        "nerfstudio/transforms.json",
+        "nerfstudio/colmap_points3D.ply",
+    ]
+    optional_patterns = [
+        "outputs/**/config.yml",
+        "outputs/**/*.ckpt",
+        "exports/*.ply",
+        "exports/checkpoints/*.ply",
+        "exports/checkpoint_exports.json",
+    ]
+    existing: list[str] = list(required)
+    for pattern in optional_patterns:
+        candidates = sorted(path for path in current_dir.glob(pattern) if path.is_file())
+        if candidates:
+            existing.append(candidates[-1].relative_to(current_dir).as_posix())
+    return existing
 
 
 def copy_if_exists(source: Path, destination: Path) -> None:

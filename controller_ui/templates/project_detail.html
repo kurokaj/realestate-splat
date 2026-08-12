@@ -640,6 +640,14 @@
             <input name="num_downscales" type="number" value="{{ training_form_values.num_downscales or 1 }}">
           </label>
           <label>
+            <span class="label-title">Checkpoint PLYs <span class="info-dot" tabindex="0" data-tip="Exports diagnostic Gaussian PLYs from saved checkpoints after training. Use all for investigation runs, latest to reduce upload size, or none for normal runs.">i</span></span>
+            <select name="checkpoint_export_mode">
+              <option value="all" {% if training_form_values.checkpoint_export_mode != "latest" and training_form_values.checkpoint_export_mode != "none" %}selected{% endif %}>all</option>
+              <option value="latest" {% if training_form_values.checkpoint_export_mode == "latest" %}selected{% endif %}>latest</option>
+              <option value="none" {% if training_form_values.checkpoint_export_mode == "none" %}selected{% endif %}>none</option>
+            </select>
+          </label>
+          <label>
             <span class="label-title">Image <span class="info-dot" tabindex="0" data-tip="Optional image override. Leave empty to use RUNPOD_TRAINING_IMAGE from the controller environment.">i</span></span>
             <input name="image" value="{{ training_form_values.image or '' }}" placeholder="Optional training image override">
           </label>

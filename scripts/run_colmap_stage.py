@@ -410,6 +410,7 @@ def write_upload_complete_markers(args: argparse.Namespace, stage_run_id: str, c
         "stage": "colmap",
         "stage_run_id": stage_run_id,
         "uploaded_at": utc_now(),
+        "required_objects": required_upload_objects(current_dir),
     }
     current_marker = current_dir / "upload_complete.json"
     history_marker = history_dir / "upload_complete.json"
@@ -418,6 +419,18 @@ def write_upload_complete_markers(args: argparse.Namespace, stage_run_id: str, c
     output = args.output_uri.rstrip("/")
     copy_file(current_marker, f"{output}/current/upload_complete.json", endpoint_url=args.endpoint_url)
     copy_file(history_marker, f"{output}/runs/{stage_run_id}/upload_complete.json", endpoint_url=args.endpoint_url)
+
+
+def required_upload_objects(current_dir: Path) -> list[str]:
+    required = [
+        "stage_result.json",
+        "reconstruction_report.json",
+        "viewer/sparse_scene.json",
+        "sparse_txt/cameras.txt",
+        "sparse_txt/images.txt",
+        "sparse_txt/points3D.txt",
+    ]
+    return list(required)
 
 
 def copy_if_exists(source: Path, destination: Path) -> None:
