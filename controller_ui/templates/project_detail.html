@@ -457,7 +457,7 @@
             </select>
           </label>
           <label>
-            <span class="label-title">Feature extractor <span class="info-dot" tabindex="0" data-tip="Native COLMAP SIFT feature extraction. ALIKED/LightGlue need a separate feature/match import path before they can be safely exposed here.">i</span></span>
+            <span class="label-title">Feature extractor <span class="info-dot" tabindex="0" data-tip="COLMAP FeatureExtraction.type. Use SIFT with SIFT matchers, or ALIKED variants with ALIKED matchers.">i</span></span>
             <select name="feature_extractor">
               {% for option in colmap_feature_extractor_options %}
                 <option value="{{ option.value }}" {% if colmap_form_values.feature_extractor == option.value %}selected{% endif %}>{{ option.label }}</option>
@@ -467,10 +467,18 @@
         </div>
         <div class="grid three tight">
           <label>
-            <span class="label-title">Matcher <span class="info-dot" tabindex="0" data-tip="Native COLMAP matching strategy. Exhaustive is the default brute-force style pair matching; sequential is useful for continuous video frame order.">i</span></span>
+            <span class="label-title">Matching style <span class="info-dot" tabindex="0" data-tip="COLMAP pair generation style: exhaustive compares all image pairs, sequential uses frame order, vocabulary tree is for larger unordered sets.">i</span></span>
             <select name="matcher">
               {% for option in colmap_matcher_options %}
                 <option value="{{ option.value }}" {% if colmap_form_values.matcher == option.value %}selected{% endif %}>{{ option.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span class="label-title">Feature matcher <span class="info-dot" tabindex="0" data-tip="COLMAP FeatureMatching.type. SIFT_BRUTEFORCE is the default; LightGlue can improve difficult pairs but downloads ONNX model files on first use.">i</span></span>
+            <select name="matching_type">
+              {% for option in colmap_feature_matcher_options %}
+                <option value="{{ option.value }}" {% if colmap_form_values.matching_type == option.value %}selected{% endif %}>{{ option.label }}</option>
               {% endfor %}
             </select>
           </label>

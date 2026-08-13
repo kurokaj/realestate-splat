@@ -47,8 +47,9 @@ IMAGE_MANIFEST_NAME = "image_manifest.json"
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "binary": str(DEFAULT_VERDA_COLMAP),
     "mode": "incremental",
-    "feature_extractor": "sift",
+    "feature_extractor": "SIFT",
     "matcher": "exhaustive",
+    "matching_type": "SIFT_BRUTEFORCE",
     "image_dir": "frames_selected",
     "database_name": "database.db",
     "camera_model": "SIMPLE_RADIAL",
@@ -110,12 +111,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--matcher",
         choices=["exhaustive", "sequential", "vocab_tree"],
-        help="COLMAP matcher to run before mapping.",
+        help="COLMAP matching style / pair generator to run before mapping.",
     )
     parser.add_argument(
         "--feature-extractor",
-        choices=["sift"],
-        help="Feature extractor backend. The current COLMAP runtime supports native SIFT.",
+        choices=["SIFT", "sift", "ALIKED_N16ROT", "ALIKED_N32"],
+        help="COLMAP FeatureExtraction.type.",
+    )
+    parser.add_argument(
+        "--matching-type",
+        choices=["SIFT_BRUTEFORCE", "SIFT_LIGHTGLUE", "ALIKED_BRUTEFORCE", "ALIKED_LIGHTGLUE"],
+        help="COLMAP FeatureMatching.type.",
     )
     parser.add_argument(
         "--colmap-bin",
@@ -368,6 +374,7 @@ def build_settings(args: argparse.Namespace) -> Dict[str, Any]:
         "mode": args.mode,
         "feature_extractor": args.feature_extractor,
         "matcher": args.matcher,
+        "matching_type": args.matching_type,
         "image_dir": str(args.image_dir) if args.image_dir is not None else None,
         "database_name": args.database_name,
         "camera_model": args.camera_model,
@@ -386,6 +393,7 @@ def build_settings(args: argparse.Namespace) -> Dict[str, Any]:
         if value is not None:
             settings[key] = value
     settings["_single_camera_explicit"] = args.single_camera is not None
+    normalize_colmap_feature_settings(settings)
 
     merge_option_map(settings, "feature_options", parse_option_pairs(args.feature_option, "--feature-option"))
     merge_option_map(settings, "matcher_options", parse_option_pairs(args.matcher_option, "--matcher-option"))
@@ -414,6 +422,14 @@ def normalize_mapper_setting(settings: Dict[str, Any]) -> None:
         raise SystemExit("colmap.mapper must be global_mapper, mapper, incremental_mapper, or incremental.")
 
 
+def normalize_colmap_feature_settings(settings: Dict[str, Any]) -> None:
+    feature_extractor = str(settings.get("feature_extractor") or "SIFT").strip()
+    if feature_extractor.lower() == "sift":
+        feature_extractor = "SIFT"
+    settings["feature_extractor"] = feature_extractor
+    settings["matching_type"] = str(settings.get("matching_type") or "SIFT_BRUTEFORCE").strip()
+
+
 def merge_option_map(settings: Dict[str, Any], key: str, additions: Dict[str, Any]) -> None:
     current = settings.get(key) or {}
     if not isinstance(current, dict):
@@ -431,10 +447,16 @@ def validate_settings(settings: Mapping[str, Any]) -> None:
         raise SystemExit("colmap.use_nerfstudio_colmap must be false; run_colmap.py owns reconstruction.")
     if settings["mode"] not in {"incremental", "global"}:
         raise SystemExit("--mode must be incremental or global.")
-    if settings["feature_extractor"] != "sift":
-        raise SystemExit("--feature-extractor currently supports only native COLMAP SIFT.")
+    if settings["feature_extractor"] not in {"SIFT", "ALIKED_N16ROT", "ALIKED_N32"}:
+        raise SystemExit("--feature-extractor must be SIFT, ALIKED_N16ROT, or ALIKED_N32.")
     if settings["matcher"] not in {"exhaustive", "sequential", "vocab_tree"}:
         raise SystemExit("--matcher must be exhaustive, sequential, or vocab_tree.")
+    if settings["matching_type"] not in {"SIFT_BRUTEFORCE", "SIFT_LIGHTGLUE", "ALIKED_BRUTEFORCE", "ALIKED_LIGHTGLUE"}:
+        raise SystemExit("--matching-type must be SIFT_BRUTEFORCE, SIFT_LIGHTGLUE, ALIKED_BRUTEFORCE, or ALIKED_LIGHTGLUE.")
+    if settings["feature_extractor"] == "SIFT" and not str(settings["matching_type"]).startswith("SIFT_"):
+        raise SystemExit("SIFT feature extraction requires SIFT_BRUTEFORCE or SIFT_LIGHTGLUE matching.")
+    if str(settings["feature_extractor"]).startswith("ALIKED") and not str(settings["matching_type"]).startswith("ALIKED_"):
+        raise SystemExit("ALIKED feature extraction requires ALIKED_BRUTEFORCE or ALIKED_LIGHTGLUE matching.")
     if settings["option_namespace"] not in {"auto", "feature", "sift"}:
         raise SystemExit("--option-namespace must be auto, feature, or sift.")
     if int(settings["max_image_size"]) <= 0:
@@ -893,6 +915,8 @@ def build_core_commands(
         bool_as_colmap(settings["use_gpu"]),
         option_names.feature_max_image_size,
         str(int(settings["max_image_size"])),
+        "--FeatureExtraction.type",
+        str(settings["feature_extractor"]),
     ]
     append_options(feature_command, settings.get("feature_options", {}))
 
@@ -954,6 +978,8 @@ def build_matcher_command(
         database_path,
         option_names.matching_use_gpu,
         bool_as_colmap(settings["use_gpu"]),
+        "--FeatureMatching.type",
+        str(settings["matching_type"]),
     ]
     if matcher == "sequential":
         command.extend(["--SequentialMatching.overlap", str(int(settings["sequential_overlap"]))])
@@ -1470,6 +1496,7 @@ def write_html_report(reports_dir: Path, report: Mapping[str, Any]) -> Path:
                 "mode": settings.get("mode"),
                 "feature_extractor": settings.get("feature_extractor"),
                 "matcher": settings.get("matcher"),
+                "matching_type": settings.get("matching_type"),
                 "camera_model": settings.get("camera_model"),
                 "single_camera": settings.get("single_camera"),
                 "use_gpu": settings.get("use_gpu"),

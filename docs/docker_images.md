@@ -349,7 +349,7 @@ docker run --rm --gpus all "$IMAGE_NAME:$IMAGE_TAG" \
   bash -lc 'ldd /opt/colmap-cuda/lib/libonnxruntime_providers_cuda.so | grep -Ei "cudnn|cuda|cublas|not found"'
 
 docker run --rm --gpus all "$IMAGE_NAME:$IMAGE_TAG" \
-  bash -lc 'find /root/.cache/colmap -maxdepth 1 -type f -name "*.onnx" -print'
+  bash -lc 'find /root/.cache/colmap -maxdepth 1 -type f -name "*.onnx" -print || true'
 ```
 
 Good signs:
@@ -362,8 +362,10 @@ libcusparse.so.12
 libcudss.so.0
 libcudnn.so.9
 libopenblas.so.0
-*.onnx files are already present in /root/.cache/colmap
 ```
+
+ALIKED/LightGlue `.onnx` files are downloaded into `/root/.cache/colmap` on
+first runtime use.
 
 ONNX feature/matcher verification:
 

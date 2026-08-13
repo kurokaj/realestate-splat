@@ -45,13 +45,22 @@ router = APIRouter(include_in_schema=False)
 templates = Jinja2Templates(directory=str(Path(__file__).with_name("templates")))
 
 COLMAP_FEATURE_EXTRACTOR_OPTIONS = [
-    {"value": "sift", "label": "SIFT"},
+    {"value": "SIFT", "label": "SIFT"},
+    {"value": "ALIKED_N16ROT", "label": "ALIKED N16ROT"},
+    {"value": "ALIKED_N32", "label": "ALIKED N32"},
 ]
 
 COLMAP_MATCHER_OPTIONS = [
     {"value": "exhaustive", "label": "Exhaustive"},
     {"value": "sequential", "label": "Sequential"},
     {"value": "vocab_tree", "label": "Vocabulary tree"},
+]
+
+COLMAP_FEATURE_MATCHER_OPTIONS = [
+    {"value": "SIFT_BRUTEFORCE", "label": "SIFT bruteforce"},
+    {"value": "SIFT_LIGHTGLUE", "label": "SIFT LightGlue"},
+    {"value": "ALIKED_BRUTEFORCE", "label": "ALIKED bruteforce"},
+    {"value": "ALIKED_LIGHTGLUE", "label": "ALIKED LightGlue"},
 ]
 
 COLMAP_CAMERA_MODEL_OPTIONS = [
@@ -71,6 +80,13 @@ def json_pretty(value: Any) -> str:
 
 
 templates.env.filters["json_pretty"] = json_pretty
+
+
+def validate_colmap_feature_matcher(feature_extractor: str, matching_type: str) -> None:
+    if feature_extractor == "SIFT" and not matching_type.startswith("SIFT_"):
+        raise HTTPException(status_code=400, detail="SIFT features require a SIFT matching type")
+    if feature_extractor.startswith("ALIKED") and not matching_type.startswith("ALIKED_"):
+        raise HTTPException(status_code=400, detail="ALIKED features require an ALIKED matching type")
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -248,8 +264,9 @@ def ui_queue_colmap(
     output_uri: Optional[str] = Form(default=None),
     endpoint_url: Optional[str] = Form(default=None),
     mode: str = Form(default="global"),
-    feature_extractor: str = Form(default="sift"),
+    feature_extractor: str = Form(default="SIFT"),
     matcher: str = Form(default="exhaustive"),
+    matching_type: str = Form(default="SIFT_BRUTEFORCE"),
     camera_model: str = Form(default="SIMPLE_RADIAL"),
     provider: str = Form(default=default_colmap_provider()),
     image: Optional[str] = Form(default=None),
@@ -274,7 +291,9 @@ def ui_queue_colmap(
         require_r2_uri(resolved_output_uri, "output_uri")
         validate_choice(feature_extractor, {option["value"] for option in COLMAP_FEATURE_EXTRACTOR_OPTIONS}, "feature_extractor")
         validate_choice(matcher, {option["value"] for option in COLMAP_MATCHER_OPTIONS}, "matcher")
+        validate_choice(matching_type, {option["value"] for option in COLMAP_FEATURE_MATCHER_OPTIONS}, "matching_type")
         validate_choice(camera_model, {option["value"] for option in COLMAP_CAMERA_MODEL_OPTIONS}, "camera_model")
+        validate_colmap_feature_matcher(feature_extractor, matching_type)
         input_uri_json = {
             "preprocess_uri": resolved_preprocess_uri,
             "output_uri": resolved_output_uri,
@@ -282,6 +301,7 @@ def ui_queue_colmap(
             "mode": mode,
             "feature_extractor": feature_extractor,
             "matcher": matcher,
+            "matching_type": matching_type,
             "camera_model": camera_model,
             "repo_url": empty_to_none(repo_url),
             "git_ref": empty_to_none(git_ref),
@@ -671,8 +691,9 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
             "output_uri": input_json.get("output_uri") or colmap_output_base,
             "endpoint_url": input_json.get("endpoint_url") or "",
             "mode": input_json.get("mode") or "global",
-            "feature_extractor": input_json.get("feature_extractor") or "sift",
+            "feature_extractor": normalize_colmap_feature_extractor(input_json.get("feature_extractor") or "SIFT"),
             "matcher": input_json.get("matcher") or "exhaustive",
+            "matching_type": input_json.get("matching_type") or "SIFT_BRUTEFORCE",
             "camera_model": input_json.get("camera_model") or "SIMPLE_RADIAL",
             "provider": latest_run.get("provider") if latest_run else default_colmap_provider(),
             "image": latest_run.get("image") if latest_run else "",
@@ -683,9 +704,10 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
         },
         "colmap_feature_extractor_options": COLMAP_FEATURE_EXTRACTOR_OPTIONS,
         "colmap_matcher_options": COLMAP_MATCHER_OPTIONS,
+        "colmap_feature_matcher_options": COLMAP_FEATURE_MATCHER_OPTIONS,
         "colmap_camera_model_options": COLMAP_CAMERA_MODEL_OPTIONS,
         "colmap_gpu_options": COLMAP_GPU_OPTIONS,
-        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "point_count", "feature_extractor", "matcher", "camera_model", "mode", "container_disk_gb"]),
+        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "point_count", "feature_extractor", "matching_type", "matcher", "camera_model", "mode", "container_disk_gb"]),
     }
 
 
@@ -813,6 +835,13 @@ def first_gpu_type(value: Any) -> Optional[str]:
 def validate_choice(value: str, allowed: set[str], name: str) -> None:
     if value not in allowed:
         raise HTTPException(status_code=400, detail=f"Unsupported {name}: {value}")
+
+
+def normalize_colmap_feature_extractor(value: Any) -> str:
+    text = str(value or "SIFT").strip()
+    if text.lower() == "sift":
+        return "SIFT"
+    return text
 
 
 def scale_regularization_form_value(input_json: dict[str, Any]) -> str:

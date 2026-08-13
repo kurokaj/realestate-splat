@@ -50,8 +50,19 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--config", type=Path, help="Optional JSON/YAML config passed to scripts/run_colmap.py.")
     parser.add_argument("--mode", choices=["incremental", "global"], default="global", help="COLMAP mapper mode.")
-    parser.add_argument("--feature-extractor", choices=["sift"], default="sift", help="Feature extractor backend.")
+    parser.add_argument(
+        "--feature-extractor",
+        choices=["SIFT", "sift", "ALIKED_N16ROT", "ALIKED_N32"],
+        default="SIFT",
+        help="COLMAP FeatureExtraction.type.",
+    )
     parser.add_argument("--matcher", choices=["exhaustive", "sequential", "vocab_tree"], default="exhaustive")
+    parser.add_argument(
+        "--matching-type",
+        choices=["SIFT_BRUTEFORCE", "SIFT_LIGHTGLUE", "ALIKED_BRUTEFORCE", "ALIKED_LIGHTGLUE"],
+        default="SIFT_BRUTEFORCE",
+        help="COLMAP FeatureMatching.type.",
+    )
     parser.add_argument("--camera-model", default="SIMPLE_RADIAL", help="COLMAP ImageReader camera model.")
     parser.add_argument("--single-camera", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--use-gpu", action=argparse.BooleanOptionalAction, default=True)
@@ -228,6 +239,8 @@ def build_colmap_command(args: argparse.Namespace, local_run_dir: Path) -> List[
         args.feature_extractor,
         "--matcher",
         args.matcher,
+        "--matching-type",
+        args.matching_type,
         "--camera-model",
         args.camera_model,
         "--use-gpu" if args.use_gpu else "--no-use-gpu",
@@ -382,6 +395,7 @@ def colmap_stage_summary(report: Dict[str, Any]) -> Dict[str, Any]:
         "mode": (report.get("settings") or {}).get("mode") if isinstance(report.get("settings"), dict) else None,
         "feature_extractor": (report.get("settings") or {}).get("feature_extractor") if isinstance(report.get("settings"), dict) else None,
         "matcher": (report.get("settings") or {}).get("matcher") if isinstance(report.get("settings"), dict) else None,
+        "matching_type": (report.get("settings") or {}).get("matching_type") if isinstance(report.get("settings"), dict) else None,
         "camera_model": (report.get("settings") or {}).get("camera_model") if isinstance(report.get("settings"), dict) else None,
         "image_count": (report.get("input") or {}).get("image_count") if isinstance(report.get("input"), dict) else None,
         "selected_sparse_model": report.get("selected_sparse_model"),

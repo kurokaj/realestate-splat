@@ -62,7 +62,7 @@ def runpod_api_key() -> Optional[str]:
 def runpod_colmap_image() -> str:
     return os.environ.get(
         "RUNPOD_COLMAP_IMAGE",
-        "docker.io/blackjokuro/buildvision3d-colmap-gpu:cuda12.4-colmap-r2-runtime-sm75-sm86-sm89-r2",
+        "docker.io/blackjokuro/buildvision3d-colmap-gpu:cuda12.4-colmap-r2-runtime-onnx-cudnn-sm75-sm86-sm89-r3",
     )
 
 
