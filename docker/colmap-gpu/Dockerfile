@@ -103,20 +103,22 @@ COPY --from=builder /opt/ceres-cuda /opt/ceres-cuda
 COPY --from=builder /opt/colmap-cuda /opt/colmap-cuda
 
 ENV PATH=/opt/colmap-cuda/bin:${PATH}
-ENV LD_LIBRARY_PATH=/opt/ceres-cuda/lib:/opt/colmap-cuda/lib:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=/opt/ceres-cuda/lib:/opt/colmap-cuda/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 
-RUN ldconfig \
-    && ldd /opt/colmap-cuda/bin/colmap > /tmp/colmap_ldd.txt \
-    && ! grep -q "not found" /tmp/colmap_ldd.txt \
-    && if [ -f /opt/colmap-cuda/lib/libonnxruntime_providers_cuda.so ]; then \
-         ldd /opt/colmap-cuda/lib/libonnxruntime_providers_cuda.so > /tmp/onnxruntime_cuda_provider_ldd.txt; \
-         ! grep -q "not found" /tmp/onnxruntime_cuda_provider_ldd.txt; \
-       fi \
-    && ldconfig -p | grep -q "libcudnn.so.9" \
-    && colmap -h >/tmp/colmap_help.txt \
-    && colmap global_mapper -h >/tmp/colmap_global_mapper_help.txt \
-    && colmap view_graph_calibrator -h >/tmp/colmap_view_graph_calibrator_help.txt \
-    && aws --version >/tmp/aws_version.txt
+RUN set -eux; \
+    ldconfig; \
+    ldd /opt/colmap-cuda/bin/colmap | tee /tmp/colmap_ldd.txt; \
+    ! grep -q "not found" /tmp/colmap_ldd.txt; \
+    if [ -f /opt/colmap-cuda/lib/libonnxruntime_providers_cuda.so ]; then \
+      ldd /opt/colmap-cuda/lib/libonnxruntime_providers_cuda.so | tee /tmp/onnxruntime_cuda_provider_ldd.txt; \
+      ! grep -q "not found" /tmp/onnxruntime_cuda_provider_ldd.txt; \
+    fi; \
+    find /usr /opt -name "libcudnn.so.9*" -print | tee /tmp/cudnn_paths.txt; \
+    test -s /tmp/cudnn_paths.txt; \
+    colmap -h >/tmp/colmap_help.txt; \
+    colmap global_mapper -h >/tmp/colmap_global_mapper_help.txt; \
+    colmap view_graph_calibrator -h >/tmp/colmap_view_graph_calibrator_help.txt; \
+    aws --version >/tmp/aws_version.txt
 
 RUN set -eux; \
     mkdir -p /root/.cache/colmap /tmp/colmap-onnx-cache/images; \
