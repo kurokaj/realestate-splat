@@ -105,7 +105,6 @@ COPY --from=builder /opt/colmap-cuda /opt/colmap-cuda
 
 ENV PATH=/opt/colmap-cuda/bin:${PATH}
 ENV LD_LIBRARY_PATH=/opt/ceres-cuda/lib:/opt/colmap-cuda/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
-ENV COLMAP_ONNX_MODEL_DIR=/opt/buildvision/colmap-models
 
 RUN set -eux; \
     ldconfig; \
@@ -122,19 +121,10 @@ RUN set -eux; \
     colmap view_graph_calibrator -h >/tmp/colmap_view_graph_calibrator_help.txt; \
     aws --version >/tmp/aws_version.txt
 
-RUN set -eux; \
-    mkdir -p "${COLMAP_ONNX_MODEL_DIR}"; \
-    curl -fL "https://github.com/colmap/colmap/releases/download/3.13.0/aliked-n16rot.onnx" \
-      -o "${COLMAP_ONNX_MODEL_DIR}/aliked-n16rot.onnx"; \
-    curl -fL "https://github.com/colmap/colmap/releases/download/3.13.0/aliked-n32.onnx" \
-      -o "${COLMAP_ONNX_MODEL_DIR}/aliked-n32.onnx"; \
-    curl -fL "https://github.com/colmap/colmap/releases/download/3.13.0/aliked-lightglue.onnx" \
-      -o "${COLMAP_ONNX_MODEL_DIR}/aliked-lightglue.onnx"; \
-    curl -fL "https://github.com/colmap/colmap/releases/download/3.13.0/sift-lightglue.onnx" \
-      -o "${COLMAP_ONNX_MODEL_DIR}/sift-lightglue.onnx"; \
-    find "${COLMAP_ONNX_MODEL_DIR}" -type f -name "*.onnx" -print | sort > /tmp/colmap_onnx_model_files.txt; \
-    test "$(wc -l < /tmp/colmap_onnx_model_files.txt)" -eq 4; \
-    du -h "${COLMAP_ONNX_MODEL_DIR}"/*.onnx
+# Future hardening option: preload COLMAP's ALIKED/LightGlue ONNX models into
+# the image and pass explicit model paths from scripts/run_colmap.py. For now
+# pods download those small model files on first ALIKED/LightGlue use, matching
+# COLMAP's default behavior and avoiding build-time GitHub/release dependency.
 
 WORKDIR /workspace
 CMD ["colmap", "-h"]

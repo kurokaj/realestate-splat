@@ -58,12 +58,15 @@ The image verifies:
 ldd /opt/colmap-cuda/bin/colmap has no "not found" libraries
 ldd /opt/colmap-cuda/lib/libonnxruntime_providers_cuda.so has no "not found" libraries
 libcudnn.so.9 is present for ONNX Runtime CUDA provider
-COLMAP ONNX model files are preloaded under /opt/buildvision/colmap-models
 colmap -h works
 colmap global_mapper -h works
 colmap view_graph_calibrator -h works
 aws --version works
 ```
+
+ALIKED/LightGlue ONNX model files are downloaded by COLMAP on first runtime
+use. The Dockerfile has a note where future image-level model preloading can be
+added if runtime GitHub downloads become flaky.
 
 The Dockerfile removes apt package lists, deletes Ceres/COLMAP source trees
 after installation in the builder, and does not copy those source trees into

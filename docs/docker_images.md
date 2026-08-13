@@ -110,7 +110,7 @@ runtime stage:
   awscli, git, Python for R2 stage wrappers
   copied /opt/ceres-cuda and /opt/colmap-cuda
   cuDNN 9 for ONNX Runtime CUDA provider
-  preloaded COLMAP ONNX models under /opt/buildvision/colmap-models
+  ALIKED/LightGlue ONNX models downloaded by COLMAP on first runtime use
   no repository code baked in
 ```
 
