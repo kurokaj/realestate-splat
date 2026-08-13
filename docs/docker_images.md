@@ -84,7 +84,7 @@ as build context:
 cd docker/colmap-gpu
 
 export IMAGE_NAME="docker.io/blackjokuro/buildvision3d-colmap-gpu"
-export IMAGE_TAG="cuda12.4-colmap-r2-runtime-sm75-sm86-sm89-r2"
+export IMAGE_TAG="cuda12.4-colmap-r2-runtime-onnx-cudnn-sm75-sm86-sm89-r3"
 export CUDA_ARCHS="75;86;89"
 export BUILD_JOBS=8
 
@@ -101,12 +101,14 @@ The current Dockerfile is a multi-stage R2-runner recipe:
 builder stage:
   nvidia/cuda:12.4.1-devel-ubuntu22.04
   compiler/build tools
-  Ceres and COLMAP source trees
+  cuDNN 9, Ceres, and COLMAP source trees
 
 runtime stage:
   nvidia/cuda:12.4.1-runtime-ubuntu22.04
   awscli, git, Python for R2 stage wrappers
   copied /opt/ceres-cuda and /opt/colmap-cuda
+  cuDNN 9 for ONNX Runtime CUDA provider
+  preloaded COLMAP ONNX model cache under /root/.cache/colmap
   no repository code baked in
 ```
 
@@ -340,6 +342,12 @@ Linkage verification:
 ```bash
 docker run --rm --gpus all "$IMAGE_NAME:$IMAGE_TAG" \
   bash -lc 'ldd "$(which colmap)" | grep -Ei "ceres|cuda|cudss|cusolver|cusparse|cublas|suitesparse|openblas"'
+
+docker run --rm --gpus all "$IMAGE_NAME:$IMAGE_TAG" \
+  bash -lc 'ldd /opt/colmap-cuda/lib/libonnxruntime_providers_cuda.so | grep -Ei "cudnn|cuda|cublas|not found"'
+
+docker run --rm --gpus all "$IMAGE_NAME:$IMAGE_TAG" \
+  bash -lc 'find /root/.cache/colmap -maxdepth 1 -type f -name "*.onnx" -print'
 ```
 
 Good signs:
@@ -350,7 +358,19 @@ libcusolver.so.11
 libcublas.so.12
 libcusparse.so.12
 libcudss.so.0
+libcudnn.so.9
 libopenblas.so.0
+*.onnx files are already present in /root/.cache/colmap
+```
+
+ONNX feature/matcher verification:
+
+```bash
+docker run --rm --gpus all "$IMAGE_NAME:$IMAGE_TAG" \
+  bash -lc 'colmap feature_extractor -h | grep -Ei "FeatureExtraction.type|ALIKED|AlikedExtraction|ONNX"'
+
+docker run --rm --gpus all "$IMAGE_NAME:$IMAGE_TAG" \
+  bash -lc 'colmap exhaustive_matcher -h | grep -Ei "FeatureMatching.type|LIGHTGLUE|ALIKED|ONNX"'
 ```
 
 Bad sign:

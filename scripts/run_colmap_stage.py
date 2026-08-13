@@ -50,6 +50,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--config", type=Path, help="Optional JSON/YAML config passed to scripts/run_colmap.py.")
     parser.add_argument("--mode", choices=["incremental", "global"], default="global", help="COLMAP mapper mode.")
+    parser.add_argument("--feature-extractor", choices=["sift"], default="sift", help="Feature extractor backend.")
     parser.add_argument("--matcher", choices=["exhaustive", "sequential", "vocab_tree"], default="exhaustive")
     parser.add_argument("--camera-model", default="SIMPLE_RADIAL", help="COLMAP ImageReader camera model.")
     parser.add_argument("--single-camera", action=argparse.BooleanOptionalAction, default=None)
@@ -223,6 +224,8 @@ def build_colmap_command(args: argparse.Namespace, local_run_dir: Path) -> List[
         str(args.colmap_bin),
         "--mode",
         args.mode,
+        "--feature-extractor",
+        args.feature_extractor,
         "--matcher",
         args.matcher,
         "--camera-model",
@@ -377,7 +380,9 @@ def colmap_stage_summary(report: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "status": report.get("status"),
         "mode": (report.get("settings") or {}).get("mode") if isinstance(report.get("settings"), dict) else None,
+        "feature_extractor": (report.get("settings") or {}).get("feature_extractor") if isinstance(report.get("settings"), dict) else None,
         "matcher": (report.get("settings") or {}).get("matcher") if isinstance(report.get("settings"), dict) else None,
+        "camera_model": (report.get("settings") or {}).get("camera_model") if isinstance(report.get("settings"), dict) else None,
         "image_count": (report.get("input") or {}).get("image_count") if isinstance(report.get("input"), dict) else None,
         "selected_sparse_model": report.get("selected_sparse_model"),
         "reconstruction_metrics": report.get("reconstruction_metrics", {}),

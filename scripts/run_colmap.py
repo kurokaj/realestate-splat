@@ -47,6 +47,7 @@ IMAGE_MANIFEST_NAME = "image_manifest.json"
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "binary": str(DEFAULT_VERDA_COLMAP),
     "mode": "incremental",
+    "feature_extractor": "sift",
     "matcher": "exhaustive",
     "image_dir": "frames_selected",
     "database_name": "database.db",
@@ -110,6 +111,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--matcher",
         choices=["exhaustive", "sequential", "vocab_tree"],
         help="COLMAP matcher to run before mapping.",
+    )
+    parser.add_argument(
+        "--feature-extractor",
+        choices=["sift"],
+        help="Feature extractor backend. The current COLMAP runtime supports native SIFT.",
     )
     parser.add_argument(
         "--colmap-bin",
@@ -360,6 +366,7 @@ def build_settings(args: argparse.Namespace) -> Dict[str, Any]:
     cli_overrides = {
         "binary": str(args.colmap_bin) if args.colmap_bin is not None else None,
         "mode": args.mode,
+        "feature_extractor": args.feature_extractor,
         "matcher": args.matcher,
         "image_dir": str(args.image_dir) if args.image_dir is not None else None,
         "database_name": args.database_name,
@@ -424,6 +431,8 @@ def validate_settings(settings: Mapping[str, Any]) -> None:
         raise SystemExit("colmap.use_nerfstudio_colmap must be false; run_colmap.py owns reconstruction.")
     if settings["mode"] not in {"incremental", "global"}:
         raise SystemExit("--mode must be incremental or global.")
+    if settings["feature_extractor"] != "sift":
+        raise SystemExit("--feature-extractor currently supports only native COLMAP SIFT.")
     if settings["matcher"] not in {"exhaustive", "sequential", "vocab_tree"}:
         raise SystemExit("--matcher must be exhaustive, sequential, or vocab_tree.")
     if settings["option_namespace"] not in {"auto", "feature", "sift"}:
@@ -1459,6 +1468,7 @@ def write_html_report(reports_dir: Path, report: Mapping[str, Any]) -> Path:
         settings_rows=table_rows(
             {
                 "mode": settings.get("mode"),
+                "feature_extractor": settings.get("feature_extractor"),
                 "matcher": settings.get("matcher"),
                 "camera_model": settings.get("camera_model"),
                 "single_camera": settings.get("single_camera"),

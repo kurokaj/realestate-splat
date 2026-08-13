@@ -44,6 +44,25 @@ from scripts.preprocess_video import PROFILE_DEFAULTS
 router = APIRouter(include_in_schema=False)
 templates = Jinja2Templates(directory=str(Path(__file__).with_name("templates")))
 
+COLMAP_FEATURE_EXTRACTOR_OPTIONS = [
+    {"value": "sift", "label": "SIFT"},
+]
+
+COLMAP_MATCHER_OPTIONS = [
+    {"value": "exhaustive", "label": "Exhaustive"},
+    {"value": "sequential", "label": "Sequential"},
+    {"value": "vocab_tree", "label": "Vocabulary tree"},
+]
+
+COLMAP_CAMERA_MODEL_OPTIONS = [
+    {"value": "SIMPLE_RADIAL", "label": "SIMPLE_RADIAL"},
+    {"value": "RADIAL", "label": "RADIAL"},
+    {"value": "OPENCV", "label": "OPENCV"},
+    {"value": "OPENCV_FISHEYE", "label": "OPENCV_FISHEYE"},
+    {"value": "PINHOLE", "label": "PINHOLE"},
+    {"value": "SIMPLE_PINHOLE", "label": "SIMPLE_PINHOLE"},
+]
+
 
 def json_pretty(value: Any) -> str:
     if value in (None, "", {}, []):
@@ -229,6 +248,7 @@ def ui_queue_colmap(
     output_uri: Optional[str] = Form(default=None),
     endpoint_url: Optional[str] = Form(default=None),
     mode: str = Form(default="global"),
+    feature_extractor: str = Form(default="sift"),
     matcher: str = Form(default="exhaustive"),
     camera_model: str = Form(default="SIMPLE_RADIAL"),
     provider: str = Form(default=default_colmap_provider()),
@@ -252,11 +272,15 @@ def ui_queue_colmap(
         resolved_output_uri = empty_to_none(output_uri) or f"r2://{default_r2_bucket()}/projects/{project_id}/colmap"
         require_r2_uri(resolved_preprocess_uri, "preprocess_uri")
         require_r2_uri(resolved_output_uri, "output_uri")
+        validate_choice(feature_extractor, {option["value"] for option in COLMAP_FEATURE_EXTRACTOR_OPTIONS}, "feature_extractor")
+        validate_choice(matcher, {option["value"] for option in COLMAP_MATCHER_OPTIONS}, "matcher")
+        validate_choice(camera_model, {option["value"] for option in COLMAP_CAMERA_MODEL_OPTIONS}, "camera_model")
         input_uri_json = {
             "preprocess_uri": resolved_preprocess_uri,
             "output_uri": resolved_output_uri,
             "endpoint_url": empty_to_none(endpoint_url),
             "mode": mode,
+            "feature_extractor": feature_extractor,
             "matcher": matcher,
             "camera_model": camera_model,
             "repo_url": empty_to_none(repo_url),
@@ -289,7 +313,7 @@ def ui_queue_training(
     save_every: int = Form(default=50),
     eval_every: int = Form(default=50),
     num_downscales: int = Form(default=1),
-    use_scale_regularization: str = Form(default=""),
+    use_scale_regularization: str = Form(default="true"),
     provider: str = Form(default=default_training_provider()),
     image: Optional[str] = Form(default=None),
     repo_url: Optional[str] = Form(default=None),
@@ -316,7 +340,7 @@ def ui_queue_training(
         require_r2_uri(resolved_preprocess_uri, "preprocess_uri")
         require_r2_uri(resolved_colmap_uri, "colmap_uri")
         require_r2_uri(resolved_output_uri, "output_uri")
-        splatfacto_options = {}
+        splatfacto_options = {"use_scale_regularization": True}
         if use_scale_regularization in {"true", "false"}:
             splatfacto_options["use_scale_regularization"] = use_scale_regularization == "true"
         input_uri_json = {
@@ -647,6 +671,7 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
             "output_uri": input_json.get("output_uri") or colmap_output_base,
             "endpoint_url": input_json.get("endpoint_url") or "",
             "mode": input_json.get("mode") or "global",
+            "feature_extractor": input_json.get("feature_extractor") or "sift",
             "matcher": input_json.get("matcher") or "exhaustive",
             "camera_model": input_json.get("camera_model") or "SIMPLE_RADIAL",
             "provider": latest_run.get("provider") if latest_run else default_colmap_provider(),
@@ -656,8 +681,11 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
             "gpu_type_id": selected_gpu,
             "container_disk_gb": input_json.get("container_disk_gb") or runpod_colmap_container_disk_gb(),
         },
+        "colmap_feature_extractor_options": COLMAP_FEATURE_EXTRACTOR_OPTIONS,
+        "colmap_matcher_options": COLMAP_MATCHER_OPTIONS,
+        "colmap_camera_model_options": COLMAP_CAMERA_MODEL_OPTIONS,
         "colmap_gpu_options": COLMAP_GPU_OPTIONS,
-        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "point_count", "matcher", "mode", "container_disk_gb"]),
+        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "point_count", "feature_extractor", "matcher", "camera_model", "mode", "container_disk_gb"]),
     }
 
 
@@ -682,7 +710,7 @@ def training_review_context(project: dict[str, Any], stage_runs: list[dict[str, 
             "save_every": input_json.get("save_every") or 50,
             "eval_every": input_json.get("eval_every") or 50,
             "num_downscales": input_json.get("num_downscales") or 1,
-            "use_scale_regularization": scale_regularization_form_value(input_json),
+            "use_scale_regularization": scale_regularization_form_value(input_json) or "true",
             "provider": latest_run.get("provider") if latest_run else default_training_provider(),
             "image": latest_run.get("image") if latest_run else "",
             "repo_url": input_json.get("repo_url") or "",
@@ -782,6 +810,11 @@ def first_gpu_type(value: Any) -> Optional[str]:
     return None
 
 
+def validate_choice(value: str, allowed: set[str], name: str) -> None:
+    if value not in allowed:
+        raise HTTPException(status_code=400, detail=f"Unsupported {name}: {value}")
+
+
 def scale_regularization_form_value(input_json: dict[str, Any]) -> str:
     options = input_json.get("splatfacto_options")
     if not isinstance(options, dict) or "use_scale_regularization" not in options:
@@ -813,7 +846,7 @@ def training_summary_rows(run: Optional[dict[str, Any]]) -> list[dict[str, Any]]
     add("Max steps", inputs.get("max_steps"))
     add("Save every", inputs.get("save_every"))
     add("Eval every", inputs.get("eval_every"))
-    add("Scale regularization", scale_regularization_form_value(inputs) or "default")
+    add("Scale regularization", scale_regularization_form_value(inputs) or "enabled")
     add("Image", run.get("image"))
     add("Output URI", run.get("output_uri"))
     add("Checkpoint count", summary.get("checkpoint_count") or diagnostics.get("checkpoint_count"))

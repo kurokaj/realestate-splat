@@ -16,7 +16,7 @@ Build from this directory so Docker does not send local run data as context:
 cd docker/colmap-gpu
 
 export IMAGE_NAME="docker.io/blackjokuro/buildvision3d-colmap-gpu"
-export IMAGE_TAG="cuda12.4-colmap-r2-runtime-sm75-sm86-sm89-r2"
+export IMAGE_TAG="cuda12.4-colmap-r2-runtime-onnx-cudnn-sm75-sm86-sm89-r3"
 export CUDA_ARCHS="75;86;89"
 export BUILD_JOBS=8
 
@@ -54,6 +54,9 @@ The image verifies:
 
 ```text
 ldd /opt/colmap-cuda/bin/colmap has no "not found" libraries
+ldd /opt/colmap-cuda/lib/libonnxruntime_providers_cuda.so has no "not found" libraries
+libcudnn.so.9 is present for ONNX Runtime CUDA provider
+COLMAP ONNX model files are preloaded under /root/.cache/colmap
 colmap -h works
 colmap global_mapper -h works
 colmap view_graph_calibrator -h works

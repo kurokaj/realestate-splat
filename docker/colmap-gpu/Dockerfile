@@ -29,7 +29,7 @@ RUN wget -qO- https://apt.kitware.com/keys/kitware-archive-latest.asc \
 RUN wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
     && dpkg -i cuda-keyring_1.1-1_all.deb \
     && apt-get update \
-    && apt-get install -y --no-install-recommends cudss-cuda-12 \
+    && apt-get install -y --no-install-recommends cudss-cuda-12 cudnn9-cuda-12 \
     && rm -rf /var/lib/apt/lists/* cuda-keyring_1.1-1_all.deb
 
 ENV CC=/usr/bin/gcc-10
@@ -64,6 +64,7 @@ RUN git clone https://github.com/colmap/colmap.git \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_INSTALL_PREFIX=/opt/colmap-cuda \
       -DCOLMAP_CUDA=ON \
+      -DONNX_ENABLED=ON \
       -DCASPAR_ENABLED=ON \
       -DGUI_ENABLED=OFF \
       -DCeres_DIR=/opt/ceres-cuda/lib/cmake/Ceres \
@@ -95,7 +96,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
     && dpkg -i cuda-keyring_1.1-1_all.deb \
     && apt-get update \
-    && apt-get install -y --no-install-recommends cudss-cuda-12 \
+    && apt-get install -y --no-install-recommends cudss-cuda-12 cudnn9-cuda-12 \
     && rm -rf /var/lib/apt/lists/* cuda-keyring_1.1-1_all.deb
 
 COPY --from=builder /opt/ceres-cuda /opt/ceres-cuda
@@ -107,10 +108,56 @@ ENV LD_LIBRARY_PATH=/opt/ceres-cuda/lib:/opt/colmap-cuda/lib:${LD_LIBRARY_PATH}
 RUN ldconfig \
     && ldd /opt/colmap-cuda/bin/colmap > /tmp/colmap_ldd.txt \
     && ! grep -q "not found" /tmp/colmap_ldd.txt \
+    && if [ -f /opt/colmap-cuda/lib/libonnxruntime_providers_cuda.so ]; then \
+         ldd /opt/colmap-cuda/lib/libonnxruntime_providers_cuda.so > /tmp/onnxruntime_cuda_provider_ldd.txt; \
+         ! grep -q "not found" /tmp/onnxruntime_cuda_provider_ldd.txt; \
+       fi \
+    && ldconfig -p | grep -q "libcudnn.so.9" \
     && colmap -h >/tmp/colmap_help.txt \
     && colmap global_mapper -h >/tmp/colmap_global_mapper_help.txt \
     && colmap view_graph_calibrator -h >/tmp/colmap_view_graph_calibrator_help.txt \
     && aws --version >/tmp/aws_version.txt
+
+RUN set -eux; \
+    mkdir -p /root/.cache/colmap /tmp/colmap-onnx-cache/images; \
+    python3 -c "import base64, pathlib; pathlib.Path('/tmp/colmap-onnx-cache/images/tiny.png').write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII='))"; \
+    colmap feature_extractor \
+      --database_path /tmp/colmap-onnx-cache/aliked-n16rot.db \
+      --image_path /tmp/colmap-onnx-cache/images \
+      --ImageReader.single_camera 1 \
+      --FeatureExtraction.type ALIKED_N16ROT \
+      --FeatureExtraction.use_gpu 0 \
+      --AlikedExtraction.max_num_features 32 \
+      >/tmp/colmap_aliked_n16rot_cache.log 2>&1; \
+    colmap feature_extractor \
+      --database_path /tmp/colmap-onnx-cache/aliked-n32.db \
+      --image_path /tmp/colmap-onnx-cache/images \
+      --ImageReader.single_camera 1 \
+      --FeatureExtraction.type ALIKED_N32 \
+      --FeatureExtraction.use_gpu 0 \
+      --AlikedExtraction.max_num_features 32 \
+      >/tmp/colmap_aliked_n32_cache.log 2>&1; \
+    colmap feature_extractor \
+      --database_path /tmp/colmap-onnx-cache/sift.db \
+      --image_path /tmp/colmap-onnx-cache/images \
+      --ImageReader.single_camera 1 \
+      --FeatureExtraction.type SIFT \
+      --FeatureExtraction.use_gpu 0 \
+      --SiftExtraction.max_num_features 32 \
+      >/tmp/colmap_sift_cache.log 2>&1; \
+    colmap exhaustive_matcher \
+      --database_path /tmp/colmap-onnx-cache/aliked-n16rot.db \
+      --FeatureMatching.type ALIKED_LIGHTGLUE \
+      --FeatureMatching.use_gpu 0 \
+      >/tmp/colmap_aliked_lightglue_cache.log 2>&1 || true; \
+    colmap exhaustive_matcher \
+      --database_path /tmp/colmap-onnx-cache/sift.db \
+      --FeatureMatching.type SIFT_LIGHTGLUE \
+      --FeatureMatching.use_gpu 0 \
+      >/tmp/colmap_sift_lightglue_cache.log 2>&1 || true; \
+    find /root/.cache/colmap -type f -name "*.onnx" -print | sort > /tmp/colmap_onnx_cache_files.txt; \
+    test -s /tmp/colmap_onnx_cache_files.txt; \
+    rm -rf /tmp/colmap-onnx-cache
 
 WORKDIR /workspace
 CMD ["colmap", "-h"]

@@ -457,18 +457,30 @@
             </select>
           </label>
           <label>
-            <span class="label-title">Matcher <span class="info-dot" tabindex="0" data-tip="Feature matching strategy passed to scripts/run_colmap_stage.py. Exhaustive is the verified default.">i</span></span>
-            <select name="matcher">
-              <option value="exhaustive" {% if colmap_form_values.matcher == "exhaustive" %}selected{% endif %}>exhaustive</option>
-              <option value="sequential" {% if colmap_form_values.matcher == "sequential" %}selected{% endif %}>sequential</option>
-              <option value="vocab_tree" {% if colmap_form_values.matcher == "vocab_tree" %}selected{% endif %}>vocab_tree</option>
+            <span class="label-title">Feature extractor <span class="info-dot" tabindex="0" data-tip="Native COLMAP SIFT feature extraction. ALIKED/LightGlue need a separate feature/match import path before they can be safely exposed here.">i</span></span>
+            <select name="feature_extractor">
+              {% for option in colmap_feature_extractor_options %}
+                <option value="{{ option.value }}" {% if colmap_form_values.feature_extractor == option.value %}selected{% endif %}>{{ option.label }}</option>
+              {% endfor %}
             </select>
           </label>
         </div>
         <div class="grid three tight">
           <label>
-            <span class="label-title">Camera model <span class="info-dot" tabindex="0" data-tip="COLMAP ImageReader camera model. SIMPLE_RADIAL is the current wrapper default.">i</span></span>
-            <input name="camera_model" value="{{ colmap_form_values.camera_model or 'SIMPLE_RADIAL' }}">
+            <span class="label-title">Matcher <span class="info-dot" tabindex="0" data-tip="Native COLMAP matching strategy. Exhaustive is the default brute-force style pair matching; sequential is useful for continuous video frame order.">i</span></span>
+            <select name="matcher">
+              {% for option in colmap_matcher_options %}
+                <option value="{{ option.value }}" {% if colmap_form_values.matcher == option.value %}selected{% endif %}>{{ option.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span class="label-title">Camera model <span class="info-dot" tabindex="0" data-tip="COLMAP ImageReader camera model. OPENCV_FISHEYE is available for wider lenses; all listed models are supported by the Nerfstudio conversion step.">i</span></span>
+            <select name="camera_model">
+              {% for option in colmap_camera_model_options %}
+                <option value="{{ option.value }}" {% if colmap_form_values.camera_model == option.value %}selected{% endif %}>{{ option.label }}</option>
+              {% endfor %}
+            </select>
           </label>
           <label>
             <span class="label-title">GPU <span class="info-dot" tabindex="0" data-tip="Only sub-$1.50/hour GPUs that match the current COLMAP image architecture shortlist are shown here.">i</span></span>
@@ -648,11 +660,11 @@
             <input name="num_downscales" type="number" value="{{ training_form_values.num_downscales or 1 }}">
           </label>
           <label>
-            <span class="label-title">Scale regularization <span class="info-dot" tabindex="0" data-tip="Explicitly passes Splatfacto use_scale_regularization. Default leaves the Nerfstudio method default untouched. Enable this when testing oversized or elongated Gaussian behavior.">i</span></span>
+            <span class="label-title">Scale regularization <span class="info-dot" tabindex="0" data-tip="Passes Splatfacto use_scale_regularization. Enabled is the Buildvision3D default for indoor rooms; use disabled/default only for comparison runs.">i</span></span>
             <select name="use_scale_regularization">
-              <option value="" {% if not training_form_values.use_scale_regularization %}selected{% endif %}>default</option>
               <option value="true" {% if training_form_values.use_scale_regularization == "true" %}selected{% endif %}>enabled</option>
               <option value="false" {% if training_form_values.use_scale_regularization == "false" %}selected{% endif %}>disabled</option>
+              <option value="" {% if not training_form_values.use_scale_regularization %}selected{% endif %}>nerfstudio default</option>
             </select>
           </label>
           <label>
