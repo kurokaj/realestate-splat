@@ -13,7 +13,13 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from controller_common.config import default_colmap_provider, default_r2_bucket, default_training_provider
+from controller_common.config import (
+    default_colmap_provider,
+    default_r2_bucket,
+    default_training_provider,
+    runpod_colmap_container_disk_gb,
+    runpod_training_container_disk_gb,
+)
 from controller_common.db import (
     cancel_stage_run,
     connect,
@@ -230,6 +236,7 @@ def ui_queue_colmap(
     repo_url: Optional[str] = Form(default=None),
     git_ref: Optional[str] = Form(default=None),
     gpu_type_id: str = Form(default=DEFAULT_COLMAP_GPU),
+    container_disk_gb: int = Form(default=20),
     dry_run: bool = Form(default=False),
 ) -> RedirectResponse:
     with connect() as conn:
@@ -255,6 +262,7 @@ def ui_queue_colmap(
             "repo_url": empty_to_none(repo_url),
             "git_ref": empty_to_none(git_ref),
             "gpu_type_ids": [normalize_gpu_name(gpu_type_id)],
+            "container_disk_gb": max(20, container_disk_gb),
             "dry_run": dry_run,
         }
         create_stage_run(
@@ -281,12 +289,13 @@ def ui_queue_training(
     save_every: int = Form(default=50),
     eval_every: int = Form(default=50),
     num_downscales: int = Form(default=1),
-    checkpoint_export_mode: str = Form(default="all"),
+    use_scale_regularization: str = Form(default=""),
     provider: str = Form(default=default_training_provider()),
     image: Optional[str] = Form(default=None),
     repo_url: Optional[str] = Form(default=None),
     git_ref: Optional[str] = Form(default=None),
     gpu_type_id: str = Form(default=DEFAULT_TRAINING_GPU),
+    container_disk_gb: int = Form(default=20),
     export: bool = Form(default=False),
     dry_run: bool = Form(default=False),
 ) -> RedirectResponse:
@@ -307,6 +316,9 @@ def ui_queue_training(
         require_r2_uri(resolved_preprocess_uri, "preprocess_uri")
         require_r2_uri(resolved_colmap_uri, "colmap_uri")
         require_r2_uri(resolved_output_uri, "output_uri")
+        splatfacto_options = {}
+        if use_scale_regularization in {"true", "false"}:
+            splatfacto_options["use_scale_regularization"] = use_scale_regularization == "true"
         input_uri_json = {
             "preprocess_uri": resolved_preprocess_uri,
             "colmap_uri": resolved_colmap_uri,
@@ -317,10 +329,11 @@ def ui_queue_training(
             "save_every": save_every,
             "eval_every": eval_every,
             "num_downscales": num_downscales,
-            "checkpoint_export_mode": checkpoint_export_mode,
+            "splatfacto_options": splatfacto_options or None,
             "repo_url": empty_to_none(repo_url),
             "git_ref": empty_to_none(git_ref),
             "gpu_type_ids": [normalize_gpu_name(gpu_type_id)],
+            "container_disk_gb": max(20, container_disk_gb),
             "export": export,
             "dry_run": dry_run,
         }
@@ -641,9 +654,10 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
             "repo_url": input_json.get("repo_url") or "",
             "git_ref": input_json.get("git_ref") or "",
             "gpu_type_id": selected_gpu,
+            "container_disk_gb": input_json.get("container_disk_gb") or runpod_colmap_container_disk_gb(),
         },
         "colmap_gpu_options": COLMAP_GPU_OPTIONS,
-        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "point_count", "matcher", "mode"]),
+        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "point_count", "matcher", "mode", "container_disk_gb"]),
     }
 
 
@@ -668,16 +682,17 @@ def training_review_context(project: dict[str, Any], stage_runs: list[dict[str, 
             "save_every": input_json.get("save_every") or 50,
             "eval_every": input_json.get("eval_every") or 50,
             "num_downscales": input_json.get("num_downscales") or 1,
-            "checkpoint_export_mode": input_json.get("checkpoint_export_mode") or "all",
+            "use_scale_regularization": scale_regularization_form_value(input_json),
             "provider": latest_run.get("provider") if latest_run else default_training_provider(),
             "image": latest_run.get("image") if latest_run else "",
             "repo_url": input_json.get("repo_url") or "",
             "git_ref": input_json.get("git_ref") or "",
             "gpu_type_id": selected_gpu,
+            "container_disk_gb": input_json.get("container_disk_gb") or runpod_training_container_disk_gb(),
             "export": input_json.get("export", True),
         },
         "training_gpu_options": TRAINING_GPU_OPTIONS,
-        "training_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "method", "max_steps", "checkpoint_count", "exported_ply"]),
+        "training_summary_rows": training_summary_rows(latest_run),
     }
 
 
@@ -765,6 +780,59 @@ def first_gpu_type(value: Any) -> Optional[str]:
     if isinstance(value, str) and value.strip():
         return normalize_gpu_name(value)
     return None
+
+
+def scale_regularization_form_value(input_json: dict[str, Any]) -> str:
+    options = input_json.get("splatfacto_options")
+    if not isinstance(options, dict) or "use_scale_regularization" not in options:
+        return ""
+    return "true" if bool(options.get("use_scale_regularization")) else "false"
+
+
+def training_summary_rows(run: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not run:
+        return []
+    summary = run.get("summary_json") if isinstance(run.get("summary_json"), dict) else {}
+    inputs = run.get("input_uri_json") if isinstance(run.get("input_uri_json"), dict) else {}
+    diagnostics = summary.get("training_diagnostics") if isinstance(summary.get("training_diagnostics"), dict) else {}
+    rows: list[dict[str, Any]] = []
+
+    def add(label: str, value: Any) -> None:
+        if value not in (None, "", [], {}):
+            rows.append({"label": label, "value": value})
+
+    add("Status", summary.get("status") or run.get("status"))
+    add("Provider", summary.get("provider") or run.get("provider"))
+    add("Run ID", run.get("id"))
+    add("Attempt", run.get("attempt"))
+    add("Provider job ID", summary.get("provider_job_id"))
+    add("Provider pod ID", summary.get("provider_pod_id"))
+    add("GPU", first_gpu_type(inputs.get("gpu_type_ids")))
+    add("Container disk GB", inputs.get("container_disk_gb"))
+    add("Method", summary.get("method") or inputs.get("method"))
+    add("Max steps", inputs.get("max_steps"))
+    add("Save every", inputs.get("save_every"))
+    add("Eval every", inputs.get("eval_every"))
+    add("Scale regularization", scale_regularization_form_value(inputs) or "default")
+    add("Image", run.get("image"))
+    add("Output URI", run.get("output_uri"))
+    add("Checkpoint count", summary.get("checkpoint_count") or diagnostics.get("checkpoint_count"))
+    add("Latest checkpoint", summary.get("latest_checkpoint"))
+    add("Exported PLY", summary.get("exported_ply"))
+    add("Exported PLY vertices", diagnostics.get("exported_ply_vertices") or summary.get("exported_ply_vertices"))
+    add("COLMAP init points", diagnostics.get("colmap_init_point_count") or summary.get("colmap_init_point_count"))
+    add("COLMAP init XYZ min", diagnostics.get("colmap_init_xyz_min"))
+    add("COLMAP init XYZ max", diagnostics.get("colmap_init_xyz_max"))
+    add("COLMAP init error median", diagnostics.get("colmap_init_error_median"))
+    add("Oversized Gaussian", diagnostics.get("oversized_gaussian_detected"))
+    add("Oversized Gaussian count", diagnostics.get("oversized_gaussian_count"))
+    add("Oversized Gaussian max scene ratio", diagnostics.get("oversized_gaussian_ratio_max"))
+    add("Gaussian scale p95", diagnostics.get("gaussian_scale_p95"))
+    add("Gaussian scale p99", diagnostics.get("gaussian_scale_p99"))
+    add("Gaussian scale max", diagnostics.get("gaussian_scale_max"))
+    add("Gaussian anisotropy p99", diagnostics.get("gaussian_anisotropy_p99"))
+    add("Gaussian anisotropy max", diagnostics.get("gaussian_anisotropy_max"))
+    return rows
 
 
 def colmap_stats_rows(stage_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:

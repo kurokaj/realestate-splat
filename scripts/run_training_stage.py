@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
 import sys
 import tempfile
+import struct
 from shutil import which
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -71,10 +73,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Export the latest trained gaussian splat to training/current/exports/splat.ply.",
     )
     parser.add_argument(
-        "--checkpoint-export-mode",
-        choices=["none", "latest", "all"],
-        default="all",
-        help="Export gaussian-splat PLYs from saved training checkpoints for diagnostics.",
+        "--use-scale-regularization",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Explicit Splatfacto scale regularization setting. Omit to use the Nerfstudio method default.",
     )
     parser.add_argument("--export-name", default="splat.ply", help="Canonical exported PLY filename under exports/.")
     parser.add_argument(
@@ -142,6 +144,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             current_dir=current_dir,
             history_dir=history_dir,
             started_at=started_at,
+            method=args.method,
             command_results=command_results,
         )
 
@@ -246,9 +249,7 @@ def print_plan(
             )
         )
         print(f"$ copy exported .ply -> {local_run_dir / 'exports' / args.export_name}")
-        if args.checkpoint_export_mode != "none":
-            print(f"$ export checkpoint PLYs ({args.checkpoint_export_mode}) -> {local_run_dir / 'exports' / 'checkpoints'}")
-    print(f"$ prepare current payload -> {current_dir}")
+        print(f"$ prepare current payload -> {current_dir}")
     print(f"$ prepare history payload -> {history_dir}")
     print(f"$ sync {current_dir} -> {args.output_uri.rstrip('/')}/current")
     print(f"$ sync {history_dir} -> {args.output_uri.rstrip('/')}/runs/{run_id}")
@@ -320,6 +321,9 @@ def build_training_commands(args: argparse.Namespace, local_run_dir: Path) -> Li
         f"--steps-per-eval-image={args.eval_every}",
         "--viewer.quit-on-train-completion=True",
     ]
+    if args.use_scale_regularization is not None:
+        value = "True" if args.use_scale_regularization else "False"
+        train_command.append(f"--pipeline.model.use-scale-regularization={value}")
     train_command.extend(args.train_option)
     return [prepare_command, train_command]
 
@@ -335,23 +339,6 @@ def build_export_command(args: argparse.Namespace, local_run_dir: Path, load_con
         "gaussian-splat",
         "--load-config",
         str(load_config),
-        "--output-dir",
-        str(export_dir),
-    ]
-
-
-def build_checkpoint_export_command(args: argparse.Namespace, local_run_dir: Path, load_config: Path, checkpoint_step: int, export_dir: Path) -> List[str]:
-    return [
-        args.pixi_bin,
-        "run",
-        "--manifest-path",
-        str(Path(args.nerfstudio_dir) / "pixi.toml"),
-        "ns-export",
-        "gaussian-splat",
-        "--load-config",
-        str(load_config),
-        "--load-step",
-        str(checkpoint_step),
         "--output-dir",
         str(export_dir),
     ]
@@ -377,7 +364,6 @@ def run_training(args: argparse.Namespace, local_run_dir: Path, logs_dir: Path) 
         export_output = local_run_dir / "exports" / args.export_name
         export_output.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_ply, export_output)
-        results.extend(export_checkpoint_plys(args, local_run_dir, logs_dir, gsplat_dir, config_path))
     return results
 
 
@@ -398,88 +384,6 @@ def validate_nerfstudio_colmap_initialization(local_run_dir: Path) -> None:
     print(f"Verified COLMAP sparse initialization: {point_count} points from {point_cloud_path}", flush=True)
 
 
-def export_checkpoint_plys(
-    args: argparse.Namespace,
-    local_run_dir: Path,
-    logs_dir: Path,
-    gsplat_dir: Path,
-    config_path: Path,
-) -> List[CommandResult]:
-    if args.checkpoint_export_mode == "none":
-        return []
-    checkpoints = checkpoint_records(local_run_dir / "gsplat" / "outputs")
-    if not checkpoints:
-        write_checkpoint_export_manifest(local_run_dir, [])
-        return []
-    if args.checkpoint_export_mode == "latest":
-        checkpoints = checkpoints[-1:]
-
-    results: List[CommandResult] = []
-    records: List[Dict[str, Any]] = []
-    for checkpoint in checkpoints:
-        step = checkpoint["step"]
-        export_dir = local_run_dir / "gsplat" / "exports" / "checkpoint_exports" / f"step-{step:09d}"
-        command = build_checkpoint_export_command(args, local_run_dir, config_path, step, export_dir)
-        record: Dict[str, Any] = {
-            "step": step,
-            "checkpoint": relative_or_string(checkpoint["path"], local_run_dir),
-            "status": "pending",
-        }
-        try:
-            result = run_logged_command(f"export_checkpoint_step_{step:09d}", command, logs_dir, gsplat_dir)
-            results.append(result)
-            source_ply = find_exported_ply(export_dir)
-            if source_ply is None:
-                raise RuntimeError(f"ns-export finished but no checkpoint PLY was found under {export_dir}")
-            target = local_run_dir / "exports" / "checkpoints" / f"step-{step:09d}.ply"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_ply, target)
-            record.update(
-                {
-                    "status": "completed",
-                    "ply": relative_or_string(target, local_run_dir),
-                    "ply_vertices": parse_ply_vertex_count(target),
-                    "ply_size_mb": file_size_mb(target),
-                    "source_export": relative_or_string(source_ply, local_run_dir),
-                }
-            )
-        except Exception as exc:
-            record.update({"status": "failed", "error": str(exc)})
-            print(f"Checkpoint PLY export failed for step {step}: {exc}", file=sys.stderr, flush=True)
-        records.append(record)
-
-    write_checkpoint_export_manifest(local_run_dir, records)
-    return results
-
-
-def checkpoint_records(output_dir: Path) -> List[Dict[str, Any]]:
-    records: List[Dict[str, Any]] = []
-    for path in sorted(output_dir.glob("**/*.ckpt")):
-        step = checkpoint_step(path)
-        if step is None:
-            continue
-        records.append({"step": step, "path": path})
-    return sorted(records, key=lambda record: (record["step"], str(record["path"])))
-
-
-def checkpoint_step(path: Path) -> Optional[int]:
-    match = re.search(r"step-(\d+)\.ckpt$", path.name)
-    if not match:
-        return None
-    return int(match.group(1))
-
-
-def write_checkpoint_export_manifest(local_run_dir: Path, records: Sequence[Dict[str, Any]]) -> None:
-    write_json(
-        local_run_dir / "exports" / "checkpoint_exports.json",
-        {
-            "schema_version": 1,
-            "created_at": utc_now(),
-            "exports": list(records),
-        },
-    )
-
-
 def prepare_upload_payloads(
     *,
     project_id: str,
@@ -493,12 +397,13 @@ def prepare_upload_payloads(
     current_dir: Path,
     history_dir: Path,
     started_at: str,
+    method: str,
     command_results: Sequence[CommandResult],
 ) -> None:
     current_dir.mkdir(parents=True, exist_ok=True)
     history_dir.mkdir(parents=True, exist_ok=True)
 
-    summary = training_summary(local_run_dir, command_results)
+    summary = training_summary(local_run_dir, command_results, method=method)
     write_json(current_dir / "training_summary.json", summary)
     write_json(history_dir / "training_summary.json", summary)
     copy_training_outputs(local_run_dir, current_dir)
@@ -579,7 +484,7 @@ def prepare_failed_payloads(
     write_stage_result(history_dir / "stage_result.json", result)
 
 
-def training_summary(local_run_dir: Path, command_results: Sequence[CommandResult]) -> Dict[str, Any]:
+def training_summary(local_run_dir: Path, command_results: Sequence[CommandResult], *, method: str) -> Dict[str, Any]:
     output_dir = local_run_dir / "gsplat" / "outputs"
     exports_dir = local_run_dir / "exports"
     config_path = latest_file(output_dir, "config.yml")
@@ -589,17 +494,25 @@ def training_summary(local_run_dir: Path, command_results: Sequence[CommandResul
     transforms = read_json(local_run_dir / "nerfstudio" / "transforms.json")
     buildvision3d = transforms.get("buildvision3d") if isinstance(transforms.get("buildvision3d"), dict) else {}
     init_ply = local_run_dir / "nerfstudio" / str(transforms.get("ply_file_path") or "colmap_points3D.ply")
-    checkpoint_manifest = read_json(exports_dir / "checkpoint_exports.json")
-    checkpoint_exports = checkpoint_manifest.get("exports") if isinstance(checkpoint_manifest.get("exports"), list) else []
+    exported_ply = ply_files[-1] if ply_files else None
+    gaussian_stats = gaussian_ply_diagnostics(exported_ply, buildvision3d.get("point_cloud_stats", {}))
+    diagnostics = build_training_diagnostics(
+        colmap_init_point_count=parse_ply_vertex_count(init_ply),
+        colmap_init_stats=buildvision3d.get("point_cloud_stats", {}),
+        checkpoint_count=len(checkpoint_files),
+        exported_ply_vertices=parse_ply_vertex_count(exported_ply),
+        gaussian_stats=gaussian_stats,
+    )
     return {
         "schema_version": 1,
         "created_at": utc_now(),
+        "method": method,
         "output_dir": relative_or_string(output_dir, local_run_dir),
         "exports_dir": relative_or_string(exports_dir, local_run_dir) if exports_dir.exists() else None,
-        "exported_ply": relative_or_string(ply_files[-1] if ply_files else None, local_run_dir),
-        "exported_ply_vertices": parse_ply_vertex_count(ply_files[-1] if ply_files else None),
-        "checkpoint_exports": checkpoint_exports,
-        "checkpoint_export_count": len(checkpoint_exports),
+        "exported_ply": relative_or_string(exported_ply, local_run_dir),
+        "exported_ply_vertices": parse_ply_vertex_count(exported_ply),
+        "gaussian_diagnostics": gaussian_stats,
+        "training_diagnostics": diagnostics,
         "selected_config": relative_or_string(config_path, local_run_dir),
         "dataparser_transforms": relative_or_string(dataparser_path, local_run_dir),
         "colmap_init_ply": relative_or_string(init_ply if init_ply.exists() else None, local_run_dir),
@@ -617,6 +530,32 @@ def training_summary(local_run_dir: Path, command_results: Sequence[CommandResul
             }
             for result in command_results
         ],
+    }
+
+
+def build_training_diagnostics(
+    *,
+    colmap_init_point_count: Optional[int],
+    colmap_init_stats: dict[str, Any],
+    checkpoint_count: int,
+    exported_ply_vertices: Optional[int],
+    gaussian_stats: dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "colmap_init_point_count": colmap_init_point_count,
+        "colmap_init_xyz_min": colmap_init_stats.get("xyz_min"),
+        "colmap_init_xyz_max": colmap_init_stats.get("xyz_max"),
+        "colmap_init_error_median": colmap_init_stats.get("reprojection_error_median"),
+        "checkpoint_count": checkpoint_count,
+        "exported_ply_vertices": exported_ply_vertices,
+        "oversized_gaussian_detected": gaussian_stats.get("oversized_gaussian_detected"),
+        "oversized_gaussian_count": gaussian_stats.get("oversized_gaussian_count"),
+        "oversized_gaussian_ratio_max": gaussian_stats.get("oversized_gaussian_ratio_max"),
+        "gaussian_scale_p95": gaussian_stats.get("scale_exp_max_axis_p95"),
+        "gaussian_scale_p99": gaussian_stats.get("scale_exp_max_axis_p99"),
+        "gaussian_scale_max": gaussian_stats.get("scale_exp_max_axis_max"),
+        "gaussian_anisotropy_p99": gaussian_stats.get("anisotropy_p99"),
+        "gaussian_anisotropy_max": gaussian_stats.get("anisotropy_max"),
     }
 
 
@@ -656,10 +595,205 @@ def parse_ply_vertex_count(path: Optional[Path]) -> Optional[int]:
     return None
 
 
-def file_size_mb(path: Optional[Path]) -> Optional[float]:
+def gaussian_ply_diagnostics(path: Optional[Path], colmap_init_stats: dict[str, Any]) -> dict[str, Any]:
     if path is None or not path.exists():
+        return {}
+    header = read_ply_header(path)
+    if not header:
+        return {"available": False, "reason": "could_not_read_ply_header"}
+    scale_names = [name for name in ("scale_0", "scale_1", "scale_2") if name in header["property_names"]]
+    if len(scale_names) != 3:
+        return {
+            "available": False,
+            "reason": "scale_properties_missing",
+            "vertex_count": header["vertex_count"],
+            "properties": header["property_names"],
+        }
+
+    scale_rows = read_ply_vertex_properties(path, header, scale_names)
+    if not scale_rows:
+        return {"available": False, "reason": "no_scale_rows", "vertex_count": header["vertex_count"]}
+
+    exp_axes: list[tuple[float, float, float]] = []
+    max_axes: list[float] = []
+    anisotropies: list[float] = []
+    for row in scale_rows:
+        axes = tuple(safe_exp(value) for value in row)
+        exp_axes.append(axes)
+        max_axis = max(axes)
+        min_axis = max(min(axes), 1e-12)
+        max_axes.append(max_axis)
+        anisotropies.append(max_axis / min_axis)
+
+    scene_diagonal = point_cloud_diagonal(colmap_init_stats)
+    threshold_ratio = 0.05
+    threshold = scene_diagonal * threshold_ratio if scene_diagonal else None
+    oversized_count = sum(1 for value in max_axes if threshold is not None and value > threshold)
+    max_axis = max(max_axes) if max_axes else None
+    return {
+        "available": True,
+        "vertex_count": len(scale_rows),
+        "scale_property_names": scale_names,
+        "scene_bbox_diagonal": round_float(scene_diagonal),
+        "oversized_threshold_scene_ratio": threshold_ratio,
+        "oversized_threshold_value": round_float(threshold),
+        "oversized_gaussian_detected": bool(oversized_count),
+        "oversized_gaussian_count": oversized_count,
+        "oversized_gaussian_fraction": round_float(oversized_count / len(max_axes)) if max_axes else None,
+        "oversized_gaussian_ratio_max": round_float(max_axis / scene_diagonal) if max_axis is not None and scene_diagonal else None,
+        "scale_exp_max_axis_min": round_float(percentile(max_axes, 0)),
+        "scale_exp_max_axis_median": round_float(percentile(max_axes, 50)),
+        "scale_exp_max_axis_p95": round_float(percentile(max_axes, 95)),
+        "scale_exp_max_axis_p99": round_float(percentile(max_axes, 99)),
+        "scale_exp_max_axis_max": round_float(percentile(max_axes, 100)),
+        "anisotropy_median": round_float(percentile(anisotropies, 50)),
+        "anisotropy_p95": round_float(percentile(anisotropies, 95)),
+        "anisotropy_p99": round_float(percentile(anisotropies, 99)),
+        "anisotropy_max": round_float(percentile(anisotropies, 100)),
+    }
+
+
+def read_ply_header(path: Path) -> Optional[dict[str, Any]]:
+    try:
+        with path.open("rb") as file:
+            first = file.readline().decode("utf-8", errors="replace").strip()
+            if first != "ply":
+                return None
+            fmt = "ascii"
+            vertex_count = 0
+            vertex_properties: list[tuple[str, str]] = []
+            in_vertex = False
+            while True:
+                raw_line = file.readline()
+                if not raw_line:
+                    return None
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if line.startswith("format "):
+                    fmt = line.split()[1]
+                elif line.startswith("element "):
+                    parts = line.split()
+                    in_vertex = parts[1] == "vertex"
+                    if in_vertex:
+                        vertex_count = int(parts[2])
+                elif in_vertex and line.startswith("property "):
+                    parts = line.split()
+                    if len(parts) >= 3 and parts[1] != "list":
+                        vertex_properties.append((parts[1], parts[2]))
+                elif line == "end_header":
+                    return {
+                        "format": fmt,
+                        "vertex_count": vertex_count,
+                        "properties": vertex_properties,
+                        "property_names": [name for _, name in vertex_properties],
+                        "data_offset": file.tell(),
+                    }
+    except (OSError, ValueError):
         return None
-    return round(path.stat().st_size / (1024 * 1024), 2)
+
+
+def read_ply_vertex_properties(path: Path, header: dict[str, Any], names: Sequence[str]) -> list[tuple[float, ...]]:
+    if header["format"] == "ascii":
+        return read_ascii_ply_vertex_properties(path, header, names)
+    if header["format"] == "binary_little_endian":
+        return read_binary_ply_vertex_properties(path, header, names, endian="<")
+    if header["format"] == "binary_big_endian":
+        return read_binary_ply_vertex_properties(path, header, names, endian=">")
+    return []
+
+
+def read_ascii_ply_vertex_properties(path: Path, header: dict[str, Any], names: Sequence[str]) -> list[tuple[float, ...]]:
+    property_names = header["property_names"]
+    indexes = [property_names.index(name) for name in names]
+    rows: list[tuple[float, ...]] = []
+    with path.open("rb") as file:
+        file.seek(header["data_offset"])
+        for _ in range(header["vertex_count"]):
+            raw_line = file.readline()
+            if not raw_line:
+                break
+            parts = raw_line.decode("utf-8", errors="replace").strip().split()
+            if len(parts) < len(property_names):
+                continue
+            rows.append(tuple(float(parts[index]) for index in indexes))
+    return rows
+
+
+def read_binary_ply_vertex_properties(path: Path, header: dict[str, Any], names: Sequence[str], *, endian: str) -> list[tuple[float, ...]]:
+    type_formats = {
+        "char": "b",
+        "int8": "b",
+        "uchar": "B",
+        "uint8": "B",
+        "short": "h",
+        "int16": "h",
+        "ushort": "H",
+        "uint16": "H",
+        "int": "i",
+        "int32": "i",
+        "uint": "I",
+        "uint32": "I",
+        "float": "f",
+        "float32": "f",
+        "double": "d",
+        "float64": "d",
+    }
+    properties = header["properties"]
+    property_names = header["property_names"]
+    fmt = endian + "".join(type_formats.get(type_name, "f") for type_name, _ in properties)
+    row_struct = struct.Struct(fmt)
+    indexes = [property_names.index(name) for name in names]
+    rows: list[tuple[float, ...]] = []
+    with path.open("rb") as file:
+        file.seek(header["data_offset"])
+        for _ in range(header["vertex_count"]):
+            payload = file.read(row_struct.size)
+            if len(payload) != row_struct.size:
+                break
+            values = row_struct.unpack(payload)
+            rows.append(tuple(float(values[index]) for index in indexes))
+    return rows
+
+
+def safe_exp(value: float) -> float:
+    if value > 50:
+        return math.exp(50)
+    if value < -50:
+        return math.exp(-50)
+    return math.exp(value)
+
+
+def point_cloud_diagonal(stats: dict[str, Any]) -> Optional[float]:
+    xyz_min = stats.get("xyz_min")
+    xyz_max = stats.get("xyz_max")
+    if not isinstance(xyz_min, list) or not isinstance(xyz_max, list) or len(xyz_min) != 3 or len(xyz_max) != 3:
+        return None
+    try:
+        return math.sqrt(sum((float(high) - float(low)) ** 2 for low, high in zip(xyz_min, xyz_max)))
+    except (TypeError, ValueError):
+        return None
+
+
+def percentile(values: Sequence[float], percent: float) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if percent <= 0:
+        return ordered[0]
+    if percent >= 100:
+        return ordered[-1]
+    position = (len(ordered) - 1) * (percent / 100.0)
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[int(position)]
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def round_float(value: Optional[float]) -> Optional[float]:
+    if value is None or not math.isfinite(value):
+        return None
+    return round(value, 6)
 
 
 def upload_payloads(args: argparse.Namespace, stage_run_id: str, current_dir: Path, history_dir: Path) -> None:
@@ -696,8 +830,6 @@ def required_upload_objects(current_dir: Path) -> list[str]:
         "outputs/**/config.yml",
         "outputs/**/*.ckpt",
         "exports/*.ply",
-        "exports/checkpoints/*.ply",
-        "exports/checkpoint_exports.json",
     ]
     existing: list[str] = list(required)
     for pattern in optional_patterns:

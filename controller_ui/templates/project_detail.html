@@ -479,11 +479,15 @@
             </select>
           </label>
           <label>
+            <span class="label-title">Container disk GB <span class="info-dot" tabindex="0" data-tip="RunPod container disk size. This is the managed container disk, not the pod volume mount. Default is 20 GB; raise it only for unusually large runs.">i</span></span>
+            <input name="container_disk_gb" type="number" min="20" step="1" value="{{ colmap_form_values.container_disk_gb or 20 }}">
+          </label>
+        </div>
+        <div class="grid three tight">
+          <label>
             <span class="label-title">Image <span class="info-dot" tabindex="0" data-tip="Optional image override. Leave empty to use RUNPOD_COLMAP_IMAGE from the controller environment.">i</span></span>
             <input name="image" value="{{ colmap_form_values.image or '' }}" placeholder="Optional RunPod image override">
           </label>
-        </div>
-        <div class="grid two tight">
           <label>
             <span class="label-title">Repo URL <span class="info-dot" tabindex="0" data-tip="Optional repo clone URL. Leave empty to use CONTROLLER_REPO_URL. The pod needs access to this repository.">i</span></span>
             <input name="repo_url" value="{{ colmap_form_values.repo_url or '' }}" placeholder="Optional; defaults to CONTROLLER_REPO_URL">
@@ -619,6 +623,10 @@
               {% endfor %}
             </select>
           </label>
+          <label>
+            <span class="label-title">Container disk GB <span class="info-dot" tabindex="0" data-tip="RunPod container disk size. This is the managed container disk, not the pod volume mount. Default is 20 GB; raise it if checkpoints or exports need more temporary space.">i</span></span>
+            <input name="container_disk_gb" type="number" min="20" step="1" value="{{ training_form_values.container_disk_gb or 20 }}">
+          </label>
         </div>
         <div class="grid three tight">
           <label>
@@ -640,11 +648,11 @@
             <input name="num_downscales" type="number" value="{{ training_form_values.num_downscales or 1 }}">
           </label>
           <label>
-            <span class="label-title">Checkpoint PLYs <span class="info-dot" tabindex="0" data-tip="Exports diagnostic Gaussian PLYs from saved checkpoints after training. Use all for investigation runs, latest to reduce upload size, or none for normal runs.">i</span></span>
-            <select name="checkpoint_export_mode">
-              <option value="all" {% if training_form_values.checkpoint_export_mode != "latest" and training_form_values.checkpoint_export_mode != "none" %}selected{% endif %}>all</option>
-              <option value="latest" {% if training_form_values.checkpoint_export_mode == "latest" %}selected{% endif %}>latest</option>
-              <option value="none" {% if training_form_values.checkpoint_export_mode == "none" %}selected{% endif %}>none</option>
+            <span class="label-title">Scale regularization <span class="info-dot" tabindex="0" data-tip="Explicitly passes Splatfacto use_scale_regularization. Default leaves the Nerfstudio method default untouched. Enable this when testing oversized or elongated Gaussian behavior.">i</span></span>
+            <select name="use_scale_regularization">
+              <option value="" {% if not training_form_values.use_scale_regularization %}selected{% endif %}>default</option>
+              <option value="true" {% if training_form_values.use_scale_regularization == "true" %}selected{% endif %}>enabled</option>
+              <option value="false" {% if training_form_values.use_scale_regularization == "false" %}selected{% endif %}>disabled</option>
             </select>
           </label>
           <label>
@@ -685,30 +693,26 @@
 
     <section class="panel">
       <div class="panel-heading">
-        <h2>Training Run Info</h2>
-        <span class="muted">Latest queued or completed training metadata</span>
-      </div>
-      {% if training_info_rows %}
-        <dl class="stat-list">
-          {% for stat in training_info_rows %}
-            <dt>{{ stat.label }}</dt>
-            <dd>{{ stat.value }}</dd>
-          {% endfor %}
-        </dl>
-      {% else %}
-        <p class="empty">No training run info yet.</p>
-      {% endif %}
-    </section>
-
-    <section class="panel">
-      <div class="panel-heading">
-        <h2>Latest Training Summary</h2>
-        <span class="muted">Raw stage summary JSON</span>
+        <h2>Latest Training Run</h2>
+        {% if latest_training_run %}
+          <span class="status status-{{ latest_training_run.status }}">{{ latest_training_run.status }}</span>
+        {% else %}
+          <span class="muted">Queued, running, failed, or completed</span>
+        {% endif %}
       </div>
       {% if latest_training_run %}
-        <pre>{{ latest_training_run.summary_json|json_pretty }}</pre>
+        {% if training_summary_rows %}
+          <dl class="stat-list">
+            {% for row in training_summary_rows %}
+              <dt>{{ row.label }}</dt>
+              <dd>{{ row.value }}</dd>
+            {% endfor %}
+          </dl>
+        {% else %}
+          <p class="empty">No summary captured for this run yet.</p>
+        {% endif %}
       {% else %}
-        <pre>No training run yet.</pre>
+        <p class="empty">No training run yet.</p>
       {% endif %}
     </section>
 

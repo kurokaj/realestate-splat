@@ -513,13 +513,14 @@ def build_training_stage_shell_command(stage_run: dict[str, Any], inputs: dict[s
         str(inputs.get("eval_every", 50)),
         "--num-downscales",
         str(inputs.get("num_downscales", 1)),
-        "--checkpoint-export-mode",
-        inputs.get("checkpoint_export_mode", "all"),
     ]
     if inputs.get("export", True):
         command.append("--export")
     else:
         command.append("--no-export")
+    splatfacto_options = inputs.get("splatfacto_options")
+    if isinstance(splatfacto_options, dict) and "use_scale_regularization" in splatfacto_options:
+        command.append("--use-scale-regularization" if splatfacto_options.get("use_scale_regularization") else "--no-use-scale-regularization")
     for train_arg in inputs.get("train_options", []):
         append_argparse_value(command, "--train-option", train_arg)
 
@@ -979,8 +980,30 @@ def compact_training_summary(
         "checkpoint_count": training_summary.get("checkpoint_count"),
         "latest_checkpoint": training_summary.get("latest_checkpoint"),
         "exported_ply": training_summary.get("exported_ply"),
+        "training_diagnostics": compact_training_diagnostics(training_summary),
         "training_summary_uri": stage_result.get("metrics_uri"),
         "stage_result_uri": f"{stage_result.get('output_uris', [''])[0].rstrip('/')}/stage_result.json" if stage_result.get("output_uris") else None,
+    }
+
+
+def compact_training_diagnostics(training_summary: dict[str, Any]) -> dict[str, Any]:
+    init_stats = training_summary.get("colmap_init_stats") if isinstance(training_summary.get("colmap_init_stats"), dict) else {}
+    gaussian_stats = training_summary.get("gaussian_diagnostics") if isinstance(training_summary.get("gaussian_diagnostics"), dict) else {}
+    return {
+        "colmap_init_point_count": training_summary.get("colmap_init_point_count"),
+        "colmap_init_xyz_min": init_stats.get("xyz_min"),
+        "colmap_init_xyz_max": init_stats.get("xyz_max"),
+        "colmap_init_error_median": init_stats.get("reprojection_error_median"),
+        "checkpoint_count": training_summary.get("checkpoint_count"),
+        "exported_ply_vertices": training_summary.get("exported_ply_vertices"),
+        "oversized_gaussian_detected": gaussian_stats.get("oversized_gaussian_detected"),
+        "oversized_gaussian_count": gaussian_stats.get("oversized_gaussian_count"),
+        "oversized_gaussian_ratio_max": gaussian_stats.get("oversized_gaussian_ratio_max"),
+        "gaussian_scale_p95": gaussian_stats.get("scale_exp_max_axis_p95"),
+        "gaussian_scale_p99": gaussian_stats.get("scale_exp_max_axis_p99"),
+        "gaussian_scale_max": gaussian_stats.get("scale_exp_max_axis_max"),
+        "gaussian_anisotropy_p99": gaussian_stats.get("anisotropy_p99"),
+        "gaussian_anisotropy_max": gaussian_stats.get("anisotropy_max"),
     }
 
 

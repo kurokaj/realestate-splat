@@ -84,11 +84,11 @@ def runpod_colmap_cloud_type() -> str:
 
 
 def runpod_colmap_container_disk_gb() -> int:
-    raw_value = os.environ.get("RUNPOD_COLMAP_CONTAINER_DISK_GB", "80")
+    raw_value = os.environ.get("RUNPOD_COLMAP_CONTAINER_DISK_GB", "20")
     try:
         return max(20, int(raw_value))
     except ValueError:
-        return 80
+        return 20
 
 
 def runpod_colmap_poll_seconds() -> float:
@@ -124,11 +124,11 @@ def runpod_training_cloud_type() -> str:
 
 
 def runpod_training_container_disk_gb() -> int:
-    raw_value = os.environ.get("RUNPOD_TRAINING_CONTAINER_DISK_GB", "160")
+    raw_value = os.environ.get("RUNPOD_TRAINING_CONTAINER_DISK_GB", "20")
     try:
-        return max(40, int(raw_value))
+        return max(20, int(raw_value))
     except ValueError:
-        return 160
+        return 20
 
 
 def runpod_training_poll_seconds() -> float:
