@@ -491,6 +491,10 @@
             </select>
           </label>
           <label>
+            <span class="label-title">Max image size <span class="info-dot" tabindex="0" data-tip="Maximum resized image dimension passed to COLMAP feature extraction. SIFT is fine around 3200. ALIKED is much heavier on VRAM; on 20 GB GPUs start around 2048 and drop lower if memory becomes a problem.">i</span></span>
+            <input name="max_image_size" type="number" min="256" step="64" value="{{ colmap_form_values.max_image_size or 3200 }}">
+          </label>
+          <label>
             <span class="label-title">GPU <span class="info-dot" tabindex="0" data-tip="Only sub-$1.50/hour GPUs that match the current COLMAP image architecture shortlist are shown here.">i</span></span>
             <select name="gpu_type_id">
               {% for gpu in colmap_gpu_options %}

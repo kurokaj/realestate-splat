@@ -470,6 +470,8 @@ def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str
         inputs.get("matching_type", "SIFT_BRUTEFORCE"),
         "--camera-model",
         inputs.get("camera_model", "SIMPLE_RADIAL"),
+        "--max-image-size",
+        str(inputs.get("max_image_size", 3200)),
         "--colmap-bin",
         inputs.get("colmap_bin", "/opt/colmap-cuda/bin/colmap"),
     ]

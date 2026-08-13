@@ -89,6 +89,10 @@ def validate_colmap_feature_matcher(feature_extractor: str, matching_type: str) 
         raise HTTPException(status_code=400, detail="ALIKED features require an ALIKED matching type")
 
 
+def default_colmap_max_image_size(feature_extractor: str) -> int:
+    return 2048 if str(feature_extractor).startswith("ALIKED") else 3200
+
+
 @router.get("/", response_class=HTMLResponse)
 def ui_root() -> RedirectResponse:
     return RedirectResponse(url="/ui/projects", status_code=303)
@@ -268,6 +272,7 @@ def ui_queue_colmap(
     matcher: str = Form(default="exhaustive"),
     matching_type: str = Form(default="SIFT_BRUTEFORCE"),
     camera_model: str = Form(default="SIMPLE_RADIAL"),
+    max_image_size: int = Form(default=0),
     provider: str = Form(default=default_colmap_provider()),
     image: Optional[str] = Form(default=None),
     repo_url: Optional[str] = Form(default=None),
@@ -294,6 +299,7 @@ def ui_queue_colmap(
         validate_choice(matching_type, {option["value"] for option in COLMAP_FEATURE_MATCHER_OPTIONS}, "matching_type")
         validate_choice(camera_model, {option["value"] for option in COLMAP_CAMERA_MODEL_OPTIONS}, "camera_model")
         validate_colmap_feature_matcher(feature_extractor, matching_type)
+        resolved_max_image_size = max_image_size if max_image_size > 0 else default_colmap_max_image_size(feature_extractor)
         input_uri_json = {
             "preprocess_uri": resolved_preprocess_uri,
             "output_uri": resolved_output_uri,
@@ -303,6 +309,7 @@ def ui_queue_colmap(
             "matcher": matcher,
             "matching_type": matching_type,
             "camera_model": camera_model,
+            "max_image_size": resolved_max_image_size,
             "repo_url": empty_to_none(repo_url),
             "git_ref": empty_to_none(git_ref),
             "gpu_type_ids": [normalize_gpu_name(gpu_type_id)],
@@ -683,6 +690,7 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
     input_json = latest_run.get("input_uri_json") if latest_run and isinstance(latest_run.get("input_uri_json"), dict) else {}
     selected_gpu = first_gpu_type(input_json.get("gpu_type_ids")) or DEFAULT_COLMAP_GPU
     colmap_output_base = project.get("colmap_current_uri", "").rsplit("/current", 1)[0] if project.get("colmap_current_uri") else ""
+    feature_extractor = normalize_colmap_feature_extractor(input_json.get("feature_extractor") or "SIFT")
     return {
         "colmap_gate_open": bool(latest_preprocess and latest_preprocess.get("status") == "approved"),
         "latest_colmap_run": latest_run,
@@ -691,10 +699,11 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
             "output_uri": input_json.get("output_uri") or colmap_output_base,
             "endpoint_url": input_json.get("endpoint_url") or "",
             "mode": input_json.get("mode") or "global",
-            "feature_extractor": normalize_colmap_feature_extractor(input_json.get("feature_extractor") or "SIFT"),
+            "feature_extractor": feature_extractor,
             "matcher": input_json.get("matcher") or "exhaustive",
             "matching_type": input_json.get("matching_type") or "SIFT_BRUTEFORCE",
             "camera_model": input_json.get("camera_model") or "SIMPLE_RADIAL",
+            "max_image_size": input_json.get("max_image_size") or default_colmap_max_image_size(feature_extractor),
             "provider": latest_run.get("provider") if latest_run else default_colmap_provider(),
             "image": latest_run.get("image") if latest_run else "",
             "repo_url": input_json.get("repo_url") or "",
@@ -707,7 +716,7 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
         "colmap_feature_matcher_options": COLMAP_FEATURE_MATCHER_OPTIONS,
         "colmap_camera_model_options": COLMAP_CAMERA_MODEL_OPTIONS,
         "colmap_gpu_options": COLMAP_GPU_OPTIONS,
-        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "point_count", "feature_extractor", "matching_type", "matcher", "camera_model", "mode", "container_disk_gb"]),
+        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "point_count", "feature_extractor", "matching_type", "matcher", "camera_model", "max_image_size", "mode", "container_disk_gb"]),
     }
 
 
