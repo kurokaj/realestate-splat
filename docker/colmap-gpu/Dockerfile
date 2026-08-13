@@ -2,6 +2,7 @@ FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
 
 ARG CUDA_ARCHS="75;86;89"
 ARG BUILD_JOBS=8
+ARG COLMAP_REF=4.0.4
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -56,7 +57,7 @@ RUN git clone --recurse-submodules https://github.com/ceres-solver/ceres-solver.
     && cd /opt/src \
     && rm -rf ceres-solver
 
-RUN git clone https://github.com/colmap/colmap.git \
+RUN git clone --branch "${COLMAP_REF}" https://github.com/colmap/colmap.git \
     && cd colmap \
     && mkdir build \
     && cd build \
@@ -104,6 +105,7 @@ COPY --from=builder /opt/colmap-cuda /opt/colmap-cuda
 
 ENV PATH=/opt/colmap-cuda/bin:${PATH}
 ENV LD_LIBRARY_PATH=/opt/ceres-cuda/lib:/opt/colmap-cuda/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+ENV COLMAP_ONNX_MODEL_DIR=/opt/buildvision/colmap-models
 
 RUN set -eux; \
     ldconfig; \
@@ -121,45 +123,18 @@ RUN set -eux; \
     aws --version >/tmp/aws_version.txt
 
 RUN set -eux; \
-    mkdir -p /root/.cache/colmap /tmp/colmap-onnx-cache/images; \
-    python3 -c "import base64, pathlib; pathlib.Path('/tmp/colmap-onnx-cache/images/tiny.png').write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII='))"; \
-    colmap feature_extractor \
-      --database_path /tmp/colmap-onnx-cache/aliked-n16rot.db \
-      --image_path /tmp/colmap-onnx-cache/images \
-      --ImageReader.single_camera 1 \
-      --FeatureExtraction.type ALIKED_N16ROT \
-      --FeatureExtraction.use_gpu 0 \
-      --AlikedExtraction.max_num_features 32 \
-      >/tmp/colmap_aliked_n16rot_cache.log 2>&1; \
-    colmap feature_extractor \
-      --database_path /tmp/colmap-onnx-cache/aliked-n32.db \
-      --image_path /tmp/colmap-onnx-cache/images \
-      --ImageReader.single_camera 1 \
-      --FeatureExtraction.type ALIKED_N32 \
-      --FeatureExtraction.use_gpu 0 \
-      --AlikedExtraction.max_num_features 32 \
-      >/tmp/colmap_aliked_n32_cache.log 2>&1; \
-    colmap feature_extractor \
-      --database_path /tmp/colmap-onnx-cache/sift.db \
-      --image_path /tmp/colmap-onnx-cache/images \
-      --ImageReader.single_camera 1 \
-      --FeatureExtraction.type SIFT \
-      --FeatureExtraction.use_gpu 0 \
-      --SiftExtraction.max_num_features 32 \
-      >/tmp/colmap_sift_cache.log 2>&1; \
-    colmap exhaustive_matcher \
-      --database_path /tmp/colmap-onnx-cache/aliked-n16rot.db \
-      --FeatureMatching.type ALIKED_LIGHTGLUE \
-      --FeatureMatching.use_gpu 0 \
-      >/tmp/colmap_aliked_lightglue_cache.log 2>&1 || true; \
-    colmap exhaustive_matcher \
-      --database_path /tmp/colmap-onnx-cache/sift.db \
-      --FeatureMatching.type SIFT_LIGHTGLUE \
-      --FeatureMatching.use_gpu 0 \
-      >/tmp/colmap_sift_lightglue_cache.log 2>&1 || true; \
-    find /root/.cache/colmap -type f -name "*.onnx" -print | sort > /tmp/colmap_onnx_cache_files.txt; \
-    test -s /tmp/colmap_onnx_cache_files.txt; \
-    rm -rf /tmp/colmap-onnx-cache
+    mkdir -p "${COLMAP_ONNX_MODEL_DIR}"; \
+    curl -fL "https://github.com/colmap/colmap/releases/download/3.13.0/aliked-n16rot.onnx" \
+      -o "${COLMAP_ONNX_MODEL_DIR}/aliked-n16rot.onnx"; \
+    curl -fL "https://github.com/colmap/colmap/releases/download/3.13.0/aliked-n32.onnx" \
+      -o "${COLMAP_ONNX_MODEL_DIR}/aliked-n32.onnx"; \
+    curl -fL "https://github.com/colmap/colmap/releases/download/3.13.0/aliked-lightglue.onnx" \
+      -o "${COLMAP_ONNX_MODEL_DIR}/aliked-lightglue.onnx"; \
+    curl -fL "https://github.com/colmap/colmap/releases/download/3.13.0/sift-lightglue.onnx" \
+      -o "${COLMAP_ONNX_MODEL_DIR}/sift-lightglue.onnx"; \
+    find "${COLMAP_ONNX_MODEL_DIR}" -type f -name "*.onnx" -print | sort > /tmp/colmap_onnx_model_files.txt; \
+    test "$(wc -l < /tmp/colmap_onnx_model_files.txt)" -eq 4; \
+    du -h "${COLMAP_ONNX_MODEL_DIR}"/*.onnx
 
 WORKDIR /workspace
 CMD ["colmap", "-h"]

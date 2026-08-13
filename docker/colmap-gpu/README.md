@@ -19,10 +19,12 @@ export IMAGE_NAME="docker.io/blackjokuro/buildvision3d-colmap-gpu"
 export IMAGE_TAG="cuda12.4-colmap-r2-runtime-onnx-cudnn-sm75-sm86-sm89-r3"
 export CUDA_ARCHS="75;86;89"
 export BUILD_JOBS=8
+export COLMAP_REF="4.0.4"
 
 docker build --network=host \
   --build-arg CUDA_ARCHS="$CUDA_ARCHS" \
   --build-arg BUILD_JOBS="$BUILD_JOBS" \
+  --build-arg COLMAP_REF="$COLMAP_REF" \
   -t "$IMAGE_NAME:$IMAGE_TAG" \
   .
 ```
@@ -56,7 +58,7 @@ The image verifies:
 ldd /opt/colmap-cuda/bin/colmap has no "not found" libraries
 ldd /opt/colmap-cuda/lib/libonnxruntime_providers_cuda.so has no "not found" libraries
 libcudnn.so.9 is present for ONNX Runtime CUDA provider
-COLMAP ONNX model files are preloaded under /root/.cache/colmap
+COLMAP ONNX model files are preloaded under /opt/buildvision/colmap-models
 colmap -h works
 colmap global_mapper -h works
 colmap view_graph_calibrator -h works
