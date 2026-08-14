@@ -791,11 +791,11 @@ def ui_profile_defaults() -> dict[str, dict[str, Any]]:
 def raw_source_summary(project: dict[str, Any]) -> dict[str, Any]:
     raw_uri = project.get("raw_uri") if project else None
     if not raw_uri:
-        return {"loaded": False, "source_count": 0, "rows": [], "sources": []}
+        return {"loaded": False, "source_count": 0, "rows": [], "sources": [], "has_coverage_video": None}
     try:
         manifest = load_json_uri(f"{raw_uri.rstrip('/')}/sources_manifest.json")
     except Exception as exc:
-        return {"loaded": False, "source_count": 0, "rows": [], "sources": [], "error": str(exc)}
+        return {"loaded": False, "source_count": 0, "rows": [], "sources": [], "has_coverage_video": None, "error": str(exc)}
     sources = manifest.get("sources") if isinstance(manifest, dict) else []
     if not isinstance(sources, list):
         sources = []
@@ -804,6 +804,10 @@ def raw_source_summary(project: dict[str, Any]) -> dict[str, Any]:
         "source_count": len(sources),
         "rows": raw_source_count_rows(sources),
         "sources": compact_raw_sources(sources),
+        "has_coverage_video": any(
+            isinstance(source, dict) and source.get("role") == "coverage_video"
+            for source in sources
+        ),
     }
 
 

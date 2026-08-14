@@ -101,8 +101,15 @@ function setupRawUploadForm(form) {
 
 document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("#raw-upload-form").forEach(setupRawUploadForm);
-  document.querySelectorAll("#preprocess-queue-form").forEach(setupPreprocessProfileDefaults);
-  document.querySelectorAll('form[action$="/colmap"]').forEach(setupColmapFormBehavior);
+  document.querySelectorAll("#preprocess-queue-form").forEach((form) => {
+    setupPreprocessProfileDefaults(form);
+    setupPreprocessDependencyState(form);
+  });
+  document.querySelectorAll('form[action$="/colmap"]').forEach((form) => {
+    setupColmapFormBehavior(form);
+    setupProviderDependencyState(form);
+  });
+  document.querySelectorAll('form[action$="/training"]').forEach(setupProviderDependencyState);
   setupTabs();
   setupAutoRefresh();
   document.querySelectorAll("[data-colmap-viewer-url]").forEach(setupColmapViewer);
@@ -116,7 +123,9 @@ function setupColmapFormBehavior(form) {
   const vocabTreeInput = form.querySelector("[data-colmap-vocab-tree-input]");
   const vocabTreeRow = form.querySelector("[data-colmap-vocab-tree-row]");
   const vocabTreeNote = form.querySelector("[data-colmap-vocab-tree-note]");
-  if (!matcherSelect || !loopDetectionInput || !loopDetectionRow || !vocabTreeInput || !vocabTreeRow) return;
+  const matchingTypeSelect = form.querySelector("[data-colmap-matching-type-select]");
+  const featureExtractorSelect = form.querySelector('[name="feature_extractor"]');
+  if (!matcherSelect || !loopDetectionInput || !loopDetectionRow || !vocabTreeInput || !vocabTreeRow || !matchingTypeSelect || !featureExtractorSelect) return;
 
   function syncLoopDetectionState() {
     const sequentialEnabled = matcherSelect.value === "sequential";
@@ -133,12 +142,22 @@ function setupColmapFormBehavior(form) {
     }
     if (vocabTreeNote) {
       vocabTreeNote.textContent = vocabTreeEnabled
-        ? "Required for vocabulary tree matching."
+        ? "Optional override; COLMAP supplies its default tree when empty."
         : "Locked because this only applies to vocabulary tree matching.";
     }
+    const expectedPrefix = featureExtractorSelect.value.startsWith("ALIKED") ? "ALIKED_" : "SIFT_";
+    const compatibleOptions = Array.from(matchingTypeSelect.options).filter((option) => option.value.startsWith(expectedPrefix));
+    matchingTypeSelect.querySelectorAll("option").forEach((option) => {
+      option.disabled = !option.value.startsWith(expectedPrefix);
+    });
+    if (!matchingTypeSelect.value.startsWith(expectedPrefix) && compatibleOptions.length) {
+      matchingTypeSelect.value = compatibleOptions[0].value;
+    }
+    matchingTypeSelect.closest("label")?.classList.toggle("is-disabled", !matchingTypeSelect.value.startsWith(expectedPrefix));
   }
 
   matcherSelect.addEventListener("change", syncLoopDetectionState);
+  featureExtractorSelect.addEventListener("change", syncLoopDetectionState);
   syncLoopDetectionState();
 }
 
@@ -185,6 +204,42 @@ function setupPreprocessProfileDefaults(form) {
       if (input) input.value = value;
     });
   });
+}
+
+function setupPreprocessDependencyState(form) {
+  if (form.dataset.hasCoverageVideo !== "false") return;
+  form.querySelectorAll("[data-preprocess-video-only]").forEach((label) => {
+    label.classList.add("is-disabled");
+    label.querySelectorAll("input, select, textarea").forEach((control) => {
+      control.disabled = true;
+    });
+    if (!label.querySelector(".dependency-note")) {
+      const note = document.createElement("span");
+      note.className = "muted dependency-note";
+      note.textContent = "Video inputs only";
+      label.appendChild(note);
+    }
+  });
+}
+
+function setupProviderDependencyState(form) {
+  const provider = form.querySelector('[name="provider"]');
+  if (!provider) return;
+  const runpodFields = ["gpu_type_id", "container_disk_gb", "image", "repo_url", "git_ref", "endpoint_url"];
+
+  function sync() {
+    const enabled = provider.value !== "local_fake";
+    runpodFields.forEach((name) => {
+      const control = form.querySelector(`[name="${CSS.escape(name)}"]`);
+      const label = control?.closest("label");
+      if (!control || !label) return;
+      control.disabled = !enabled;
+      label.classList.toggle("is-disabled", !enabled);
+    });
+  }
+
+  provider.addEventListener("change", sync);
+  sync();
 }
 
 function setupAutoRefresh() {
@@ -426,8 +481,14 @@ function renderSparseViewer(canvas, scene) {
         camera.position[2] + forward[2] * radius * 0.08,
       ]);
       if (!tip) continue;
-      const stroke = camera.stroke_color || [255, 196, 88];
-      const fill = camera.fill_color || stroke;
+      const isHero = camera.role === "hero";
+      const isCoverage = camera.role === "coverage" || !camera.role || camera.role === "unknown";
+      const stroke = isHero
+        ? [90, 214, 130]
+        : (isCoverage ? [255, 204, 96] : (camera.stroke_color || [255, 204, 96]));
+      const fill = isHero
+        ? [128, 234, 160]
+        : (isCoverage ? [255, 221, 133] : (camera.fill_color || stroke));
       ctx.strokeStyle = `rgba(${stroke[0]}, ${stroke[1]}, ${stroke[2]}, 0.95)`;
       ctx.lineWidth = 1.2 * dpr;
       ctx.beginPath();

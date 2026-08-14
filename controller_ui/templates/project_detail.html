@@ -87,6 +87,7 @@
           action="/ui/projects/{{ project.id }}/preprocess"
           class="stack"
           id="preprocess-queue-form"
+          data-has-coverage-video="{{ 'true' if raw_source_summary.has_coverage_video is true else ('false' if raw_source_summary.has_coverage_video is false else 'unknown') }}"
           data-profile-defaults='{{ preprocess_profile_defaults|tojson }}'
         >
           <div class="grid two tight">
@@ -143,25 +144,25 @@
               <span class="label-title">Min entropy <span class="info-dot" tabindex="0" data-tip="Minimum image entropy. Useful for rejecting frames without enough visual information for matching.">i</span></span>
               <input name="min_entropy" type="number" step="0.1" value="{{ preprocess_form_values.min_entropy or '' }}">
             </label>
-            <label>
+            <label data-preprocess-video-only>
               <span class="label-title">Force keep interval <span class="info-dot" tabindex="0" data-tip="Maximum allowed time gap between selected frames before the selector force-keeps a candidate. Lower values push denser temporal coverage.">i</span></span>
               <input name="force_keep_interval" type="number" step="0.1" value="{{ preprocess_form_values.force_keep_interval or '' }}">
             </label>
-            <label>
+            <label data-preprocess-video-only>
               <span class="label-title">Coverage window <span class="info-dot" tabindex="0" data-tip="Timeline window size in seconds used to detect gaps in selected frames. Smaller windows enforce denser temporal coverage.">i</span></span>
               <input name="coverage_window_seconds" type="number" step="0.1" value="{{ preprocess_form_values.coverage_window_seconds or '' }}">
             </label>
           </div>
           <div class="grid three tight">
-            <label>
+            <label data-preprocess-video-only>
               <span class="label-title">Min frames/window <span class="info-dot" tabindex="0" data-tip="Minimum selected frames required in each coverage window before fallback selection is attempted.">i</span></span>
               <input name="min_frames_per_window" type="number" value="{{ preprocess_form_values.min_frames_per_window or '' }}">
             </label>
-            <label>
+            <label data-preprocess-video-only>
               <span class="label-title">Coverage hard min blur <span class="info-dot" tabindex="0" data-tip="Fallback coverage frames must still meet at least this blur score, even when ordinary thresholds are relaxed.">i</span></span>
               <input name="coverage_hard_min_blur" type="number" step="0.1" value="{{ preprocess_form_values.coverage_hard_min_blur or '' }}">
             </label>
-            <label>
+            <label data-preprocess-video-only>
               <span class="label-title">Coverage hard brightness min/max <span class="info-dot" tabindex="0" data-tip="Absolute brightness guardrails for fallback coverage frames. These protect against force-keeping frames that are too dark or blown out.">i</span></span>
               <span class="split-inputs">
                 <input name="coverage_hard_min_brightness" type="number" step="0.1" value="{{ preprocess_form_values.coverage_hard_min_brightness or '' }}" placeholder="min">
@@ -170,11 +171,11 @@
             </label>
           </div>
           <div class="grid two tight">
-            <label>
+            <label data-preprocess-video-only>
               <span class="label-title">Coverage hard min contrast <span class="info-dot" tabindex="0" data-tip="Absolute minimum contrast for fallback coverage frames.">i</span></span>
               <input name="coverage_hard_min_contrast" type="number" step="0.1" value="{{ preprocess_form_values.coverage_hard_min_contrast or '' }}">
             </label>
-            <label>
+            <label data-preprocess-video-only>
               <span class="label-title">Coverage hard min entropy <span class="info-dot" tabindex="0" data-tip="Absolute minimum entropy for fallback coverage frames so they still carry enough detail for matching.">i</span></span>
               <input name="coverage_hard_min_entropy" type="number" step="0.1" value="{{ preprocess_form_values.coverage_hard_min_entropy or '' }}">
             </label>
@@ -482,7 +483,7 @@
           </label>
           <label>
             <span class="label-title">Feature matcher <span class="info-dot" tabindex="0" data-tip="COLMAP FeatureMatching.type. SIFT_BRUTEFORCE is the default; LightGlue can improve difficult pairs but downloads ONNX model files on first use.">i</span></span>
-            <select name="matching_type">
+            <select name="matching_type" data-colmap-matching-type-select>
               {% for option in colmap_feature_matcher_options %}
                 <option value="{{ option.value }}" {% if colmap_form_values.matching_type == option.value %}selected{% endif %}>{{ option.label }}</option>
               {% endfor %}

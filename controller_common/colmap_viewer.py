@@ -111,7 +111,14 @@ def load_manifest_by_name(sparse_txt_dir: Path) -> dict[str, dict[str, Any]]:
             continue
         image_name = entry.get("image_name")
         if image_name:
-            by_name[str(image_name)] = dict(entry)
+            normalized = dict(entry)
+            by_name[str(image_name)] = normalized
+            by_name[Path(str(image_name)).name] = normalized
+        manifest_path = entry.get("path")
+        if manifest_path:
+            normalized = dict(entry)
+            by_name[str(manifest_path)] = normalized
+            by_name[Path(str(manifest_path)).name] = normalized
     return by_name
 
 
@@ -124,7 +131,7 @@ def camera_row(image: Any, manifest_entry: Mapping[str, Any] | None = None) -> d
     rotation = qvec_to_rotmat(image.qvec)
     forward_cv = [-rotation[2][0], -rotation[2][1], -rotation[2][2]]
     up_cv = [-rotation[1][0], -rotation[1][1], -rotation[1][2]]
-    role = str((manifest_entry or {}).get("role") or "unknown")
+    role = str((manifest_entry or {}).get("role") or "coverage")
     colors = camera_colors(role)
     return {
         "image_id": image.image_id,

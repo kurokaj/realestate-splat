@@ -298,6 +298,17 @@ label.is-disabled {
   opacity: 0.6;
 }
 
+label.is-disabled input:disabled,
+label.is-disabled select:disabled {
+  cursor: not-allowed;
+}
+
+.dependency-note {
+  display: block;
+  font-size: 11px;
+  margin-top: 4px;
+}
+
 .split-inputs {
   display: grid;
   gap: 6px;
