@@ -298,6 +298,7 @@ def run_runpod_colmap(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]:
                 "matcher": inputs.get("matcher", "exhaustive"),
                 "matching_type": inputs.get("matching_type", "SIFT_BRUTEFORCE"),
                 "camera_model": inputs.get("camera_model", "SIMPLE_RADIAL"),
+                "sequential_loop_detection": inputs.get("sequential_loop_detection", True),
                 "stage_result_uri": f"{current_uri}/stage_result.json",
                 "reconstruction_report_uri": f"{current_uri}/reconstruction_report.json",
             },
@@ -472,6 +473,7 @@ def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str
         inputs.get("camera_model", "SIMPLE_RADIAL"),
         "--max-image-size",
         str(inputs.get("max_image_size", 3200)),
+        "--sequential-loop-detection" if inputs.get("sequential_loop_detection", True) else "--no-sequential-loop-detection",
         "--colmap-bin",
         inputs.get("colmap_bin", "/opt/colmap-cuda/bin/colmap"),
     ]
@@ -958,6 +960,7 @@ def compact_colmap_summary(
         "status": stage_result.get("status"),
         "mode": wrapper_summary.get("mode") or settings.get("mode"),
         "matcher": wrapper_summary.get("matcher") or settings.get("matcher"),
+        "sequential_loop_detection": wrapper_summary.get("sequential_loop_detection") if wrapper_summary.get("sequential_loop_detection") is not None else settings.get("sequential_loop_detection"),
         "image_count": wrapper_summary.get("image_count") or ((reconstruction_report.get("input") or {}).get("image_count") if isinstance(reconstruction_report.get("input"), dict) else None),
         "selected_sparse_model": wrapper_summary.get("selected_sparse_model") or reconstruction_report.get("selected_sparse_model"),
         "registered_images": metrics.get("registered_images"),

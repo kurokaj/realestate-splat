@@ -470,7 +470,7 @@
         <div class="grid three tight">
           <label>
             <span class="label-title">Matching style <span class="info-dot" tabindex="0" data-tip="COLMAP pair generation style: exhaustive compares all image pairs, sequential uses frame order, vocabulary tree is for larger unordered sets.">i</span></span>
-            <select name="matcher">
+            <select name="matcher" data-colmap-matcher-select>
               {% for option in colmap_matcher_options %}
                 <option value="{{ option.value }}" {% if colmap_form_values.matcher == option.value %}selected{% endif %}>{{ option.label }}</option>
               {% endfor %}
@@ -495,6 +495,20 @@
           <label>
             <span class="label-title">Max image size <span class="info-dot" tabindex="0" data-tip="Maximum resized image dimension passed to COLMAP feature extraction. SIFT is fine around 3200. ALIKED is much heavier on VRAM; on 20 GB GPUs start around 2048 and drop lower if memory becomes a problem.">i</span></span>
             <input name="max_image_size" type="number" min="256" step="64" value="{{ colmap_form_values.max_image_size or 3200 }}">
+          </label>
+          <label data-colmap-loop-detection-row>
+            <span class="label-title">Loop detection <span class="info-dot" tabindex="0" data-tip="SequentialMatching.loop_detection. Leave this on for video-like captures so COLMAP can reconnect revisited areas and reduce split planes. It only applies to sequential matching style.">i</span></span>
+            <span class="checkbox-row">
+              <input type="hidden" name="sequential_loop_detection" value="false">
+              <input
+                type="checkbox"
+                name="sequential_loop_detection"
+                value="true"
+                {% if colmap_form_values.sequential_loop_detection is not sameas false %}checked{% endif %}
+                data-colmap-loop-detection-input
+              >
+              <span class="muted" data-colmap-loop-detection-note>Only applies when matching style is sequential.</span>
+            </span>
           </label>
           <label>
             <span class="label-title">GPU <span class="info-dot" tabindex="0" data-tip="Only sub-$1.50/hour GPUs that match the current COLMAP image architecture shortlist are shown here.">i</span></span>

@@ -273,6 +273,7 @@ def ui_queue_colmap(
     matching_type: str = Form(default="SIFT_BRUTEFORCE"),
     camera_model: str = Form(default="SIMPLE_RADIAL"),
     max_image_size: int = Form(default=0),
+    sequential_loop_detection: Optional[str] = Form(default="true"),
     provider: str = Form(default=default_colmap_provider()),
     image: Optional[str] = Form(default=None),
     repo_url: Optional[str] = Form(default=None),
@@ -310,6 +311,7 @@ def ui_queue_colmap(
             "matching_type": matching_type,
             "camera_model": camera_model,
             "max_image_size": resolved_max_image_size,
+            "sequential_loop_detection": str(sequential_loop_detection).lower() == "true",
             "repo_url": empty_to_none(repo_url),
             "git_ref": empty_to_none(git_ref),
             "gpu_type_ids": [normalize_gpu_name(gpu_type_id)],
@@ -704,6 +706,7 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
             "matching_type": input_json.get("matching_type") or "SIFT_BRUTEFORCE",
             "camera_model": input_json.get("camera_model") or "SIMPLE_RADIAL",
             "max_image_size": input_json.get("max_image_size") or default_colmap_max_image_size(feature_extractor),
+            "sequential_loop_detection": input_json.get("sequential_loop_detection", True),
             "provider": latest_run.get("provider") if latest_run else default_colmap_provider(),
             "image": latest_run.get("image") if latest_run else "",
             "repo_url": input_json.get("repo_url") or "",
@@ -716,7 +719,7 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
         "colmap_feature_matcher_options": COLMAP_FEATURE_MATCHER_OPTIONS,
         "colmap_camera_model_options": COLMAP_CAMERA_MODEL_OPTIONS,
         "colmap_gpu_options": COLMAP_GPU_OPTIONS,
-        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "point_count", "feature_extractor", "matching_type", "matcher", "camera_model", "max_image_size", "mode", "container_disk_gb"]),
+        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "point_count", "feature_extractor", "matching_type", "matcher", "sequential_loop_detection", "camera_model", "max_image_size", "mode", "container_disk_gb"]),
     }
 
 

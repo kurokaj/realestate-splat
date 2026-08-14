@@ -60,6 +60,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "view_graph_calibrator": True,
     "manifest_camera_groups": True,
     "sequential_overlap": 10,
+    "sequential_loop_detection": True,
     "export_text": True,
     "undistort": False,
     "feature_options": {},
@@ -176,6 +177,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--sequential-overlap",
         type=int,
         help="Sequential matcher overlap when --matcher sequential is used.",
+    )
+    parser.add_argument(
+        "--sequential-loop-detection",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="SequentialMatching.loop_detection when --matcher sequential is used.",
     )
     parser.add_argument(
         "--vocab-tree",
@@ -385,6 +392,7 @@ def build_settings(args: argparse.Namespace) -> Dict[str, Any]:
         "view_graph_calibrator": args.view_graph_calibrator,
         "manifest_camera_groups": args.manifest_camera_groups,
         "sequential_overlap": args.sequential_overlap,
+        "sequential_loop_detection": args.sequential_loop_detection,
         "vocab_tree": str(args.vocab_tree) if args.vocab_tree is not None else None,
         "export_text": args.export_text,
         "undistort": args.undistort,
@@ -983,6 +991,7 @@ def build_matcher_command(
     ]
     if matcher == "sequential":
         command.extend(["--SequentialMatching.overlap", str(int(settings["sequential_overlap"]))])
+        command.extend(["--SequentialMatching.loop_detection", bool_as_colmap(settings["sequential_loop_detection"])])
     if matcher == "vocab_tree":
         command.extend(["--VocabTreeMatching.vocab_tree_path", str(settings["vocab_tree"])])
     append_options(command, settings.get("matcher_options", {}))

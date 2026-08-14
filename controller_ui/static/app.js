@@ -82,10 +82,34 @@ function setupRawUploadForm(form) {
 document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("#raw-upload-form").forEach(setupRawUploadForm);
   document.querySelectorAll("#preprocess-queue-form").forEach(setupPreprocessProfileDefaults);
+  document.querySelectorAll('form[action$="/colmap"]').forEach(setupColmapFormBehavior);
   setupTabs();
   setupAutoRefresh();
   document.querySelectorAll("[data-colmap-viewer-url]").forEach(setupColmapViewer);
 });
+
+function setupColmapFormBehavior(form) {
+  const matcherSelect = form.querySelector("[data-colmap-matcher-select]");
+  const loopDetectionInput = form.querySelector("[data-colmap-loop-detection-input]");
+  const loopDetectionRow = form.querySelector("[data-colmap-loop-detection-row]");
+  const loopDetectionNote = form.querySelector("[data-colmap-loop-detection-note]");
+  if (!matcherSelect || !loopDetectionInput || !loopDetectionRow) return;
+
+  function syncLoopDetectionState() {
+    const enabled = matcherSelect.value === "sequential";
+    loopDetectionInput.disabled = !enabled;
+    loopDetectionRow.classList.toggle("is-disabled", !enabled);
+    loopDetectionInput.closest(".checkbox-row")?.classList.toggle("is-disabled", !enabled);
+    if (loopDetectionNote) {
+      loopDetectionNote.textContent = enabled
+        ? "Recommended for sequential video-like runs."
+        : "Locked because this only applies to sequential matching.";
+    }
+  }
+
+  matcherSelect.addEventListener("change", syncLoopDetectionState);
+  syncLoopDetectionState();
+}
 
 function setupTabs() {
   const buttons = document.querySelectorAll("[data-tab-target]");
@@ -371,13 +395,15 @@ function renderSparseViewer(canvas, scene) {
         camera.position[2] + forward[2] * radius * 0.08,
       ]);
       if (!tip) continue;
-      ctx.strokeStyle = "rgba(255, 196, 88, 0.95)";
+      const stroke = camera.stroke_color || [255, 196, 88];
+      const fill = camera.fill_color || stroke;
+      ctx.strokeStyle = `rgba(${stroke[0]}, ${stroke[1]}, ${stroke[2]}, 0.95)`;
       ctx.lineWidth = 1.2 * dpr;
       ctx.beginPath();
       ctx.moveTo(origin.x, origin.y);
       ctx.lineTo(tip.x, tip.y);
       ctx.stroke();
-      ctx.fillStyle = "#ffd88b";
+      ctx.fillStyle = `rgb(${fill[0]}, ${fill[1]}, ${fill[2]})`;
       ctx.beginPath();
       ctx.arc(origin.x, origin.y, 2.6 * dpr, 0, Math.PI * 2);
       ctx.fill();

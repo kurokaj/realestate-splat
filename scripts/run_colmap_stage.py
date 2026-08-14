@@ -67,6 +67,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--single-camera", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--use-gpu", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-image-size", type=int, default=3200)
+    parser.add_argument(
+        "--sequential-loop-detection",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="SequentialMatching.loop_detection when --matcher sequential is used.",
+    )
     parser.add_argument("--option-namespace", choices=["auto", "feature", "sift"], default="auto")
     parser.add_argument("--view-graph-calibrator", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--manifest-camera-groups", action=argparse.BooleanOptionalAction, default=True)
@@ -246,6 +252,7 @@ def build_colmap_command(args: argparse.Namespace, local_run_dir: Path) -> List[
         "--use-gpu" if args.use_gpu else "--no-use-gpu",
         "--max-image-size",
         str(args.max_image_size),
+        "--sequential-loop-detection" if args.sequential_loop_detection else "--no-sequential-loop-detection",
         "--option-namespace",
         args.option_namespace,
         "--view-graph-calibrator" if args.view_graph_calibrator else "--no-view-graph-calibrator",

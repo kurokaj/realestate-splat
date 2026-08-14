@@ -286,6 +286,14 @@ button.danger {
   width: auto;
 }
 
+.checkbox-row.is-disabled {
+  opacity: 0.6;
+}
+
+.checkbox-row.is-disabled input {
+  cursor: not-allowed;
+}
+
 .split-inputs {
   display: grid;
   gap: 6px;

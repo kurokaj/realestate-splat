@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from scripts.prepare_nerfstudio_from_colmap import (
     colmap_pose_to_nerfstudio_transform,
@@ -13,6 +13,21 @@ from scripts.prepare_nerfstudio_from_colmap import (
     read_cameras,
     read_images,
 )
+
+ROLE_CAMERA_COLORS: dict[str, dict[str, list[int]]] = {
+    "coverage": {
+        "stroke": [255, 204, 96],
+        "fill": [255, 221, 133],
+    },
+    "hero": {
+        "stroke": [90, 214, 130],
+        "fill": [128, 234, 160],
+    },
+    "unknown": {
+        "stroke": [163, 178, 194],
+        "fill": [192, 204, 217],
+    },
+}
 
 
 def useful_lines(path: Path) -> Iterable[str]:
@@ -51,6 +66,7 @@ def build_sparse_viewer_payload(sparse_txt_dir: Path, *, max_points: int = 25000
     cameras = read_cameras(sparse_txt_dir / "cameras.txt")
     images = read_images(sparse_txt_dir / "images.txt")
     points = read_points3d(sparse_txt_dir / "points3D.txt")
+    manifest_by_name = load_manifest_by_name(sparse_txt_dir)
 
     sampled_points = sample_points(points, max_points=max_points)
     converted_points = [
@@ -60,7 +76,7 @@ def build_sparse_viewer_payload(sparse_txt_dir: Path, *, max_points: int = 25000
         }
         for point in sampled_points
     ]
-    camera_rows = [camera_row(image) for image in images]
+    camera_rows = [camera_row(image, manifest_by_name.get(image.name)) for image in images]
     bounds = scene_bounds([point["position"] for point in converted_points], [camera["position"] for camera in camera_rows])
     return {
         "schema_version": 1,
@@ -77,17 +93,49 @@ def build_sparse_viewer_payload(sparse_txt_dir: Path, *, max_points: int = 25000
     }
 
 
-def camera_row(image: Any) -> dict[str, Any]:
+def load_manifest_by_name(sparse_txt_dir: Path) -> dict[str, dict[str, Any]]:
+    reports_dir = sparse_txt_dir.parents[2] / "reports"
+    manifest_path = reports_dir / "image_manifest.json"
+    if not manifest_path.exists():
+        return {}
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    images = manifest.get("images") or []
+    if not isinstance(images, list):
+        return {}
+    by_name: dict[str, dict[str, Any]] = {}
+    for entry in images:
+        if not isinstance(entry, dict):
+            continue
+        image_name = entry.get("image_name")
+        if image_name:
+            by_name[str(image_name)] = dict(entry)
+    return by_name
+
+
+def camera_colors(role: str) -> dict[str, list[int]]:
+    return ROLE_CAMERA_COLORS.get(role, ROLE_CAMERA_COLORS["unknown"])
+
+
+def camera_row(image: Any, manifest_entry: Mapping[str, Any] | None = None) -> dict[str, Any]:
     transform = colmap_pose_to_nerfstudio_transform(image)
     rotation = qvec_to_rotmat(image.qvec)
     forward_cv = [-rotation[2][0], -rotation[2][1], -rotation[2][2]]
     up_cv = [-rotation[1][0], -rotation[1][1], -rotation[1][2]]
+    role = str((manifest_entry or {}).get("role") or "unknown")
+    colors = camera_colors(role)
     return {
         "image_id": image.image_id,
         "name": image.name,
+        "role": role,
+        "camera_group": (manifest_entry or {}).get("camera_group"),
         "position": round_vector([transform[0][3], transform[1][3], transform[2][3]]),
         "forward": round_vector(convert_xyz_to_nerfstudio_axes(forward_cv)),
         "up": round_vector(convert_xyz_to_nerfstudio_axes(up_cv)),
+        "stroke_color": colors["stroke"],
+        "fill_color": colors["fill"],
     }
 
 
