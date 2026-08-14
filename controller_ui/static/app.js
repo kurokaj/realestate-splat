@@ -77,6 +77,26 @@ function setupRawUploadForm(form) {
       result.textContent = `Upload failed: ${error}`;
     }
   });
+
+  document.querySelectorAll(".raw-remove-button").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const relativePath = button.dataset.rawPath;
+      if (!relativePath || !window.confirm(`Remove ${relativePath} from raw sources?`)) return;
+      button.disabled = true;
+      try {
+        const response = await fetch(
+          `/projects/${form.dataset.projectId}/raw?relative_path=${encodeURIComponent(relativePath)}`,
+          { method: "DELETE" },
+        );
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.detail || "Removal failed");
+        window.location.reload();
+      } catch (error) {
+        button.disabled = false;
+        window.alert(`Remove failed: ${error}`);
+      }
+    });
+  });
 }
 
 document.addEventListener("DOMContentLoaded", () => {

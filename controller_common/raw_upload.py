@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import shutil
 import sys
+import json
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Optional
 
@@ -14,7 +17,7 @@ if str(SRC_DIR) not in sys.path:
 
 from realestate_splat.cli import write_json  # noqa: E402
 from realestate_splat.media_manifest import build_sources_manifest  # noqa: E402
-from realestate_splat.storage import copy_file, sync_directory  # noqa: E402
+from realestate_splat.storage import copy_file, delete_file, sync_directory  # noqa: E402
 
 
 DEFAULT_EXCLUDES = [
@@ -58,6 +61,11 @@ def upload_raw_directory(
 ) -> dict:
     manifest = build_sources_manifest(project_id, input_dir, destination_uri)
     apply_manifest_overrides(manifest, metadata_overrides or {})
+    loaded_at = utc_now()
+    for source in manifest.get("sources", []):
+        source["loaded_at"] = loaded_at
+    if not dry_run:
+        manifest = merge_with_existing_manifest(manifest, destination_uri, endpoint_url)
     manifest_path = input_dir / "sources_manifest.json"
     write_json(manifest_path, manifest)
     sync_directory(
@@ -75,6 +83,82 @@ def upload_raw_directory(
         dry_run=dry_run,
     )
     return manifest
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def load_manifest(destination_uri: str, endpoint_url: Optional[str]) -> dict[str, Any]:
+    manifest_uri = f"{destination_uri.rstrip('/')}/sources_manifest.json"
+    with tempfile.NamedTemporaryFile("w+b", suffix=".json") as handle:
+        try:
+            copy_file(manifest_uri, handle.name, endpoint_url=endpoint_url)
+        except Exception:
+            return {}
+        handle.seek(0)
+        try:
+            payload = json.loads(handle.read().decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def merge_with_existing_manifest(
+    incoming: dict[str, Any],
+    destination_uri: str,
+    endpoint_url: Optional[str],
+) -> dict[str, Any]:
+    existing = load_manifest(destination_uri, endpoint_url)
+    existing_sources = existing.get("sources") if isinstance(existing.get("sources"), list) else []
+    incoming_sources = incoming.get("sources") if isinstance(incoming.get("sources"), list) else []
+    by_path = {
+        source.get("relative_path"): source
+        for source in existing_sources
+        if isinstance(source, dict) and source.get("relative_path")
+    }
+    for source in incoming_sources:
+        if isinstance(source, dict) and source.get("relative_path"):
+            by_path[source["relative_path"]] = source
+    return {
+        **incoming,
+        "schema_version": max(int(existing.get("schema_version") or 0), int(incoming.get("schema_version") or 0), 3),
+        "created_at": existing.get("created_at") or incoming.get("created_at"),
+        "updated_at": utc_now(),
+        "sources": [by_path[path] for path in sorted(by_path)],
+    }
+
+
+def remove_raw_source(
+    *,
+    destination_uri: str,
+    relative_path: str,
+    endpoint_url: Optional[str],
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Remove one manifest source and its corresponding raw object."""
+    safe_path = safe_relative_upload_path(relative_path).as_posix()
+    manifest = load_manifest(destination_uri, endpoint_url)
+    sources = manifest.get("sources") if isinstance(manifest.get("sources"), list) else []
+    remaining = [source for source in sources if isinstance(source, dict) and source.get("relative_path") != safe_path]
+    if len(remaining) == len(sources):
+        raise ValueError(f"Raw source is not present in the manifest: {safe_path}")
+    if not dry_run:
+        delete_file(f"{destination_uri.rstrip('/')}/{safe_path}", endpoint_url=endpoint_url)
+        manifest = {
+            **manifest,
+            "updated_at": utc_now(),
+            "sources": remaining,
+        }
+        with tempfile.TemporaryDirectory(prefix="buildvision3d-raw-remove-") as temp_dir:
+            manifest_path = Path(temp_dir) / "sources_manifest.json"
+            write_json(manifest_path, manifest)
+            copy_file(
+                manifest_path,
+                f"{destination_uri.rstrip('/')}/sources_manifest.json",
+                endpoint_url=endpoint_url,
+            )
+    return {"relative_path": safe_path, "remaining_source_count": len(remaining), "dry_run": dry_run}
 
 
 def metadata_overrides_by_filename(metadata: Optional[dict[str, Any]]) -> dict[str, dict[str, Any]]:

@@ -839,6 +839,7 @@ def compact_raw_sources(sources: list[Any]) -> list[dict[str, Any]]:
                 "colmap_policy": source.get("colmap_policy"),
                 "resolution": resolution,
                 "duration_seconds": source.get("duration_seconds"),
+                "loaded_at": source.get("loaded_at"),
             }
         )
     return rows
@@ -1166,10 +1167,14 @@ def compact_video_rows(videos: list[Any]) -> list[dict[str, Any]]:
 
 
 def video_timeline_blocks(capture_report: dict[str, Any], run: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
-    if isinstance(capture_report, dict) and capture_report.get("videos"):
+    if isinstance(capture_report, dict):
+        # A capture report is authoritative. Coverage stills belong to the image
+        # grid and must never be promoted into a video timeline fallback.
         return full_timeline_blocks(capture_report)
     if run:
-        return compact_selected_timeline_blocks(run.get("summary_json") or {})
+        summary = run.get("summary_json") or {}
+        if isinstance(summary, dict) and isinstance(summary.get("videos"), list) and summary.get("videos"):
+            return compact_selected_timeline_blocks(summary)
     return []
 
 

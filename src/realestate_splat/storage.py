@@ -148,6 +148,28 @@ def copy_file(
     run_command(command, dry_run)
 
 
+def delete_file(
+    uri: str | Path,
+    *,
+    endpoint_url: Optional[str] = None,
+    dry_run: bool = False,
+) -> None:
+    """Delete one explicitly identified local or object-storage file."""
+    storage_uri = parse_storage_uri(uri)
+    if storage_uri.is_local:
+        path = storage_uri.as_local_path()
+        print(f"$ delete-local {path}", flush=True)
+        if not dry_run and path.exists():
+            if not path.is_file():
+                raise IsADirectoryError(f"Cannot delete non-file path: {path}")
+            path.unlink()
+        return
+
+    command = aws_base_command(storage_uri, endpoint_url)
+    command.extend(["s3", "rm", aws_sync_arg(storage_uri)])
+    run_command(command, dry_run)
+
+
 def abort_multipart_uploads(
     prefix: str | Path,
     *,

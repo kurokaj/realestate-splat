@@ -5,25 +5,17 @@ from __future__ import annotations
 
 import argparse
 import sys
-import tempfile
 from pathlib import Path
 from typing import Optional, Sequence
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from realestate_splat.media_manifest import build_sources_manifest  # noqa: E402
-from realestate_splat.storage import copy_file, sync_directory  # noqa: E402
-from realestate_splat.cli import write_json  # noqa: E402
-
-
-DEFAULT_EXCLUDES = [
-    ".DS_Store",
-    ".gitkeep",
-    "__pycache__/*",
-    "*.pyc",
-]
+from controller_common.raw_upload import upload_raw_directory  # noqa: E402
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -52,39 +44,33 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
     input_dir = args.input_dir.expanduser()
-    manifest = build_sources_manifest(args.project_id, input_dir, args.destination_uri)
-
-    manifest_path = args.manifest_path
-    temp_dir: Optional[tempfile.TemporaryDirectory[str]] = None
-    if manifest_path is None:
-        temp_dir = tempfile.TemporaryDirectory(prefix="buildvision3d-raw-upload-")
-        manifest_path = Path(temp_dir.name) / "sources_manifest.json"
-
     if args.dry_run:
+        manifest = upload_raw_directory(
+            project_id=args.project_id,
+            input_dir=input_dir,
+            destination_uri=args.destination_uri,
+            endpoint_url=args.endpoint_url,
+            delete=args.delete,
+            dry_run=True,
+        )
         print_manifest_summary(manifest)
-        print(f"$ write-json {manifest_path}")
-    else:
-        write_json(manifest_path, manifest)
-        print(f"Wrote sources manifest: {manifest_path}")
+        return
 
-    sync_directory(
-        input_dir,
-        args.destination_uri,
+    manifest = upload_raw_directory(
+        project_id=args.project_id,
+        input_dir=input_dir,
+        destination_uri=args.destination_uri,
         endpoint_url=args.endpoint_url,
         delete=args.delete,
-        dry_run=args.dry_run,
-        exclude=DEFAULT_EXCLUDES,
+        dry_run=False,
     )
+    if args.manifest_path:
+        from realestate_splat.cli import write_json
 
-    copy_file(
-        manifest_path,
-        f"{args.destination_uri.rstrip('/')}/sources_manifest.json",
-        endpoint_url=args.endpoint_url,
-        dry_run=args.dry_run,
-    )
-
-    if temp_dir is not None:
-        temp_dir.cleanup()
+        write_json(args.manifest_path, manifest)
+        print(f"Wrote sources manifest: {args.manifest_path}")
+    else:
+        print(f"Wrote merged sources manifest to {args.destination_uri.rstrip('/')}/sources_manifest.json")
 
 
 def print_manifest_summary(manifest: dict) -> None:

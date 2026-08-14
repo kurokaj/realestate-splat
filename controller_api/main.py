@@ -29,6 +29,7 @@ from controller_common.db import (
 from controller_common.raw_upload import (
     manifest_summary,
     metadata_overrides_by_filename,
+    remove_raw_source,
     upload_raw_directory,
     uploaded_file_names,
     write_upload_file,
@@ -294,6 +295,35 @@ def upload_project_raw(
             "manifest_summary": manifest_summary(manifest),
             "sources": manifest.get("sources", []),
         }
+
+
+@app.delete("/projects/{project_id}/raw")
+def delete_project_raw_source(
+    project_id: str,
+    relative_path: str,
+    destination_uri: Optional[str] = None,
+    endpoint_url: Optional[str] = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    with connect() as conn:
+        project = conn.execute("SELECT raw_uri FROM projects WHERE id = %s", (project_id,)).fetchone()
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    raw_uri = destination_uri or project.get("raw_uri")
+    if not raw_uri:
+        raise HTTPException(status_code=400, detail="Project raw_uri is required")
+    require_r2_uri(raw_uri, "destination_uri")
+    try:
+        return remove_raw_source(
+            destination_uri=raw_uri,
+            relative_path=relative_path,
+            endpoint_url=endpoint_url,
+            dry_run=dry_run,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Raw source removal failed: {exc}") from exc
 
 
 def parse_metadata_json(raw_value: Optional[str]) -> Optional[dict[str, Any]]:

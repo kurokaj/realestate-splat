@@ -237,6 +237,8 @@
                 <th>Role</th>
                 <th>Group</th>
                 <th>COLMAP</th>
+                <th>Loaded</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -247,9 +249,11 @@
                   <td>{{ source.role }}</td>
                   <td>{{ source.camera_group or source.location or "" }}</td>
                   <td>{{ source.colmap_policy }}</td>
+                  <td>{{ source.loaded_at or "" }}</td>
+                  <td><button type="button" class="danger secondary raw-remove-button" data-raw-path="{{ source.relative_path }}">Remove</button></td>
                 </tr>
               {% else %}
-                <tr><td colspan="5" class="empty">No manifest sources listed.</td></tr>
+                <tr><td colspan="7" class="empty">No manifest sources listed.</td></tr>
               {% endfor %}
             </tbody>
           </table>
