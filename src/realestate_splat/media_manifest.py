@@ -24,6 +24,9 @@ class SourceMedia:
     related_sources: Optional[List[str]] = None
     camera_group: Optional[str] = None
     colmap_policy: str = "include"
+    width: Optional[int] = None
+    height: Optional[int] = None
+    duration_seconds: Optional[float] = None
 
 
 def discover_raw_media(input_dir: Path, destination_uri: str) -> List[SourceMedia]:
@@ -43,6 +46,7 @@ def discover_raw_media(input_dir: Path, destination_uri: str) -> List[SourceMedi
         relative_path = path.relative_to(input_dir).as_posix()
         if suffix in VIDEO_SUFFIXES:
             source_id = safe_source_id(path.stem)
+            width, height, duration_seconds = video_metadata(path)
             sources.append(
                 SourceMedia(
                     source_id=source_id,
@@ -51,10 +55,14 @@ def discover_raw_media(input_dir: Path, destination_uri: str) -> List[SourceMedi
                     uri=f"{destination_base}/{relative_path}",
                     location=source_id,
                     camera_group=f"video_{source_id}",
+                    width=width,
+                    height=height,
+                    duration_seconds=duration_seconds,
                 )
             )
         elif suffix in IMAGE_SUFFIXES:
             source_id = safe_source_id(path.stem)
+            width, height = image_dimensions(path)
             sources.append(
                 SourceMedia(
                     source_id=f"coverage_image_{source_id}",
@@ -63,6 +71,8 @@ def discover_raw_media(input_dir: Path, destination_uri: str) -> List[SourceMedi
                     uri=f"{destination_base}/{relative_path}",
                     location=None,
                     camera_group="coverage_images",
+                    width=width,
+                    height=height,
                 )
             )
 
@@ -78,6 +88,7 @@ def discover_raw_media(input_dir: Path, destination_uri: str) -> List[SourceMedi
             location = safe_source_id(relative_to_hero.parts[0]) if len(relative_to_hero.parts) > 1 else "hero"
             source_id = f"hero_{location}_{safe_source_id(path.stem)}"
             related = related_coverage_sources(sources, location)
+            width, height = image_dimensions(path)
             sources.append(
                 SourceMedia(
                     source_id=source_id,
@@ -88,6 +99,8 @@ def discover_raw_media(input_dir: Path, destination_uri: str) -> List[SourceMedi
                     related_sources=related,
                     camera_group=f"hero_{location}",
                     colmap_policy="optional",
+                    width=width,
+                    height=height,
                 )
             )
 
@@ -116,10 +129,49 @@ def safe_source_id(value: str) -> str:
     return normalized or "source"
 
 
+def video_metadata(path: Path) -> tuple[Optional[int], Optional[int], Optional[float]]:
+    try:
+        import cv2  # type: ignore
+    except ImportError:
+        return (None, None, None)
+
+    capture = cv2.VideoCapture(str(path))
+    try:
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) or None
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        duration_seconds: Optional[float] = None
+        if fps > 0.0 and frame_count > 0:
+            duration_seconds = frame_count / fps
+        return (width, height, duration_seconds)
+    finally:
+        capture.release()
+
+
+def image_dimensions(path: Path) -> tuple[Optional[int], Optional[int]]:
+    try:
+        from PIL import Image
+    except ImportError:
+        try:
+            import cv2  # type: ignore
+        except ImportError:
+            return (None, None)
+        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        if image is None:
+            return (None, None)
+        height, width = image.shape[:2]
+        return (int(width), int(height))
+
+    with Image.open(path) as image:
+        width, height = image.size
+        return (int(width), int(height))
+
+
 def build_sources_manifest(project_id: str, input_dir: Path, destination_uri: str) -> Dict[str, Any]:
     sources = discover_raw_media(input_dir, destination_uri)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "project_id": project_id,
         "created_at": utc_now(),
         "input_dir": str(input_dir),

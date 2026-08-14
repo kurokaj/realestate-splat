@@ -233,6 +233,7 @@
             <thead>
               <tr>
                 <th>File</th>
+                <th>Resolution</th>
                 <th>Role</th>
                 <th>Group</th>
                 <th>COLMAP</th>
@@ -242,12 +243,13 @@
               {% for source in raw_source_summary.sources %}
                 <tr>
                   <td class="mono">{{ source.relative_path }}</td>
+                  <td>{{ source.resolution }}</td>
                   <td>{{ source.role }}</td>
                   <td>{{ source.camera_group or source.location or "" }}</td>
                   <td>{{ source.colmap_policy }}</td>
                 </tr>
               {% else %}
-                <tr><td colspan="4" class="empty">No manifest sources listed.</td></tr>
+                <tr><td colspan="5" class="empty">No manifest sources listed.</td></tr>
               {% endfor %}
             </tbody>
           </table>

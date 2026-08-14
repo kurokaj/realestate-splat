@@ -819,6 +819,9 @@ def compact_raw_sources(sources: list[Any]) -> list[dict[str, Any]]:
     for source in sources:
         if not isinstance(source, dict):
             continue
+        width = source.get("width")
+        height = source.get("height")
+        resolution = f"{width}x{height}" if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0 else ""
         rows.append(
             {
                 "relative_path": source.get("relative_path"),
@@ -826,6 +829,8 @@ def compact_raw_sources(sources: list[Any]) -> list[dict[str, Any]]:
                 "camera_group": source.get("camera_group"),
                 "location": source.get("location"),
                 "colmap_policy": source.get("colmap_policy"),
+                "resolution": resolution,
+                "duration_seconds": source.get("duration_seconds"),
             }
         )
     return rows
