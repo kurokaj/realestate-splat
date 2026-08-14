@@ -511,11 +511,11 @@
             </span>
           </label>
           <label data-colmap-vocab-tree-row>
-            <span class="label-title">Vocabulary tree path <span class="info-dot" tabindex="0" data-tip="Required when matching style is vocab_tree. Point this at a COLMAP vocabulary tree file inside the pod, for example one downloaded and cached in the runtime image or mounted at startup.">i</span></span>
+            <span class="label-title">Vocabulary tree path <span class="info-dot" tabindex="0" data-tip="Optional override for COLMAP's pretrained vocabulary tree. Leave empty to use COLMAP's default auto-downloaded tree.">i</span></span>
             <input
               name="vocab_tree"
               value="{{ colmap_form_values.vocab_tree or '' }}"
-              placeholder="Required when matching style is vocab_tree"
+              placeholder="Optional override; leave empty for COLMAP default"
               data-colmap-vocab-tree-input
             >
             <span class="muted" data-colmap-vocab-tree-note>Only applies when matching style is vocabulary tree.</span>

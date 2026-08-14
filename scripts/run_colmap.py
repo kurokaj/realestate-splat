@@ -471,8 +471,6 @@ def validate_settings(settings: Mapping[str, Any]) -> None:
         raise SystemExit("--max-image-size must be greater than zero.")
     if int(settings["sequential_overlap"]) <= 0:
         raise SystemExit("--sequential-overlap must be greater than zero.")
-    if settings["matcher"] == "vocab_tree" and not settings.get("vocab_tree"):
-        raise SystemExit("--vocab-tree is required when --matcher vocab_tree is used.")
 
 
 def should_run_view_graph_calibrator(settings: Mapping[str, Any]) -> bool:
@@ -992,7 +990,7 @@ def build_matcher_command(
     if matcher == "sequential":
         command.extend(["--SequentialMatching.overlap", str(int(settings["sequential_overlap"]))])
         command.extend(["--SequentialMatching.loop_detection", bool_as_colmap(settings["sequential_loop_detection"])])
-    if matcher == "vocab_tree":
+    if matcher == "vocab_tree" and settings.get("vocab_tree"):
         command.extend(["--VocabTreeMatching.vocab_tree_path", str(settings["vocab_tree"])])
     append_options(command, settings.get("matcher_options", {}))
     return command

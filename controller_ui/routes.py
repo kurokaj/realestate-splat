@@ -304,8 +304,6 @@ def ui_queue_colmap(
         validate_colmap_feature_matcher(feature_extractor, matching_type)
         resolved_max_image_size = max_image_size if max_image_size > 0 else default_colmap_max_image_size(feature_extractor)
         resolved_vocab_tree = empty_to_none(vocab_tree) or default_colmap_vocab_tree()
-        if matcher == "vocab_tree" and not resolved_vocab_tree:
-            raise HTTPException(status_code=400, detail="Vocabulary tree path is required when matching style is vocab_tree")
         input_uri_json = {
             "preprocess_uri": resolved_preprocess_uri,
             "output_uri": resolved_output_uri,
