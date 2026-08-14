@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 
 from controller_common.config import (
     default_colmap_provider,
+    default_colmap_vocab_tree,
     default_r2_bucket,
     default_training_provider,
     runpod_colmap_container_disk_gb,
@@ -274,6 +275,7 @@ def ui_queue_colmap(
     camera_model: str = Form(default="SIMPLE_RADIAL"),
     max_image_size: int = Form(default=0),
     sequential_loop_detection: Optional[str] = Form(default="true"),
+    vocab_tree: Optional[str] = Form(default=None),
     provider: str = Form(default=default_colmap_provider()),
     image: Optional[str] = Form(default=None),
     repo_url: Optional[str] = Form(default=None),
@@ -301,6 +303,9 @@ def ui_queue_colmap(
         validate_choice(camera_model, {option["value"] for option in COLMAP_CAMERA_MODEL_OPTIONS}, "camera_model")
         validate_colmap_feature_matcher(feature_extractor, matching_type)
         resolved_max_image_size = max_image_size if max_image_size > 0 else default_colmap_max_image_size(feature_extractor)
+        resolved_vocab_tree = empty_to_none(vocab_tree) or default_colmap_vocab_tree()
+        if matcher == "vocab_tree" and not resolved_vocab_tree:
+            raise HTTPException(status_code=400, detail="Vocabulary tree path is required when matching style is vocab_tree")
         input_uri_json = {
             "preprocess_uri": resolved_preprocess_uri,
             "output_uri": resolved_output_uri,
@@ -312,6 +317,7 @@ def ui_queue_colmap(
             "camera_model": camera_model,
             "max_image_size": resolved_max_image_size,
             "sequential_loop_detection": str(sequential_loop_detection).lower() == "true",
+            "vocab_tree": resolved_vocab_tree,
             "repo_url": empty_to_none(repo_url),
             "git_ref": empty_to_none(git_ref),
             "gpu_type_ids": [normalize_gpu_name(gpu_type_id)],
@@ -707,6 +713,7 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
             "camera_model": input_json.get("camera_model") or "SIMPLE_RADIAL",
             "max_image_size": input_json.get("max_image_size") or default_colmap_max_image_size(feature_extractor),
             "sequential_loop_detection": input_json.get("sequential_loop_detection", True),
+            "vocab_tree": input_json.get("vocab_tree") or default_colmap_vocab_tree() or "",
             "provider": latest_run.get("provider") if latest_run else default_colmap_provider(),
             "image": latest_run.get("image") if latest_run else "",
             "repo_url": input_json.get("repo_url") or "",
@@ -719,7 +726,7 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
         "colmap_feature_matcher_options": COLMAP_FEATURE_MATCHER_OPTIONS,
         "colmap_camera_model_options": COLMAP_CAMERA_MODEL_OPTIONS,
         "colmap_gpu_options": COLMAP_GPU_OPTIONS,
-        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "point_count", "feature_extractor", "matching_type", "matcher", "sequential_loop_detection", "camera_model", "max_image_size", "mode", "container_disk_gb"]),
+        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "point_count", "feature_extractor", "matching_type", "matcher", "sequential_loop_detection", "vocab_tree", "camera_model", "max_image_size", "mode", "container_disk_gb"]),
     }
 
 

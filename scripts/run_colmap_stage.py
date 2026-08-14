@@ -73,6 +73,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=True,
         help="SequentialMatching.loop_detection when --matcher sequential is used.",
     )
+    parser.add_argument("--vocab-tree", type=Path, help="Vocabulary tree path when --matcher vocab_tree is used.")
     parser.add_argument("--option-namespace", choices=["auto", "feature", "sift"], default="auto")
     parser.add_argument("--view-graph-calibrator", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--manifest-camera-groups", action=argparse.BooleanOptionalAction, default=True)
@@ -253,6 +254,7 @@ def build_colmap_command(args: argparse.Namespace, local_run_dir: Path) -> List[
         "--max-image-size",
         str(args.max_image_size),
         "--sequential-loop-detection" if args.sequential_loop_detection else "--no-sequential-loop-detection",
+        *([] if args.vocab_tree is None else ["--vocab-tree", str(args.vocab_tree)]),
         "--option-namespace",
         args.option_namespace,
         "--view-graph-calibrator" if args.view_graph_calibrator else "--no-view-graph-calibrator",

@@ -299,6 +299,7 @@ def run_runpod_colmap(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]:
                 "matching_type": inputs.get("matching_type", "SIFT_BRUTEFORCE"),
                 "camera_model": inputs.get("camera_model", "SIMPLE_RADIAL"),
                 "sequential_loop_detection": inputs.get("sequential_loop_detection", True),
+                "vocab_tree": inputs.get("vocab_tree"),
                 "stage_result_uri": f"{current_uri}/stage_result.json",
                 "reconstruction_report_uri": f"{current_uri}/reconstruction_report.json",
             },
@@ -477,6 +478,8 @@ def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str
         "--colmap-bin",
         inputs.get("colmap_bin", "/opt/colmap-cuda/bin/colmap"),
     ]
+    if inputs.get("vocab_tree"):
+        command.extend(["--vocab-tree", inputs["vocab_tree"]])
     for colmap_arg in inputs.get("colmap_args", []):
         append_argparse_value(command, "--colmap-arg", colmap_arg)
 
@@ -961,6 +964,7 @@ def compact_colmap_summary(
         "mode": wrapper_summary.get("mode") or settings.get("mode"),
         "matcher": wrapper_summary.get("matcher") or settings.get("matcher"),
         "sequential_loop_detection": wrapper_summary.get("sequential_loop_detection") if wrapper_summary.get("sequential_loop_detection") is not None else settings.get("sequential_loop_detection"),
+        "vocab_tree": wrapper_summary.get("vocab_tree") or settings.get("vocab_tree"),
         "image_count": wrapper_summary.get("image_count") or ((reconstruction_report.get("input") or {}).get("image_count") if isinstance(reconstruction_report.get("input"), dict) else None),
         "selected_sparse_model": wrapper_summary.get("selected_sparse_model") or reconstruction_report.get("selected_sparse_model"),
         "registered_images": metrics.get("registered_images"),

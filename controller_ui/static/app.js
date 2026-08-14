@@ -93,17 +93,28 @@ function setupColmapFormBehavior(form) {
   const loopDetectionInput = form.querySelector("[data-colmap-loop-detection-input]");
   const loopDetectionRow = form.querySelector("[data-colmap-loop-detection-row]");
   const loopDetectionNote = form.querySelector("[data-colmap-loop-detection-note]");
-  if (!matcherSelect || !loopDetectionInput || !loopDetectionRow) return;
+  const vocabTreeInput = form.querySelector("[data-colmap-vocab-tree-input]");
+  const vocabTreeRow = form.querySelector("[data-colmap-vocab-tree-row]");
+  const vocabTreeNote = form.querySelector("[data-colmap-vocab-tree-note]");
+  if (!matcherSelect || !loopDetectionInput || !loopDetectionRow || !vocabTreeInput || !vocabTreeRow) return;
 
   function syncLoopDetectionState() {
-    const enabled = matcherSelect.value === "sequential";
-    loopDetectionInput.disabled = !enabled;
-    loopDetectionRow.classList.toggle("is-disabled", !enabled);
-    loopDetectionInput.closest(".checkbox-row")?.classList.toggle("is-disabled", !enabled);
+    const sequentialEnabled = matcherSelect.value === "sequential";
+    const vocabTreeEnabled = matcherSelect.value === "vocab_tree";
+    loopDetectionInput.disabled = !sequentialEnabled;
+    loopDetectionRow.classList.toggle("is-disabled", !sequentialEnabled);
+    loopDetectionInput.closest(".checkbox-row")?.classList.toggle("is-disabled", !sequentialEnabled);
+    vocabTreeInput.disabled = !vocabTreeEnabled;
+    vocabTreeRow.classList.toggle("is-disabled", !vocabTreeEnabled);
     if (loopDetectionNote) {
-      loopDetectionNote.textContent = enabled
+      loopDetectionNote.textContent = sequentialEnabled
         ? "Recommended for sequential video-like runs."
         : "Locked because this only applies to sequential matching.";
+    }
+    if (vocabTreeNote) {
+      vocabTreeNote.textContent = vocabTreeEnabled
+        ? "Required for vocabulary tree matching."
+        : "Locked because this only applies to vocabulary tree matching.";
     }
   }
 

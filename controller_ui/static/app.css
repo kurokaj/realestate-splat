@@ -294,6 +294,10 @@ button.danger {
   cursor: not-allowed;
 }
 
+label.is-disabled {
+  opacity: 0.6;
+}
+
 .split-inputs {
   display: grid;
   gap: 6px;

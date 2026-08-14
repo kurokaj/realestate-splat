@@ -51,6 +51,10 @@ def default_colmap_provider() -> str:
     return os.environ.get("CONTROLLER_DEFAULT_COLMAP_PROVIDER", "local_fake")
 
 
+def default_colmap_vocab_tree() -> Optional[str]:
+    return os.environ.get("COLMAP_VOCAB_TREE_PATH") or os.environ.get("RUNPOD_COLMAP_VOCAB_TREE")
+
+
 def default_training_provider() -> str:
     return os.environ.get("CONTROLLER_DEFAULT_TRAINING_PROVIDER", "runpod_training")
 

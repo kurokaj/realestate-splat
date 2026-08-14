@@ -510,6 +510,16 @@
               <span class="muted" data-colmap-loop-detection-note>Only applies when matching style is sequential.</span>
             </span>
           </label>
+          <label data-colmap-vocab-tree-row>
+            <span class="label-title">Vocabulary tree path <span class="info-dot" tabindex="0" data-tip="Required when matching style is vocab_tree. Point this at a COLMAP vocabulary tree file inside the pod, for example one downloaded and cached in the runtime image or mounted at startup.">i</span></span>
+            <input
+              name="vocab_tree"
+              value="{{ colmap_form_values.vocab_tree or '' }}"
+              placeholder="Required when matching style is vocab_tree"
+              data-colmap-vocab-tree-input
+            >
+            <span class="muted" data-colmap-vocab-tree-note>Only applies when matching style is vocabulary tree.</span>
+          </label>
           <label>
             <span class="label-title">GPU <span class="info-dot" tabindex="0" data-tip="Only sub-$1.50/hour GPUs that match the current COLMAP image architecture shortlist are shown here.">i</span></span>
             <select name="gpu_type_id">

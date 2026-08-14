@@ -164,6 +164,7 @@ class VideoInfo:
 class VideoSource:
     source_id: str
     path: Path
+    sort_index: int
 
 
 @dataclass
@@ -395,7 +396,10 @@ def discover_video_sources(args: argparse.Namespace) -> List[VideoSource]:
         for path in args.input_dir.iterdir()
         if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES
     )
-    sources = [VideoSource(source_id=sanitize_source_id(path.stem), path=path) for path in video_paths]
+    sources = [
+        VideoSource(source_id=sanitize_source_id(path.stem), path=path, sort_index=index)
+        for index, path in enumerate(video_paths, start=1)
+    ]
     seen: Dict[str, Path] = {}
     for source in sources:
         previous_path = seen.get(source.source_id)
@@ -862,8 +866,10 @@ def finalize_selection(
     return selected_final
 
 
-def assign_output_paths(selected_final: Sequence[FrameRecord], source_id: Optional[str] = None) -> None:
-    prefix = f"{source_id}_" if source_id else ""
+def assign_output_paths(selected_final: Sequence[FrameRecord], source: Optional[VideoSource] = None) -> None:
+    prefix = ""
+    if source is not None:
+        prefix = f"seq_{source.sort_index:03d}_{source.source_id}_"
     for sequence, record in enumerate(selected_final, start=1):
         record.output_file = f"frames_selected/{prefix}frame_{sequence:06d}.jpg"
 
@@ -2087,7 +2093,7 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
 
   <h2>Summary</h2>
   <table>{summary_rows}</table>
-  <p class="note">Selected frames from all videos are written to <code>frames_selected/</code> with source-prefixed filenames.</p>
+  <p class="note">Selected frames from all videos are written to <code>frames_selected/</code> with deterministic sequence-first filenames so sequential matching sees a stable lexicographic order.</p>
 
   <h2>Videos</h2>
   <table>
@@ -2166,7 +2172,7 @@ def process_video_source(
         record.source_id = source.source_id
         record.source_video = str(source.path)
     selected_final = finalize_selection(records, selected_initial, settings)
-    assign_output_paths(selected_final, source.source_id)
+    assign_output_paths(selected_final, source)
     saved_count = save_selected_frames(source.path, selected_final, out_dir, settings)
     warnings = warning_flags(records, selected_final, settings)
     return VideoRunResult(
