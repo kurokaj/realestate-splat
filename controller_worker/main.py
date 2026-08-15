@@ -181,14 +181,20 @@ def run_local_preprocess(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str
         bufsize=1,
     )
     output_line_count = 0
+    output_tail: list[str] = []
     assert process.stdout is not None
     for line in process.stdout:
         clean_line = line.rstrip()
         if clean_line:
             output_line_count += 1
+            output_tail.append(clean_line)
+            if len(output_tail) > 40:
+                output_tail.pop(0)
     return_code = process.wait()
     if return_code != 0:
-        raise RuntimeError(f"Local preprocess failed with exit code {return_code}")
+        tail = "\n".join(output_tail)
+        detail = f"\nLast preprocess output:\n{tail}" if tail else ""
+        raise RuntimeError(f"Local preprocess failed with exit code {return_code}.{detail}")
 
     record_progress(stage_run_id, 90, "Local preprocess command finished", kind="local_preprocess_progress")
     current_uri = f"{output_base_uri.rstrip('/')}/current"

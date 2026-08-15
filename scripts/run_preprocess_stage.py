@@ -81,6 +81,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raw_dir.mkdir(parents=True, exist_ok=True)
         logs_dir.mkdir(parents=True, exist_ok=True)
         sync_directory(args.raw_uri, raw_dir, endpoint_url=args.endpoint_url)
+        enforce_manifest_sources(raw_dir)
 
         preprocess_result = run_preprocess(args, raw_dir, local_run_dir, logs_dir)
         prepare_upload_payloads(
@@ -249,6 +250,40 @@ def copy_tree(source: Path, destination: Path) -> None:
     if not source.exists():
         return
     shutil.copytree(source, destination, dirs_exist_ok=True)
+
+
+def enforce_manifest_sources(raw_dir: Path) -> None:
+    """Make the raw manifest authoritative over objects found in the prefix.
+
+    The raw prefix can contain objects removed from the manifest. They must not
+    leak into preprocessing simply because the storage sync still sees them.
+    """
+    manifest_path = raw_dir / "sources_manifest.json"
+    if not manifest_path.exists():
+        raise RuntimeError(f"Raw sources manifest is missing: {manifest_path}")
+    manifest = read_json(manifest_path)
+    sources = manifest.get("sources") if isinstance(manifest, dict) else None
+    if not isinstance(sources, list):
+        raise RuntimeError("Raw sources manifest must contain a sources list.")
+
+    allowed = {"sources_manifest.json"}
+    for source in sources:
+        if not isinstance(source, dict) or not source.get("relative_path"):
+            raise RuntimeError("Raw sources manifest contains an invalid source entry.")
+        relative_path = Path(str(source["relative_path"]))
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise RuntimeError(f"Raw sources manifest contains an unsafe relative path: {relative_path}")
+        allowed.add(relative_path.as_posix())
+
+    for path in sorted(raw_dir.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        relative_path = path.relative_to(raw_dir).as_posix()
+        if path.is_file() and relative_path not in allowed:
+            path.unlink()
+        elif path.is_dir():
+            try:
+                path.rmdir()
+            except OSError:
+                pass
 
 
 def preprocess_summary(local_run_dir: Path) -> Dict[str, Any]:
