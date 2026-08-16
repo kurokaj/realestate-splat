@@ -25,6 +25,7 @@ import argparse
 import datetime as dt
 import html
 import json
+import os
 import platform
 import re
 import shlex
@@ -43,6 +44,7 @@ DEFAULT_VERDA_COLMAP = Path("/workspace/opt/colmap-install/bin/colmap")
 REPORT_NAME = "reconstruction_report.json"
 REPORT_HTML_NAME = "reconstruction_report.html"
 IMAGE_MANIFEST_NAME = "image_manifest.json"
+DEFAULT_SEQUENTIAL_LOOP_BLAS_THREADS = "4"
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "binary": str(DEFAULT_VERDA_COLMAP),
@@ -996,7 +998,13 @@ def build_matcher_command(
     return command
 
 
-def run_command(name: str, command: Sequence[str], logs_dir: Path) -> CommandResult:
+def run_command(
+    name: str,
+    command: Sequence[str],
+    logs_dir: Path,
+    *,
+    env: Optional[Mapping[str, str]] = None,
+) -> CommandResult:
     log_path = logs_dir / f"{name}.log"
     started_at = utc_now()
     start_time = time.monotonic()
@@ -1012,6 +1020,7 @@ def run_command(name: str, command: Sequence[str], logs_dir: Path) -> CommandRes
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=dict(env) if env is not None else None,
         )
         assert process.stdout is not None
         for line in process.stdout:
@@ -1033,6 +1042,37 @@ def run_command(name: str, command: Sequence[str], logs_dir: Path) -> CommandRes
     if returncode != 0:
         raise RuntimeError(f"COLMAP command failed ({name}) with exit code {returncode}. See {log_path}")
     return result
+
+
+def colmap_process_env(thread_count: str) -> Dict[str, str]:
+    """Limit BLAS/FAISS threads for a COLMAP command that needs it."""
+    environment = os.environ.copy()
+    for variable in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "BLIS_NUM_THREADS",
+        "GOTO_NUM_THREADS",
+        "FAISS_NUM_THREADS",
+    ):
+        environment[variable] = thread_count
+    return environment
+
+
+def command_environment(name: str, settings: Mapping[str, Any]) -> Optional[Dict[str, str]]:
+    """Apply resource limits only to the COLMAP command that needs them."""
+    if name != "sequential_matcher":
+        return None
+    if str(settings.get("matcher")) != "sequential":
+        return None
+    if not bool(settings.get("sequential_loop_detection")):
+        return None
+
+    thread_count = os.environ.get(
+        "COLMAP_SEQUENTIAL_BLAS_THREADS",
+        DEFAULT_SEQUENTIAL_LOOP_BLAS_THREADS,
+    )
+    return colmap_process_env(thread_count)
 
 
 def find_sparse_model(sparse_dir: Path) -> Optional[Path]:
@@ -1586,7 +1626,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         for name, command in core_commands:
-            command_results.append(run_command(name, command, paths["logs_dir"]))
+            command_results.append(
+                run_command(
+                    name,
+                    command,
+                    paths["logs_dir"],
+                    env=command_environment(name, settings),
+                )
+            )
             if (
                 name == "feature_extractor"
                 and should_use_manifest_camera_groups(image_manifest)
