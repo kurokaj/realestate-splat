@@ -374,6 +374,8 @@ def prepare_failed_payloads(
     copy_tree(logs_dir, current_dir / "logs")
     copy_tree(local_run_dir / "colmap" / "logs", current_dir / "logs" / "colmap")
     copy_if_exists(local_run_dir / "reports" / "reconstruction_report.json", current_dir / "reconstruction_report.json")
+    copy_if_exists(local_run_dir / "reports" / "matching_plan.json", current_dir / "matching_plan.json")
+    copy_if_exists(local_run_dir / "reports" / "matching_plan.json", history_dir / "matching_plan.json")
 
     finished_at = utc_now()
     result = StageResult(
@@ -453,6 +455,7 @@ def required_upload_objects(current_dir: Path) -> list[str]:
     required = [
         "stage_result.json",
         "reconstruction_report.json",
+        "matching_plan.json",
         "viewer/sparse_scene.json",
         "sparse_txt/cameras.txt",
         "sparse_txt/images.txt",

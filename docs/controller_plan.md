@@ -20,6 +20,13 @@ running the owner's own projects, not a customer-facing SaaS backend.
 
 ## Current Building Blocks
 
+Processing strategy planning is documented separately and should remain aligned
+with this controller plan:
+
+```text
+docs/processing_strategy_plan.md
+```
+
 Object storage:
 
 ```text

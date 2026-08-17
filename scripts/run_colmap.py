@@ -38,18 +38,26 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from controller_common.matching_plan import (
+    build_single_matching_plan,
+    matching_plan_summary,
+    validate_matching_plan,
+)
+
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 DEFAULT_VERDA_COLMAP = Path("/workspace/opt/colmap-install/bin/colmap")
 REPORT_NAME = "reconstruction_report.json"
 REPORT_HTML_NAME = "reconstruction_report.html"
 IMAGE_MANIFEST_NAME = "image_manifest.json"
+MATCHING_PLAN_NAME = "matching_plan.json"
 DEFAULT_SEQUENTIAL_LOOP_BLAS_THREADS = "4"
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "binary": str(DEFAULT_VERDA_COLMAP),
     "mode": "incremental",
     "feature_extractor": "SIFT",
+    "processing_strategy": "single",
     "matcher": "exhaustive",
     "matching_type": "SIFT_BRUTEFORCE",
     "image_dir": "frames_selected",
@@ -115,6 +123,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--matcher",
         choices=["exhaustive", "sequential", "vocab_tree"],
         help="COLMAP matching style / pair generator to run before mapping.",
+    )
+    parser.add_argument(
+        "--processing-strategy",
+        choices=["single"],
+        help="High-level matching strategy. Hybrid strategies will use the same plan model in a later phase.",
     )
     parser.add_argument(
         "--feature-extractor",
@@ -382,6 +395,7 @@ def build_settings(args: argparse.Namespace) -> Dict[str, Any]:
         "binary": str(args.colmap_bin) if args.colmap_bin is not None else None,
         "mode": args.mode,
         "feature_extractor": args.feature_extractor,
+        "processing_strategy": args.processing_strategy,
         "matcher": args.matcher,
         "matching_type": args.matching_type,
         "image_dir": str(args.image_dir) if args.image_dir is not None else None,
@@ -455,6 +469,8 @@ def validate_settings(settings: Mapping[str, Any]) -> None:
         raise SystemExit("colmap.binary / --colmap-bin must be an absolute path; do not rely on PATH.")
     if settings.get("use_nerfstudio_colmap"):
         raise SystemExit("colmap.use_nerfstudio_colmap must be false; run_colmap.py owns reconstruction.")
+    if settings.get("processing_strategy", "single") != "single":
+        raise SystemExit("Only the single processing strategy is available in this phase.")
     if settings["mode"] not in {"incremental", "global"}:
         raise SystemExit("--mode must be incremental or global.")
     if settings["feature_extractor"] not in {"SIFT", "ALIKED_N16ROT", "ALIKED_N32"}:
@@ -1272,6 +1288,7 @@ def build_report(
     paths: Mapping[str, Path],
     image_count: int,
     image_manifest: Mapping[str, Any],
+    matching_plan: Mapping[str, Any],
     colmap_bin: str,
     option_names: Optional[ColmapOptionNames],
     commands: Sequence[CommandResult],
@@ -1308,6 +1325,7 @@ def build_report(
             "image_count": image_count,
         },
         "settings": {key: value for key, value in settings.items() if not str(key).startswith("_")},
+        "matching_plan": matching_plan_summary(matching_plan),
         "environment": {
             "python": sys.version.split()[0],
             "platform": platform.platform(),
@@ -1605,7 +1623,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     run_dir = args.run.expanduser()
     image_manifest = load_image_manifest(run_dir)
     apply_manifest_camera_policy(settings, image_manifest)
+    matching_plan = build_single_matching_plan(image_manifest, settings)
+    validate_matching_plan(matching_plan)
     paths = prepare_output_paths(run_dir, settings, args.overwrite, args.dry_run)
+    if not args.dry_run:
+        matching_plan_path = paths["reports_dir"] / MATCHING_PLAN_NAME
+        matching_plan_path.write_text(json.dumps(matching_plan, indent=2) + "\n", encoding="utf-8")
     image_count = count_images(paths["image_dir"])
     if image_count == 0:
         raise SystemExit(f"No supported images found in {paths['image_dir']}")
@@ -1667,6 +1690,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             paths=paths,
             image_count=image_count,
             image_manifest=image_manifest,
+            matching_plan=matching_plan,
             colmap_bin=colmap_bin,
             option_names=option_names,
             commands=command_results,
@@ -1688,6 +1712,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         paths=paths,
         image_count=image_count,
         image_manifest=image_manifest,
+        matching_plan=matching_plan,
         colmap_bin=colmap_bin,
         option_names=option_names,
         commands=command_results,
