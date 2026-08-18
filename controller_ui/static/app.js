@@ -304,6 +304,7 @@ async function setupColmapViewer(root) {
     }
     const scene = await response.json();
     const viewer = renderSparseViewer(canvas, scene);
+    renderViewerLegend(root.querySelector("[data-viewer-legend]"), scene.camera_group_colors || {});
     modeButtons.forEach((button) => {
       button.addEventListener("click", () => {
         viewer.setMode(button.dataset.viewerMode || "orbit");
@@ -317,6 +318,22 @@ async function setupColmapViewer(root) {
   } catch (error) {
     status.textContent = `Viewer load failed: ${error}`;
   }
+}
+
+function renderViewerLegend(legend, colors) {
+  if (!legend) return;
+  legend.replaceChildren();
+  Object.entries(colors).forEach(([group, color]) => {
+    const item = document.createElement("span");
+    item.className = "viewer-legend-item";
+    const swatch = document.createElement("span");
+    swatch.className = "viewer-legend-swatch";
+    swatch.style.backgroundColor = `rgb(${(color.fill || color.stroke || [180, 190, 200]).join(", ")})`;
+    const label = document.createElement("span");
+    label.textContent = group;
+    item.append(swatch, label);
+    legend.append(item);
+  });
 }
 
 function renderSparseViewer(canvas, scene) {
@@ -481,14 +498,8 @@ function renderSparseViewer(canvas, scene) {
         camera.position[2] + forward[2] * radius * 0.08,
       ]);
       if (!tip) continue;
-      const isHero = camera.role === "hero";
-      const isCoverage = camera.role === "coverage" || !camera.role || camera.role === "unknown";
-      const stroke = isHero
-        ? [90, 214, 130]
-        : (isCoverage ? [255, 204, 96] : (camera.stroke_color || [255, 204, 96]));
-      const fill = isHero
-        ? [128, 234, 160]
-        : (isCoverage ? [255, 221, 133] : (camera.fill_color || stroke));
+      const stroke = camera.stroke_color || [163, 178, 194];
+      const fill = camera.fill_color || stroke;
       ctx.strokeStyle = `rgba(${stroke[0]}, ${stroke[1]}, ${stroke[2]}, 0.95)`;
       ctx.lineWidth = 1.2 * dpr;
       ctx.beginPath();

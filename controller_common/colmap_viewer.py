@@ -29,6 +29,23 @@ ROLE_CAMERA_COLORS: dict[str, dict[str, list[int]]] = {
     },
 }
 
+GROUP_COLOR_PALETTES: dict[str, list[dict[str, list[int]]]] = {
+    "coverage": [
+        {"stroke": [255, 204, 96], "fill": [255, 221, 133]},
+        {"stroke": [92, 190, 255], "fill": [133, 211, 255]},
+        {"stroke": [255, 132, 102], "fill": [255, 167, 143]},
+        {"stroke": [181, 133, 255], "fill": [207, 174, 255]},
+        {"stroke": [80, 216, 171], "fill": [125, 235, 198]},
+        {"stroke": [255, 164, 72], "fill": [255, 192, 117]},
+    ],
+    "hero": [
+        {"stroke": [90, 214, 130], "fill": [128, 234, 160]},
+        {"stroke": [55, 181, 112], "fill": [104, 218, 151]},
+        {"stroke": [144, 232, 104], "fill": [180, 244, 145]},
+    ],
+    "unknown": [ROLE_CAMERA_COLORS["unknown"]],
+}
+
 
 def useful_lines(path: Path) -> Iterable[str]:
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -77,6 +94,7 @@ def build_sparse_viewer_payload(sparse_txt_dir: Path, *, max_points: int = 25000
         for point in sampled_points
     ]
     camera_rows = [camera_row(image, manifest_by_name.get(image.name)) for image in images]
+    camera_group_colors = assign_camera_group_colors(camera_rows)
     bounds = scene_bounds([point["position"] for point in converted_points], [camera["position"] for camera in camera_rows])
     return {
         "schema_version": 1,
@@ -86,6 +104,7 @@ def build_sparse_viewer_payload(sparse_txt_dir: Path, *, max_points: int = 25000
         "bounds": bounds,
         "points": converted_points,
         "cameras": camera_rows,
+        "camera_group_colors": camera_group_colors,
         "camera_models": [
             {"camera_id": camera.camera_id, "model": camera.model, "width": camera.width, "height": camera.height}
             for camera in cameras.values()
@@ -126,18 +145,61 @@ def camera_colors(role: str) -> dict[str, list[int]]:
     return ROLE_CAMERA_COLORS.get(role, ROLE_CAMERA_COLORS["unknown"])
 
 
+def viewer_group_key(manifest_entry: Mapping[str, Any] | None, role: str) -> str:
+    entry = manifest_entry or {}
+    group = str(entry.get("camera_group") or "").strip()
+    source_id = str(entry.get("source_id") or "").strip()
+    if role == "coverage":
+        if group in {"", "coverage"} and source_id and source_id != "coverage_images":
+            return f"coverage-{source_id}"
+        if group.startswith("coverage_"):
+            return group.replace("_", "-")
+    if role == "hero" and group in {"", "hero"}:
+        location = str(entry.get("location") or source_id).strip()
+        if location:
+            return f"hero-{location}".replace("_", "-")
+    if group:
+        return group.replace("_", "-")
+    return role
+
+
+def assign_camera_group_colors(camera_rows: list[dict[str, Any]]) -> dict[str, dict[str, list[int]]]:
+    grouped: dict[str, str] = {}
+    for row in camera_rows:
+        group = str(row.get("viewer_group") or "unknown")
+        grouped.setdefault(group, str(row.get("role") or "unknown"))
+
+    colors: dict[str, dict[str, list[int]]] = {}
+    role_indexes: dict[str, int] = {}
+    for group in sorted(grouped):
+        role = grouped[group] if grouped[group] in GROUP_COLOR_PALETTES else "unknown"
+        palette = GROUP_COLOR_PALETTES[role]
+        index = role_indexes.get(role, 0)
+        colors[group] = palette[index % len(palette)]
+        role_indexes[role] = index + 1
+
+    for row in camera_rows:
+        group = str(row.get("viewer_group") or "unknown")
+        color = colors[group]
+        row["stroke_color"] = color["stroke"]
+        row["fill_color"] = color["fill"]
+    return colors
+
+
 def camera_row(image: Any, manifest_entry: Mapping[str, Any] | None = None) -> dict[str, Any]:
     transform = colmap_pose_to_nerfstudio_transform(image)
     rotation = qvec_to_rotmat(image.qvec)
     forward_cv = [-rotation[2][0], -rotation[2][1], -rotation[2][2]]
     up_cv = [-rotation[1][0], -rotation[1][1], -rotation[1][2]]
     role = str((manifest_entry or {}).get("role") or "coverage")
+    group = viewer_group_key(manifest_entry, role)
     colors = camera_colors(role)
     return {
         "image_id": image.image_id,
         "name": image.name,
         "role": role,
         "camera_group": (manifest_entry or {}).get("camera_group"),
+        "viewer_group": group,
         "position": round_vector([transform[0][3], transform[1][3], transform[2][3]]),
         "forward": round_vector(convert_xyz_to_nerfstudio_axes(forward_cv)),
         "up": round_vector(convert_xyz_to_nerfstudio_axes(up_cv)),
