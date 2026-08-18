@@ -78,8 +78,9 @@ RUN git clone --branch "${COLMAP_REF}" https://github.com/colmap/colmap.git \
 # the builder only; it is not required by the runtime image. Install it in a
 # standard executable directory because the isolated pip build invokes ruff
 # directly from generate_stubs.sh.
-RUN python3 -m pip install --no-cache-dir --prefix=/usr/local ruff==0.6.9 \
-    && command -v ruff
+RUN python3 -m pip install --no-cache-dir ruff==0.6.9 \
+    && test -x /usr/local/bin/ruff \
+    && /usr/local/bin/ruff --version
 
 RUN cd /opt/src/colmap \
     && test -f pyproject.toml \
