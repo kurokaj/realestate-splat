@@ -74,10 +74,10 @@ RUN git clone --branch "${COLMAP_REF}" https://github.com/colmap/colmap.git \
     && ninja -j"${BUILD_JOBS}" \
     && ninja install \
     && cd /opt/src/colmap \
-    && test -f python/pyproject.toml \
+    && test -f pyproject.toml \
     && mkdir -p /opt/pycolmap \
-    && CMAKE_ARGS="-Dcolmap_DIR=/opt/colmap-cuda/lib/cmake/colmap -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}" \
-      python3 -m pip install --no-cache-dir --target /opt/pycolmap ./python \
+    && CMAKE_ARGS="-Dcolmap_DIR=/opt/colmap-cuda/share/colmap/cmake -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}" \
+      python3 -m pip install --no-cache-dir --target /opt/pycolmap . \
     && cd /opt/src \
     && rm -rf colmap
 
@@ -111,7 +111,7 @@ COPY --from=builder /opt/pycolmap /opt/pycolmap
 
 ENV PATH=/opt/colmap-cuda/bin:${PATH}
 ENV LD_LIBRARY_PATH=/opt/ceres-cuda/lib:/opt/colmap-cuda/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
-ENV PYTHONPATH=/opt/pycolmap:${PYTHONPATH}
+ENV PYTHONPATH=/opt/pycolmap
 
 RUN set -eux; \
     ldconfig; \
