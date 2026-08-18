@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import sys
 import json
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ DEFAULT_EXCLUDES = [
     ".gitkeep",
     "__pycache__/*",
     "*.pyc",
+    "sources_manifest.json",
 ]
 
 
@@ -46,8 +48,8 @@ class CoverageSourceConflictError(ValueError):
         )
 
 
-def safe_relative_upload_path(filename: str) -> Path:
-    cleaned = filename.replace("\\", "/").lstrip("/")
+def safe_relative_upload_path(filename: str | Path) -> Path:
+    cleaned = str(filename).replace("\\", "/").lstrip("/")
     parts = []
     for part in Path(cleaned).parts:
         if part in {"", ".", ".."}:
@@ -58,7 +60,7 @@ def safe_relative_upload_path(filename: str) -> Path:
     return Path(*parts)
 
 
-def write_upload_file(root: Path, filename: str, stream: BinaryIO) -> Path:
+def write_upload_file(root: Path, filename: str | Path, stream: BinaryIO) -> Path:
     relative_path = safe_relative_upload_path(filename)
     destination = root / relative_path
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -67,7 +69,7 @@ def write_upload_file(root: Path, filename: str, stream: BinaryIO) -> Path:
     return destination
 
 
-def grouped_upload_path(filename: str, metadata: Optional[dict[str, Any]] = None) -> Path:
+def grouped_upload_path(filename: str | Path, metadata: Optional[dict[str, Any]] = None) -> Path:
     original = safe_relative_upload_path(filename)
     metadata = metadata or {}
     role = str(metadata.get("role") or "").strip()
@@ -138,8 +140,6 @@ def upload_raw_directory(
         set(existing.get("preprocess_stale_groups") or [])
         | {source_group_key(source) for source in incoming_sources if isinstance(source, dict)}
     )
-    manifest_path = input_dir / "sources_manifest.json"
-    write_json(manifest_path, manifest)
     sync_directory(
         input_dir,
         destination_uri,
@@ -148,12 +148,15 @@ def upload_raw_directory(
         dry_run=dry_run,
         exclude=DEFAULT_EXCLUDES,
     )
-    copy_file(
-        manifest_path,
-        f"{destination_uri.rstrip('/')}/sources_manifest.json",
-        endpoint_url=endpoint_url,
-        dry_run=dry_run,
-    )
+    with tempfile.TemporaryDirectory(prefix="buildvision3d-raw-manifest-") as temp_dir:
+        manifest_path = Path(temp_dir) / "sources_manifest.json"
+        write_json(manifest_path, manifest)
+        copy_file(
+            manifest_path,
+            f"{destination_uri.rstrip('/')}/sources_manifest.json",
+            endpoint_url=endpoint_url,
+            dry_run=dry_run,
+        )
     return manifest
 
 
@@ -166,13 +169,19 @@ def load_manifest(destination_uri: str, endpoint_url: Optional[str]) -> dict[str
     with tempfile.NamedTemporaryFile("w+b", suffix=".json") as handle:
         try:
             copy_file(manifest_uri, handle.name, endpoint_url=endpoint_url)
-        except Exception:
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode == 1:
+                return {}
+            raise RuntimeError(f"Existing raw sources manifest could not be loaded: {manifest_uri}") from exc
+        except FileNotFoundError:
             return {}
+        except Exception as exc:
+            raise RuntimeError(f"Existing raw sources manifest could not be loaded: {manifest_uri}") from exc
         handle.seek(0)
         try:
             payload = json.loads(handle.read().decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return {}
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Existing raw sources manifest is not valid JSON: {manifest_uri}") from exc
     return payload if isinstance(payload, dict) else {}
 
 
