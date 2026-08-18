@@ -72,8 +72,14 @@ RUN git clone --branch "${COLMAP_REF}" https://github.com/colmap/colmap.git \
       -DBLA_VENDOR=OpenBLAS \
       -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
     && ninja -j"${BUILD_JOBS}" \
-    && ninja install \
-    && cd /opt/src/colmap \
+    && ninja install
+
+# COLMAP's PyCOLMAP build generates type stubs with ruff. Keep this tool in
+# the builder only; it is not required by the runtime image.
+RUN python3 -m pip install --no-cache-dir --prefix=/opt/pybuild ruff==0.6.9
+ENV PATH=/opt/pybuild/bin:${PATH}
+
+RUN cd /opt/src/colmap \
     && test -f pyproject.toml \
     && mkdir -p /opt/pycolmap \
     && CMAKE_ARGS="-Dcolmap_DIR=/opt/colmap-cuda/share/colmap/cmake -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}" \
