@@ -75,9 +75,11 @@ RUN git clone --branch "${COLMAP_REF}" https://github.com/colmap/colmap.git \
     && ninja install
 
 # COLMAP's PyCOLMAP build generates type stubs with ruff. Keep this tool in
-# the builder only; it is not required by the runtime image.
-RUN python3 -m pip install --no-cache-dir --prefix=/opt/pybuild ruff==0.6.9
-ENV PATH=/opt/pybuild/bin:${PATH}
+# the builder only; it is not required by the runtime image. Install it in a
+# standard executable directory because the isolated pip build invokes ruff
+# directly from generate_stubs.sh.
+RUN python3 -m pip install --no-cache-dir --prefix=/usr/local ruff==0.6.9 \
+    && command -v ruff
 
 RUN cd /opt/src/colmap \
     && test -f pyproject.toml \
