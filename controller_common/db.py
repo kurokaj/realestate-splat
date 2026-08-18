@@ -197,10 +197,12 @@ def complete_stage_run(
     project_values: list[Any] = [final_status]
     active_field = ACTIVE_RUN_FIELD_BY_STAGE.get(stage)
     current_uri_field = CURRENT_URI_FIELD_BY_STAGE.get(stage)
+    input_json = stage_row.get("input_uri_json") if isinstance(stage_row.get("input_uri_json"), dict) else {}
+    is_partial_preprocess = stage == "preprocess" and input_json.get("preprocess_scope") == "group"
     if active_field:
         project_updates.append(f"{active_field} = %s")
         project_values.append(stage_run_id)
-    if current_uri_field and output_uri:
+    if current_uri_field and output_uri and not is_partial_preprocess:
         project_updates.append(f"{current_uri_field} = %s")
         project_values.append(output_uri)
     project_values.append(updated["project_id"])

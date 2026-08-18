@@ -39,22 +39,29 @@ def discover_raw_media(input_dir: Path, destination_uri: str) -> List[SourceMedi
     destination_base = destination_uri.rstrip("/")
     sources: List[SourceMedia] = []
 
-    for path in sorted(candidate for candidate in input_dir.iterdir() if candidate.is_file()):
+    for path in sorted(candidate for candidate in input_dir.rglob("*") if candidate.is_file()):
         if path.name in IGNORED_NAMES:
             continue
         suffix = path.suffix.lower()
         relative_path = path.relative_to(input_dir).as_posix()
+        parts = Path(relative_path).parts
+        grouped_role = None
+        grouped_location = None
+        if len(parts) >= 3 and parts[0] in {"coverage", "hero"}:
+            grouped_role = "hero_image" if parts[0] == "hero" else ("coverage_video" if suffix in VIDEO_SUFFIXES else "coverage_image")
+            grouped_location = safe_source_id(parts[1])
         if suffix in VIDEO_SUFFIXES:
             source_id = safe_source_id(path.stem)
             width, height, duration_seconds = video_metadata(path)
             sources.append(
                 SourceMedia(
                     source_id=source_id,
-                    role="coverage_video",
+                    role=grouped_role or "coverage_video",
                     relative_path=relative_path,
                     uri=f"{destination_base}/{relative_path}",
-                    location=source_id,
-                    camera_group=f"video_{source_id}",
+                    location=grouped_location or source_id,
+                    camera_group=(f"hero_{grouped_location}" if grouped_role == "hero_image" else f"video_{source_id}"),
+                    colmap_policy="optional" if grouped_role == "hero_image" else "include",
                     width=width,
                     height=height,
                     duration_seconds=duration_seconds,
@@ -62,43 +69,18 @@ def discover_raw_media(input_dir: Path, destination_uri: str) -> List[SourceMedi
             )
         elif suffix in IMAGE_SUFFIXES:
             source_id = safe_source_id(path.stem)
+            if grouped_role == "hero_image":
+                source_id = f"hero_{grouped_location}_{source_id}"
             width, height = image_dimensions(path)
             sources.append(
                 SourceMedia(
                     source_id=f"coverage_image_{source_id}",
-                    role="coverage_image",
+                    role=grouped_role or "coverage_image",
                     relative_path=relative_path,
                     uri=f"{destination_base}/{relative_path}",
-                    location=None,
-                    camera_group="coverage_images",
-                    width=width,
-                    height=height,
-                )
-            )
-
-    hero_dir = input_dir / "hero"
-    if hero_dir.exists():
-        if not hero_dir.is_dir():
-            raise NotADirectoryError(f"Hero path exists but is not a directory: {hero_dir}")
-        for path in sorted(candidate for candidate in hero_dir.rglob("*") if candidate.is_file()):
-            if path.name in IGNORED_NAMES or path.suffix.lower() not in IMAGE_SUFFIXES:
-                continue
-            relative_path = path.relative_to(input_dir).as_posix()
-            relative_to_hero = path.relative_to(hero_dir)
-            location = safe_source_id(relative_to_hero.parts[0]) if len(relative_to_hero.parts) > 1 else "hero"
-            source_id = f"hero_{location}_{safe_source_id(path.stem)}"
-            related = related_coverage_sources(sources, location)
-            width, height = image_dimensions(path)
-            sources.append(
-                SourceMedia(
-                    source_id=source_id,
-                    role="hero_image",
-                    relative_path=relative_path,
-                    uri=f"{destination_base}/{relative_path}",
-                    location=location,
-                    related_sources=related,
-                    camera_group=f"hero_{location}",
-                    colmap_policy="optional",
+                    location=grouped_location,
+                    camera_group=(f"hero_{grouped_location}" if grouped_role == "hero_image" else "coverage_images"),
+                    colmap_policy="optional" if grouped_role == "hero_image" else "include",
                     width=width,
                     height=height,
                 )

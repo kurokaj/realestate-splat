@@ -27,11 +27,14 @@ from controller_common.db import (
     stage_queued_status,
 )
 from controller_common.raw_upload import (
+    CoverageSourceConflictError,
+    DuplicateCoverageVideoError,
     manifest_summary,
     metadata_overrides_by_filename,
     remove_raw_source,
     upload_raw_directory,
     uploaded_file_names,
+    grouped_upload_path,
     write_upload_file,
 )
 from controller_ui.routes import router as ui_router
@@ -90,6 +93,7 @@ class PreprocessQueueRequest(BaseModel):
     profile: str = "indoor_room"
     python_bin: Optional[str] = None
     preprocess_args: list[str] = Field(default_factory=list)
+    group_configs: list[dict[str, Any]] = Field(default_factory=list)
     provider: str = "local_preprocess"
     dry_run: bool = False
 
@@ -224,6 +228,7 @@ def upload_project_raw(
     endpoint_url: Optional[str] = Form(default=None),
     metadata_json: Optional[str] = Form(default=None),
     delete: bool = Form(default=False),
+    override_video: bool = Form(default=False),
     dry_run: bool = Form(default=False),
 ) -> dict[str, Any]:
     if not files:
@@ -242,17 +247,44 @@ def upload_project_raw(
         upload_root.mkdir(parents=True, exist_ok=True)
         saved_paths = []
         try:
+            grouped_overrides = {
+                grouped_upload_path(filename, override).as_posix(): override
+                for filename, override in metadata_overrides.items()
+            }
             for upload in files:
-                saved_paths.append(write_upload_file(upload_root, upload.filename or "upload.bin", upload.file))
+                filename = upload.filename or "upload.bin"
+                override = metadata_overrides.get(filename) or metadata_overrides.get(Path(filename).name) or {}
+                saved_paths.append(write_upload_file(upload_root, grouped_upload_path(filename, override), upload.file))
             manifest = upload_raw_directory(
                 project_id=project_id,
                 input_dir=upload_root,
                 destination_uri=raw_uri,
                 endpoint_url=endpoint_url,
-                metadata_overrides=metadata_overrides,
+                metadata_overrides=grouped_overrides,
                 delete=delete,
+                override_video=override_video,
                 dry_run=dry_run,
             )
+        except DuplicateCoverageVideoError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "duplicate_coverage_video",
+                    "location": exc.location,
+                    "existing": exc.existing,
+                    "message": str(exc),
+                },
+            ) from exc
+        except CoverageSourceConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "coverage_source_conflict",
+                    "location": exc.location,
+                    "roles": exc.roles,
+                    "message": str(exc),
+                },
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -391,6 +423,9 @@ def queue_preprocess(project_id: str, payload: PreprocessQueueRequest) -> dict[s
         output_uri = payload.output_uri or f"r2://{default_r2_bucket()}/projects/{project_id}/preprocess"
         require_r2_uri(raw_uri, "raw_uri")
         require_r2_uri(output_uri, "output_uri")
+        preprocess_scope = "group" if len(payload.group_configs) == 1 else "project"
+        if preprocess_scope == "group":
+            output_uri = f"{output_uri.rstrip('/')}/groups/{api_slug(str(payload.group_configs[0].get('group_key')))}"
         input_uri_json = {
             "raw_uri": raw_uri,
             "output_uri": output_uri,
@@ -398,6 +433,8 @@ def queue_preprocess(project_id: str, payload: PreprocessQueueRequest) -> dict[s
             "profile": payload.profile,
             "python_bin": payload.python_bin,
             "preprocess_args": payload.preprocess_args,
+            "group_configs": payload.group_configs,
+            "preprocess_scope": preprocess_scope,
             "dry_run": payload.dry_run,
         }
         row = insert_stage_run(
@@ -409,6 +446,10 @@ def queue_preprocess(project_id: str, payload: PreprocessQueueRequest) -> dict[s
             output_uri=f"{output_uri.rstrip('/')}/current",
         )
     return row_to_json(row)
+
+
+def api_slug(value: str) -> str:
+    return "".join(char if char.isalnum() else "_" for char in value.lower()).strip("_") or "group"
 
 
 @app.post("/projects/{project_id}/colmap", status_code=201)

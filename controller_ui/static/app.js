@@ -68,6 +68,26 @@ function setupRawUploadForm(form) {
         body: payload,
       });
       const body = await response.json();
+      if (response.status === 409 && body.detail?.code === "duplicate_coverage_video") {
+        const location = body.detail.location || "this location";
+        if (window.confirm(`A coverage video already exists for ${location}. Replace it?`)) {
+          form.querySelector('input[name="override_video"]').value = "true";
+          form.requestSubmit();
+        } else {
+          result.textContent = body.detail.message || "Upload cancelled.";
+        }
+        return;
+      }
+      if (response.status === 409 && body.detail?.code === "coverage_source_conflict") {
+        const location = body.detail.location || "this location";
+        if (window.confirm(`This would mix a coverage video and coverage images for ${location}. Replace the existing coverage source?`)) {
+          form.querySelector('input[name="override_video"]').value = "true";
+          form.requestSubmit();
+        } else {
+          result.textContent = body.detail.message || "Upload cancelled.";
+        }
+        return;
+      }
       result.textContent = JSON.stringify(body, null, 2);
       if (!response.ok) return;
       if (!payload.has("dry_run")) {
@@ -101,9 +121,28 @@ function setupRawUploadForm(form) {
 
 document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("#raw-upload-form").forEach(setupRawUploadForm);
-  document.querySelectorAll("#preprocess-queue-form").forEach((form) => {
+  document.querySelectorAll(".preprocess-queue-form").forEach((form) => {
     setupPreprocessProfileDefaults(form);
     setupPreprocessDependencyState(form);
+    form.addEventListener("submit", () => {
+      const hidden = form.querySelector('input[name="group_settings_json"]');
+      if (!hidden) return;
+      const fields = ["profile", "candidate_fps", "target_min", "target_max", "min_blur", "min_brightness", "max_brightness", "min_contrast", "min_entropy", "force_keep_interval"];
+      const groups = Array.from(form.querySelectorAll("[data-preprocess-group]")).map((card) => {
+        const item = { group_key: card.dataset.preprocessGroup, preprocess_args: [] };
+        const values = {};
+        fields.forEach((field) => {
+          const input = card.querySelector(`[data-group-field="${field}"]`);
+          if (!input || input.value === "") return;
+          if (field === "profile") item.profile = input.value;
+          else values[field] = input.type === "number" ? Number(input.value) : input.value;
+        });
+        const flags = { candidate_fps: "--candidate-fps", target_min: "--target-min", target_max: "--target-max", min_blur: "--min-blur", min_brightness: "--min-brightness", max_brightness: "--max-brightness", min_contrast: "--min-contrast", min_entropy: "--min-entropy", force_keep_interval: "--force-keep-interval" };
+        Object.entries(values).forEach(([key, value]) => { item.preprocess_args.push(flags[key], String(value)); });
+        return item;
+      });
+      hidden.value = JSON.stringify(groups);
+    });
   });
   document.querySelectorAll('form[action$="/colmap"]').forEach((form) => {
     setupColmapFormBehavior(form);
@@ -202,6 +241,18 @@ function setupPreprocessProfileDefaults(form) {
     Object.entries(defaults).forEach(([field, value]) => {
       const input = form.querySelector(`[name="${CSS.escape(field)}"]`);
       if (input) input.value = value;
+    });
+  });
+
+  form.querySelectorAll("[data-preprocess-group]").forEach((group) => {
+    const select = group.querySelector('[data-group-field="profile"]');
+    if (!select) return;
+    select.addEventListener("change", () => {
+      const defaults = defaultsByProfile[select.value] || {};
+      Object.entries(defaults).forEach(([field, value]) => {
+        const input = group.querySelector(`[data-group-field="${CSS.escape(field)}"]`);
+        if (input) input.value = value;
+      });
     });
   });
 }

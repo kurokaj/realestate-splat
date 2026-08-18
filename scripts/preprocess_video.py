@@ -43,9 +43,9 @@ PROFILE_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "min_entropy": 3.2,
         "duplicate_hash_threshold": 4,
         "duplicate_pixel_threshold": 0.018,
-        "force_keep_interval": 3.0,
-        "coverage_window_seconds": 2.0,
-        "min_frames_per_window": 1,
+        "force_keep_interval": 3,
+        "coverage_window_seconds": 0.0,
+        "min_frames_per_window": 0,
         "coverage_hard_min_blur": 20.0,
         "coverage_hard_min_brightness": 20.0,
         "coverage_hard_max_brightness": 245.0,
@@ -63,9 +63,9 @@ PROFILE_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "min_entropy": 3.2,
         "duplicate_hash_threshold": 4,
         "duplicate_pixel_threshold": 0.018,
-        "force_keep_interval": 3.0,
-        "coverage_window_seconds": 2.0,
-        "min_frames_per_window": 1,
+        "force_keep_interval": 3,
+        "coverage_window_seconds": 0.0,
+        "min_frames_per_window": 0,
         "coverage_hard_min_blur": 20.0,
         "coverage_hard_min_brightness": 20.0,
         "coverage_hard_max_brightness": 245.0,
@@ -83,9 +83,9 @@ PROFILE_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "min_entropy": 3.2,
         "duplicate_hash_threshold": 4,
         "duplicate_pixel_threshold": 0.018,
-        "force_keep_interval": 3.0,
-        "coverage_window_seconds": 2.0,
-        "min_frames_per_window": 1,
+        "force_keep_interval": 3,
+        "coverage_window_seconds": 0.0,
+        "min_frames_per_window": 0,
         "coverage_hard_min_blur": 20.0,
         "coverage_hard_min_brightness": 20.0,
         "coverage_hard_max_brightness": 245.0,
@@ -103,9 +103,9 @@ PROFILE_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "min_entropy": 3.0,
         "duplicate_hash_threshold": 4,
         "duplicate_pixel_threshold": 0.016,
-        "force_keep_interval": 3.0,
-        "coverage_window_seconds": 2.0,
-        "min_frames_per_window": 1,
+        "force_keep_interval": 3,
+        "coverage_window_seconds": 0.0,
+        "min_frames_per_window": 0,
         "coverage_hard_min_blur": 20.0,
         "coverage_hard_min_brightness": 20.0,
         "coverage_hard_max_brightness": 245.0,
@@ -261,8 +261,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--force-keep-interval",
-        type=float,
-        help="Keep a frame at least this often even if it resembles the previous selected frame.",
+        type=int,
+        help="Maximum number of consecutive near-duplicate candidate frames to skip before keeping the current best available frame.",
     )
     parser.add_argument(
         "--coverage-window-seconds",
@@ -627,7 +627,7 @@ def analyze_video(video_path: Path, settings: Dict[str, Any]) -> Tuple[VideoInfo
         selected_initial: List[FrameRecord] = []
         last_selected_hash: Optional[int] = None
         last_selected_signature: Optional[Any] = None
-        last_selected_timestamp: Optional[float] = None
+        near_duplicate_candidates_since_selected = 0
 
         frame_index = start_frame
         next_progress_percent = PROGRESS_PERCENT_STEP
@@ -656,10 +656,16 @@ def analyze_video(video_path: Path, settings: Dict[str, Any]) -> Tuple[VideoInfo
                         hash_distance_value <= int(settings["duplicate_hash_threshold"])
                         and pixel_difference_value <= float(settings["duplicate_pixel_threshold"])
                     )
-                    if is_near_duplicate and last_selected_timestamp is not None:
-                        elapsed_since_selected = timestamp - last_selected_timestamp
-                        if elapsed_since_selected < float(settings["force_keep_interval"]):
+                    if is_near_duplicate:
+                        near_duplicate_candidates_since_selected += 1
+                        if near_duplicate_candidates_since_selected < int(settings["force_keep_interval"]):
                             reject_reason = "duplicate"
+                        else:
+                            # The current candidate is the best available frame
+                            # after the configured number of skipped candidates.
+                            reject_reason = None
+                    else:
+                        near_duplicate_candidates_since_selected = 0
 
                 record = FrameRecord(
                     frame_index=frame_index,
@@ -683,7 +689,7 @@ def analyze_video(video_path: Path, settings: Dict[str, Any]) -> Tuple[VideoInfo
                     selected_initial.append(record)
                     last_selected_hash = ahash_value
                     last_selected_signature = signature
-                    last_selected_timestamp = timestamp
+                    near_duplicate_candidates_since_selected = 0
 
             if settings.get("progress") and total_progress_frames:
                 processed_frames = max(0, frame_index - start_frame + 1)
@@ -2306,11 +2312,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sources = discover_video_sources(args)
     coverage_image_inputs = discover_coverage_images(args.input_dir)
     hero_inputs = discover_hero_images(args.input_dir)
-    if not sources and not coverage_image_inputs:
+    if not sources and not coverage_image_inputs and not hero_inputs:
         video_suffixes = ", ".join(sorted(VIDEO_SUFFIXES))
         image_suffixes = ", ".join(sorted(IMAGE_SUFFIXES))
         raise SystemExit(
-            f"No coverage videos or root-level coverage images found in {args.input_dir}. "
+            f"No coverage videos, coverage images, or hero images found in {args.input_dir}. "
             f"Expected videos ({video_suffixes}) or images ({image_suffixes})."
         )
 

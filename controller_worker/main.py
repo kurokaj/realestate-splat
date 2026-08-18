@@ -235,6 +235,10 @@ def build_preprocess_command(stage_run: dict[str, Any], inputs: dict[str, Any]) 
         command.extend(["--python-bin", python_bin])
     if inputs.get("dry_run"):
         command.append("--dry-run")
+    # Always use the manifest-driven group runner. An empty list means "use
+    # profile defaults for every discovered group", which also keeps older
+    # queued runs compatible with the new grouped raw layout.
+    command.extend(["--group-config-json", json.dumps(inputs.get("group_configs", []), separators=(",", ":"))])
     for preprocess_arg in inputs.get("preprocess_args", []):
         append_argparse_value(command, "--preprocess-arg", preprocess_arg)
     return command

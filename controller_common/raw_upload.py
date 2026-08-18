@@ -28,6 +28,24 @@ DEFAULT_EXCLUDES = [
 ]
 
 
+class DuplicateCoverageVideoError(ValueError):
+    def __init__(self, location: str, existing: list[str]) -> None:
+        self.location = location
+        self.existing = existing
+        super().__init__(
+            f"A coverage video already exists for location '{location}': {', '.join(existing)}"
+        )
+
+
+class CoverageSourceConflictError(ValueError):
+    def __init__(self, location: str, roles: list[str]) -> None:
+        self.location = location
+        self.roles = roles
+        super().__init__(
+            f"Location '{location}' cannot mix coverage video and coverage images: {', '.join(roles)}"
+        )
+
+
 def safe_relative_upload_path(filename: str) -> Path:
     cleaned = filename.replace("\\", "/").lstrip("/")
     parts = []
@@ -49,6 +67,20 @@ def write_upload_file(root: Path, filename: str, stream: BinaryIO) -> Path:
     return destination
 
 
+def grouped_upload_path(filename: str, metadata: Optional[dict[str, Any]] = None) -> Path:
+    original = safe_relative_upload_path(filename)
+    metadata = metadata or {}
+    role = str(metadata.get("role") or "").strip()
+    if role == "auto":
+        role = ""
+    if not role:
+        role = "coverage_video" if original.suffix.lower() in {".mp4", ".mov", ".m4v", ".avi", ".mkv"} else "coverage_image"
+    location = str(metadata.get("location") or "unassigned").strip()
+    location = safe_relative_upload_path(location).as_posix().replace("/", "_")
+    root = "hero" if role == "hero_image" else "coverage"
+    return Path(root) / location / original.name
+
+
 def upload_raw_directory(
     *,
     project_id: str,
@@ -57,6 +89,7 @@ def upload_raw_directory(
     endpoint_url: Optional[str],
     metadata_overrides: Optional[dict[str, dict[str, Any]]] = None,
     delete: bool = False,
+    override_video: bool = False,
     dry_run: bool = False,
 ) -> dict:
     manifest = build_sources_manifest(project_id, input_dir, destination_uri)
@@ -64,8 +97,47 @@ def upload_raw_directory(
     loaded_at = utc_now()
     for source in manifest.get("sources", []):
         source["loaded_at"] = loaded_at
+    existing = load_manifest(destination_uri, endpoint_url) if not dry_run else {}
+    existing_sources = existing.get("sources") if isinstance(existing.get("sources"), list) else []
+    incoming_sources = manifest.get("sources") if isinstance(manifest.get("sources"), list) else []
+    duplicate_videos = duplicate_coverage_videos(existing_sources + incoming_sources)
+    incoming_duplicate_videos = duplicate_coverage_videos(incoming_sources)
+    if incoming_duplicate_videos:
+        location, paths = next(iter(incoming_duplicate_videos.items()))
+        raise DuplicateCoverageVideoError(location, paths)
+    coverage_conflicts = mixed_coverage_sources(existing_sources + incoming_sources)
+    incoming_coverage_conflicts = mixed_coverage_sources(incoming_sources)
+    if incoming_coverage_conflicts:
+        location, roles = next(iter(incoming_coverage_conflicts.items()))
+        raise CoverageSourceConflictError(location, roles)
+    if coverage_conflicts and not override_video:
+        location, roles = next(iter(coverage_conflicts.items()))
+        raise CoverageSourceConflictError(location, roles)
+    if duplicate_videos and not override_video:
+        location, paths = next(iter(duplicate_videos.items()))
+        raise DuplicateCoverageVideoError(location, paths)
     if not dry_run:
-        manifest = merge_with_existing_manifest(manifest, destination_uri, endpoint_url)
+        if (duplicate_videos or coverage_conflicts) and override_video:
+            replacement_locations = set(duplicate_videos) | set(coverage_conflicts)
+            old_paths = {
+                source.get("relative_path")
+                for source in existing_sources
+                if isinstance(source, dict)
+                and source.get("role") in {"coverage_video", "coverage_image"}
+                and str(source.get("location") or "unassigned") in replacement_locations
+            }
+            for old_path in old_paths - {source.get("relative_path") for source in incoming_sources}:
+                if old_path:
+                    delete_file(f"{destination_uri.rstrip('/')}/{old_path}", endpoint_url=endpoint_url)
+            existing = {
+                **existing,
+                "sources": [source for source in existing_sources if source.get("relative_path") not in old_paths],
+            }
+        manifest = merge_with_existing_manifest(manifest, destination_uri, endpoint_url, existing=existing)
+    manifest["preprocess_stale_groups"] = sorted(
+        set(existing.get("preprocess_stale_groups") or [])
+        | {source_group_key(source) for source in incoming_sources if isinstance(source, dict)}
+    )
     manifest_path = input_dir / "sources_manifest.json"
     write_json(manifest_path, manifest)
     sync_directory(
@@ -108,8 +180,10 @@ def merge_with_existing_manifest(
     incoming: dict[str, Any],
     destination_uri: str,
     endpoint_url: Optional[str],
+    *,
+    existing: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    existing = load_manifest(destination_uri, endpoint_url)
+    existing = existing if existing is not None else load_manifest(destination_uri, endpoint_url)
     existing_sources = existing.get("sources") if isinstance(existing.get("sources"), list) else []
     incoming_sources = incoming.get("sources") if isinstance(incoming.get("sources"), list) else []
     by_path = {
@@ -126,6 +200,34 @@ def merge_with_existing_manifest(
         "created_at": existing.get("created_at") or incoming.get("created_at"),
         "updated_at": utc_now(),
         "sources": [by_path[path] for path in sorted(by_path)],
+    }
+
+
+def source_group_key(source: dict[str, Any]) -> str:
+    return f"{source.get('role') or 'unknown'}:{source.get('location') or 'unassigned'}"
+
+
+def duplicate_coverage_videos(sources: Iterable[Any]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for source in sources:
+        if not isinstance(source, dict) or source.get("role") != "coverage_video":
+            continue
+        location = str(source.get("location") or "unassigned")
+        grouped.setdefault(location, []).append(str(source.get("relative_path") or source.get("source_id") or "video"))
+    return {location: paths for location, paths in grouped.items() if len(paths) > 1}
+
+
+def mixed_coverage_sources(sources: Iterable[Any]) -> dict[str, list[str]]:
+    grouped: dict[str, set[str]] = {}
+    for source in sources:
+        if not isinstance(source, dict) or source.get("role") not in {"coverage_video", "coverage_image"}:
+            continue
+        location = str(source.get("location") or "unassigned")
+        grouped.setdefault(location, set()).add(str(source.get("role")))
+    return {
+        location: sorted(roles)
+        for location, roles in grouped.items()
+        if {"coverage_video", "coverage_image"}.issubset(roles)
     }
 
 
@@ -149,6 +251,14 @@ def remove_raw_source(
             **manifest,
             "updated_at": utc_now(),
             "sources": remaining,
+            "preprocess_stale_groups": sorted(
+                set(manifest.get("preprocess_stale_groups") or [])
+                | {
+                    source_group_key(source)
+                    for source in sources
+                    if isinstance(source, dict) and source.get("relative_path") == safe_path
+                },
+            ),
         }
         with tempfile.TemporaryDirectory(prefix="buildvision3d-raw-remove-") as temp_dir:
             manifest_path = Path(temp_dir) / "sources_manifest.json"

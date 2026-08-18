@@ -40,6 +40,7 @@ from controller_common.runpod_gpus import (
 )
 from src.realestate_splat.storage import copy_file, parse_storage_uri
 from scripts.preprocess_video import PROFILE_DEFAULTS
+from controller_common.raw_upload import source_group_key
 
 
 router = APIRouter(include_in_schema=False)
@@ -195,6 +196,7 @@ def ui_queue_preprocess(
     raw_uri: Optional[str] = Form(default=None),
     output_uri: Optional[str] = Form(default=None),
     endpoint_url: Optional[str] = Form(default=None),
+    group_settings_json: Optional[str] = Form(default=None),
     profile: str = Form(default="indoor_room"),
     candidate_fps: Optional[float] = Form(default=None),
     target_min: Optional[int] = Form(default=None),
@@ -224,11 +226,17 @@ def ui_queue_preprocess(
         resolved_output_uri = empty_to_none(output_uri) or f"r2://{default_r2_bucket()}/projects/{project_id}/preprocess"
         require_r2_uri(resolved_raw_uri, "raw_uri")
         require_r2_uri(resolved_output_uri, "output_uri")
+        group_configs = parse_group_settings(group_settings_json)
+        preprocess_scope = "group" if len(group_configs) == 1 else "project"
+        if preprocess_scope == "group":
+            resolved_output_uri = f"{resolved_output_uri.rstrip('/')}/groups/{ui_slug(str(group_configs[0].get('group_key')))}"
         input_uri_json = {
             "raw_uri": resolved_raw_uri,
             "output_uri": resolved_output_uri,
             "endpoint_url": empty_to_none(endpoint_url),
             "profile": profile,
+            "group_configs": group_configs,
+            "preprocess_scope": preprocess_scope,
             "preprocess_args": preprocess_args_from_form(
                 {
                     "candidate_fps": candidate_fps,
@@ -661,6 +669,22 @@ def preprocess_args_from_form(values: dict[str, Any]) -> list[str]:
     return args
 
 
+def parse_group_settings(raw: Optional[str]) -> list[dict[str, Any]]:
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid per-group preprocess settings: {exc.msg}") from exc
+    if not isinstance(payload, list):
+        raise HTTPException(status_code=400, detail="Per-group preprocess settings must be a list")
+    return [item for item in payload if isinstance(item, dict) and item.get("group_key")]
+
+
+def ui_slug(value: str) -> str:
+    return "".join(char if char.isalnum() else "_" for char in value.lower()).strip("_") or "group"
+
+
 def preprocess_review_context(project: dict[str, Any], stage_runs: list[dict[str, Any]]) -> dict[str, Any]:
     preprocess_runs = [run for run in stage_runs if run.get("stage") == "preprocess"]
     latest_run = preprocess_runs[0] if preprocess_runs else None
@@ -671,21 +695,43 @@ def preprocess_review_context(project: dict[str, Any], stage_runs: list[dict[str
         compact_summary = latest_run.get("summary_json") or {}
         summary = compact_summary
         videos = compact_summary.get("videos", []) if isinstance(compact_summary, dict) else []
+    raw_summary = raw_source_summary(project)
+    group_reports = latest_group_capture_reports(preprocess_runs)
+    form_values = preprocess_form_values(project, latest_run, capture_report)
     return {
         "latest_preprocess_run": latest_run,
         "preprocess_capture_report": capture_report,
         "preprocess_summary": summary,
         "preprocess_settings": preprocess_settings(latest_run, capture_report),
-        "preprocess_form_values": preprocess_form_values(project, latest_run, capture_report),
+        "preprocess_form_values": form_values,
         "preprocess_quality_rows": quality_distribution_rows(summary),
         "preprocess_video_timeline_blocks": video_timeline_blocks(capture_report, latest_run),
         "preprocess_image_grid": coverage_image_grid(capture_report),
+        "preprocess_location_blocks": preprocess_location_blocks(raw_summary, capture_report, form_values, group_reports),
         "preprocess_video_rows": compact_video_rows(videos),
         "preprocess_run_rows": preprocess_run_rows(preprocess_runs),
         "preprocess_profile_defaults": ui_profile_defaults(),
-        "raw_source_summary": raw_source_summary(project),
+        "raw_source_summary": raw_summary,
         "colmap_stats_rows": colmap_stats_rows(stage_runs),
     }
+
+
+def latest_group_capture_reports(preprocess_runs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    reports: dict[str, dict[str, Any]] = {}
+    for run in preprocess_runs:
+        input_json = run.get("input_uri_json") if isinstance(run.get("input_uri_json"), dict) else {}
+        if input_json.get("preprocess_scope") != "group":
+            continue
+        group_configs = input_json.get("group_configs") if isinstance(input_json.get("group_configs"), list) else []
+        if len(group_configs) != 1 or not isinstance(group_configs[0], dict):
+            continue
+        group_key = str(group_configs[0].get("group_key") or "")
+        if not group_key or group_key in reports:
+            continue
+        report = load_capture_report(run)
+        if report:
+            reports[group_key] = report
+    return reports
 
 
 def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -791,19 +837,31 @@ def ui_profile_defaults() -> dict[str, dict[str, Any]]:
 def raw_source_summary(project: dict[str, Any]) -> dict[str, Any]:
     raw_uri = project.get("raw_uri") if project else None
     if not raw_uri:
-        return {"loaded": False, "source_count": 0, "rows": [], "sources": [], "has_coverage_video": None}
+        return {"loaded": False, "source_count": 0, "rows": [], "sources": [], "location_blocks": [], "has_coverage_video": None}
     try:
         manifest = load_json_uri(f"{raw_uri.rstrip('/')}/sources_manifest.json")
     except Exception as exc:
-        return {"loaded": False, "source_count": 0, "rows": [], "sources": [], "has_coverage_video": None, "error": str(exc)}
+        return {
+            "loaded": False,
+            "source_count": 0,
+            "rows": [],
+            "sources": [],
+            "location_blocks": [],
+            "has_coverage_video": None,
+            "error": friendly_manifest_error(exc),
+        }
     sources = manifest.get("sources") if isinstance(manifest, dict) else []
     if not isinstance(sources, list):
         sources = []
+    stale_groups = set(manifest.get("preprocess_stale_groups") or [])
+    compact_sources = compact_raw_sources(sources, stale_groups)
     return {
         "loaded": True,
         "source_count": len(sources),
         "rows": raw_source_count_rows(sources),
-        "sources": compact_raw_sources(sources),
+        "sources": compact_sources,
+        "group_rows": raw_source_group_rows(sources),
+        "location_blocks": raw_source_location_blocks(compact_sources),
         "has_coverage_video": any(
             isinstance(source, dict) and source.get("role") == "coverage_video"
             for source in sources
@@ -811,22 +869,92 @@ def raw_source_summary(project: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def raw_source_location_blocks(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for source in sources:
+        location = str(source.get("location") or "unassigned")
+        block = grouped.setdefault(
+            location,
+            {
+                "location": location,
+                "coverage_videos": [],
+                "coverage_images": [],
+                "hero_images": [],
+                "sources": [],
+                "stale": False,
+                "conflict": False,
+            },
+        )
+        block["sources"].append(source)
+        block["stale"] = block["stale"] or bool(source.get("preprocess_stale"))
+        role = source.get("role")
+        if role == "coverage_video":
+            block["coverage_videos"].append(source)
+        elif role == "coverage_image":
+            block["coverage_images"].append(source)
+        elif role == "hero_image":
+            block["hero_images"].append(source)
+
+    blocks = []
+    for location, block in sorted(grouped.items()):
+        has_video = bool(block["coverage_videos"])
+        has_images = bool(block["coverage_images"])
+        block["conflict"] = (has_video and has_images) or len(block["coverage_videos"]) > 1
+        if has_video:
+            block["coverage_kind"] = "video"
+            block["coverage_count"] = len(block["coverage_videos"])
+            block["coverage_group_key"] = f"coverage_video:{location}"
+        elif has_images:
+            block["coverage_kind"] = "images"
+            block["coverage_count"] = len(block["coverage_images"])
+            block["coverage_group_key"] = f"coverage_image:{location}"
+        else:
+            block["coverage_kind"] = "none"
+            block["coverage_count"] = 0
+            block["coverage_group_key"] = f"hero_image:{location}"
+        block["hero_count"] = len(block["hero_images"])
+        blocks.append(block)
+    return blocks
+
+
+def friendly_manifest_error(exc: Exception) -> str:
+    message = str(exc)
+    if "NoSuchKey" in message or "404" in message or "exit status 1" in message:
+        return "No sources manifest found yet. Upload raw files to create one."
+    return "Sources manifest could not be loaded."
+
+
+def raw_source_group_rows(sources: list[Any]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        role = str(source.get("role") or "coverage_image")
+        location = str(source.get("location") or "unassigned")
+        key = f"{role}:{location}"
+        row = grouped.setdefault(key, {"group_key": key, "role": role, "location": location, "count": 0, "video_count": 0})
+        row["count"] += 1
+        if role == "coverage_video":
+            row["video_count"] += 1
+    return [grouped[key] for key in sorted(grouped)]
+
+
 def raw_source_count_rows(sources: list[Any]) -> list[dict[str, Any]]:
-    groups = [
-        ("Role", "role"),
-        ("Camera group", "camera_group"),
-        ("Location", "location"),
-        ("COLMAP", "colmap_policy"),
+    counts = Counter(
+        (
+            str(source.get("role") or "unknown"),
+            str(source.get("location") or "unassigned"),
+        )
+        for source in sources
+        if isinstance(source, dict)
+    )
+    return [
+        {"role": role, "location": location, "count": count}
+        for (role, location), count in sorted(counts.items())
     ]
-    rows = []
-    for label, key in groups:
-        counts = Counter(str(source.get(key) or "unset") for source in sources if isinstance(source, dict))
-        for value, count in sorted(counts.items()):
-            rows.append({"group": label, "value": value, "count": count})
-    return rows
 
 
-def compact_raw_sources(sources: list[Any]) -> list[dict[str, Any]]:
+def compact_raw_sources(sources: list[Any], stale_groups: set[str]) -> list[dict[str, Any]]:
     rows = []
     for source in sources:
         if not isinstance(source, dict):
@@ -844,6 +972,7 @@ def compact_raw_sources(sources: list[Any]) -> list[dict[str, Any]]:
                 "resolution": resolution,
                 "duration_seconds": source.get("duration_seconds"),
                 "loaded_at": source.get("loaded_at"),
+                "preprocess_stale": source_group_key(source) in stale_groups,
             }
         )
     return rows
@@ -1148,6 +1277,113 @@ def quality_distribution_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def preprocess_location_blocks(
+    raw_summary: dict[str, Any],
+    capture_report: dict[str, Any],
+    form_values: dict[str, Any],
+    group_reports: Optional[dict[str, dict[str, Any]]] = None,
+) -> list[dict[str, Any]]:
+    defaults = PROFILE_DEFAULTS.get(str(form_values.get("profile") or "indoor_room"), {})
+    blocks = []
+    for raw_block in raw_summary.get("location_blocks", []):
+        if not isinstance(raw_block, dict):
+            continue
+        location = str(raw_block.get("location") or "unassigned")
+        coverage_group_key = str(raw_block.get("coverage_group_key") or f"coverage_image:{location}")
+        review_report = (group_reports or {}).get(coverage_group_key) or capture_report
+        summary = group_summary(review_report, coverage_group_key, location)
+        block = {
+            **raw_block,
+            "group_key": coverage_group_key,
+            "defaults": {key: form_values.get(key, defaults.get(key)) for key in ui_preprocess_field_names()},
+            "timeline_blocks": [
+                item for item in full_timeline_blocks(review_report)
+                if item.get("group_key") == coverage_group_key or item.get("location") == location
+            ],
+            "coverage_image_grid": coverage_image_grid(review_report, group_key=coverage_group_key, location=location),
+            "hero_image_grid": hero_image_grid(review_report, location=location),
+            "quality_rows": quality_distribution_rows(summary),
+            "result_summary": compact_group_result_summary(review_report, coverage_group_key, location),
+        }
+        blocks.append(block)
+    return blocks
+
+
+def ui_preprocess_field_names() -> tuple[str, ...]:
+    return (
+        "candidate_fps",
+        "target_min",
+        "target_max",
+        "min_blur",
+        "min_brightness",
+        "max_brightness",
+        "min_contrast",
+        "min_entropy",
+        "force_keep_interval",
+    )
+
+
+def group_summary(capture_report: dict[str, Any], group_key: str, location: str) -> dict[str, Any]:
+    frames = group_frames(capture_report, group_key, location)
+    if not frames:
+        return {}
+    return {
+        "metric_distributions": {
+            metric: metric_distribution_from_records(frames, metric)
+            for metric in ("blur_score", "brightness", "contrast", "entropy")
+        }
+    }
+
+
+def compact_group_result_summary(capture_report: dict[str, Any], group_key: str, location: str) -> dict[str, Any]:
+    frames = group_frames(capture_report, group_key, location)
+    videos = [
+        video for video in capture_report.get("videos", []) if isinstance(video, dict)
+        and (video.get("group_key") == group_key or video.get("location") == location)
+    ] if isinstance(capture_report, dict) else []
+    selected = sum(1 for frame in frames if image_decision(frame) == "selected")
+    fallback = sum(1 for frame in frames if frame.get("selected_by") == "coverage_fallback")
+    gaps = 0
+    warnings: list[str] = []
+    for video in videos:
+        coverage = video.get("coverage") if isinstance(video.get("coverage"), dict) else {}
+        gaps += int(coverage.get("windows_below_minimum_count") or 0)
+        warnings.extend(str(item) for item in video.get("warnings", []) if item)
+    coverage_images = coverage_image_grid(capture_report, group_key=group_key, location=location)
+    hero_images = hero_image_grid(capture_report, location=location)
+    return {
+        "selected": selected,
+        "fallback": fallback,
+        "gaps": gaps,
+        "warnings": sorted(set(warnings)),
+        "coverage_selected": coverage_images["counts"].get("selected", 0),
+        "coverage_rejected": coverage_images["counts"].get("rejected", 0),
+        "hero_count": len(hero_images["items"]),
+    }
+
+
+def metric_distribution_from_records(records: list[dict[str, Any]], metric: str) -> dict[str, Any]:
+    values = [record.get(metric) for record in records if isinstance(record.get(metric), (int, float))]
+    if not values:
+        return {}
+    ordered = sorted(float(value) for value in values)
+
+    def percentile(fraction: float) -> float:
+        position = (len(ordered) - 1) * fraction
+        lower = int(position)
+        upper = min(lower + 1, len(ordered) - 1)
+        return round(ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower), 3)
+
+    return {
+        "min": round(ordered[0], 3),
+        "p10": percentile(0.10),
+        "p50": percentile(0.50),
+        "mean": round(sum(ordered) / len(ordered), 3),
+        "p90": percentile(0.90),
+        "max": round(ordered[-1], 3),
+    }
+
+
 def compact_video_rows(videos: list[Any]) -> list[dict[str, Any]]:
     rows = []
     for video in videos:
@@ -1182,15 +1418,12 @@ def video_timeline_blocks(capture_report: dict[str, Any], run: Optional[dict[str
     return []
 
 
-def coverage_image_grid(capture_report: dict[str, Any]) -> dict[str, Any]:
+def coverage_image_grid(capture_report: dict[str, Any], group_key: Optional[str] = None, location: Optional[str] = None) -> dict[str, Any]:
     if not isinstance(capture_report, dict):
         return {"items": [], "counts": {}}
-    frames = capture_report.get("frames", [])
-    if not isinstance(frames, list):
-        return {"items": [], "counts": {}}
     image_frames = [
-        frame for frame in frames
-        if isinstance(frame, dict) and str(frame.get("source_id") or "") == "coverage_images"
+        frame for frame in group_frames(capture_report, group_key, location)
+        if str(frame.get("source_id") or "") == "coverage_images"
     ]
     items = []
     counts = Counter()
@@ -1204,6 +1437,44 @@ def coverage_image_grid(capture_report: dict[str, Any]) -> dict[str, Any]:
             }
         )
     return {"items": items, "counts": dict(counts)}
+
+
+def hero_image_grid(capture_report: dict[str, Any], location: Optional[str] = None) -> dict[str, Any]:
+    if not isinstance(capture_report, dict):
+        return {"items": [], "counts": {}}
+    records = capture_report.get("hero_images", [])
+    if not isinstance(records, list):
+        return {"items": [], "counts": {}}
+    items = []
+    counts = Counter()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        if location and str(record.get("location") or "unassigned") != location:
+            continue
+        decision = "selected" if record.get("output_file") else "rejected"
+        counts[decision] += 1
+        items.append({"decision": decision, "title": image_hover_title(record, decision)})
+    return {"items": items, "counts": dict(counts)}
+
+
+def group_frames(capture_report: dict[str, Any], group_key: Optional[str], location: Optional[str]) -> list[dict[str, Any]]:
+    frames = capture_report.get("frames", []) if isinstance(capture_report, dict) else []
+    if not isinstance(frames, list):
+        return []
+    result = []
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        if not group_key and not location:
+            result.append(frame)
+            continue
+        if group_key and frame.get("group_key") == group_key:
+            result.append(frame)
+            continue
+        if location and str(frame.get("location") or "unassigned") == location:
+            result.append(frame)
+    return result
 
 
 def full_timeline_blocks(capture_report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1229,6 +1500,8 @@ def full_timeline_blocks(capture_report: dict[str, Any]) -> list[dict[str, Any]]
         blocks.append(
             {
                 "source_id": source_id,
+                "group_key": video.get("group_key"),
+                "location": video.get("location"),
                 "meta": {
                     "selected": video.get("selected_frame_count"),
                     "quality": selected_by.get("quality", 0),

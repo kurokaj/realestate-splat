@@ -64,6 +64,7 @@
             </table>
           </div>
           <input name="metadata_json" type="hidden">
+          <input name="override_video" type="hidden" value="false">
           <div class="button-row">
             <label class="checkbox-row">
               <input type="checkbox" name="dry_run" value="true">
@@ -77,150 +78,29 @@
 
       <div class="panel">
         <div class="panel-heading">
-          <h2>Queue Preprocess</h2>
-          {% if latest_preprocess_run %}
-            <span class="status status-{{ latest_preprocess_run.status }}">{{ latest_preprocess_run.status }}</span>
+          <h2>Loaded Raw Files</h2>
+          {% if raw_source_summary.loaded %}
+            <span class="muted">{{ raw_source_summary.source_count }} files from sources_manifest.json</span>
+          {% elif raw_source_summary.error %}
+            <span class="status status-failed">manifest unavailable</span>
+          {% else %}
+            <span class="muted">Waiting for upload</span>
           {% endif %}
         </div>
-        <form
-          method="post"
-          action="/ui/projects/{{ project.id }}/preprocess"
-          class="stack"
-          id="preprocess-queue-form"
-          data-has-coverage-video="{{ 'true' if raw_source_summary.has_coverage_video is true else ('false' if raw_source_summary.has_coverage_video is false else 'unknown') }}"
-          data-profile-defaults='{{ preprocess_profile_defaults|tojson }}'
-        >
-          <div class="grid two tight">
-            <label>
-              <span class="label-title">Raw URI <span class="info-dot" tabindex="0" data-tip="R2 location containing the uploaded raw sources manifest and original videos/images.">i</span></span>
-              <input name="raw_uri" value="{{ preprocess_form_values.raw_uri or project.raw_uri or default_raw_uri }}">
-            </label>
-            <label>
-              <span class="label-title">Output URI <span class="info-dot" tabindex="0" data-tip="Base R2 prefix for this preprocess run. The worker writes current/ and history artifacts under this prefix.">i</span></span>
-              <input name="output_uri" value="{{ preprocess_form_values.output_uri or default_preprocess_uri }}">
-            </label>
-          </div>
-          <div class="grid three tight">
-            <label>
-              <span class="label-title">Profile <span class="info-dot" tabindex="0" data-tip="Preset defaults for capture type. Changing this fills the visible threshold fields with that profile's defaults.">i</span></span>
-              <select name="profile">
-                {% set profile = preprocess_form_values.profile or preprocess_settings.profile or "indoor_room" %}
-                {% for profile_name in preprocess_profile_defaults %}
-                  <option value="{{ profile_name }}" {% if profile == profile_name %}selected{% endif %}>{{ profile_name }}</option>
-                {% endfor %}
-              </select>
-            </label>
-            <label>
-              <span class="label-title">Candidate FPS <span class="info-dot" tabindex="0" data-tip="How many candidate frames per second to score from each video before quality filtering. Higher values inspect more frames and take longer.">i</span></span>
-              <input name="candidate_fps" type="number" step="0.1" value="{{ preprocess_form_values.candidate_fps or '' }}">
-            </label>
-            <label>
-              <span class="label-title">Target min/max <span class="info-dot" tabindex="0" data-tip="Desired selected frame count range. Min protects coverage; max keeps COLMAP/training input from becoming unnecessarily large.">i</span></span>
-              <span class="split-inputs">
-                <input name="target_min" type="number" value="{{ preprocess_form_values.target_min or '' }}" placeholder="min">
-                <input name="target_max" type="number" value="{{ preprocess_form_values.target_max or '' }}" placeholder="max">
-              </span>
-            </label>
-          </div>
-          <div class="grid three tight">
-            <label>
-              <span class="label-title">Min blur <span class="info-dot" tabindex="0" data-tip="Minimum Laplacian variance blur score. Raise it to reject more soft frames; lower it if too many usable frames are rejected.">i</span></span>
-              <input name="min_blur" type="number" step="0.1" value="{{ preprocess_form_values.min_blur or '' }}">
-            </label>
-            <label>
-              <span class="label-title">Brightness min/max <span class="info-dot" tabindex="0" data-tip="Allowed mean grayscale brightness range. Tighten this to reject underexposed or blown-out frames.">i</span></span>
-              <span class="split-inputs">
-                <input name="min_brightness" type="number" step="0.1" value="{{ preprocess_form_values.min_brightness or '' }}" placeholder="min">
-                <input name="max_brightness" type="number" step="0.1" value="{{ preprocess_form_values.max_brightness or '' }}" placeholder="max">
-              </span>
-            </label>
-            <label>
-              <span class="label-title">Min contrast <span class="info-dot" tabindex="0" data-tip="Minimum grayscale standard deviation. Raise it to remove flatter, low-detail frames.">i</span></span>
-              <input name="min_contrast" type="number" step="0.1" value="{{ preprocess_form_values.min_contrast or '' }}">
-            </label>
-          </div>
-          <div class="grid three tight">
-            <label>
-              <span class="label-title">Min entropy <span class="info-dot" tabindex="0" data-tip="Minimum image entropy. Useful for rejecting frames without enough visual information for matching.">i</span></span>
-              <input name="min_entropy" type="number" step="0.1" value="{{ preprocess_form_values.min_entropy or '' }}">
-            </label>
-            <label data-preprocess-video-only>
-              <span class="label-title">Force keep interval <span class="info-dot" tabindex="0" data-tip="Maximum allowed time gap between selected frames before the selector force-keeps a candidate. Lower values push denser temporal coverage.">i</span></span>
-              <input name="force_keep_interval" type="number" step="0.1" value="{{ preprocess_form_values.force_keep_interval or '' }}">
-            </label>
-            <label data-preprocess-video-only>
-              <span class="label-title">Coverage window <span class="info-dot" tabindex="0" data-tip="Timeline window size in seconds used to detect gaps in selected frames. Smaller windows enforce denser temporal coverage.">i</span></span>
-              <input name="coverage_window_seconds" type="number" step="0.1" value="{{ preprocess_form_values.coverage_window_seconds or '' }}">
-            </label>
-          </div>
-          <div class="grid three tight">
-            <label data-preprocess-video-only>
-              <span class="label-title">Min frames/window <span class="info-dot" tabindex="0" data-tip="Minimum selected frames required in each coverage window before fallback selection is attempted.">i</span></span>
-              <input name="min_frames_per_window" type="number" value="{{ preprocess_form_values.min_frames_per_window or '' }}">
-            </label>
-            <label data-preprocess-video-only>
-              <span class="label-title">Coverage hard min blur <span class="info-dot" tabindex="0" data-tip="Fallback coverage frames must still meet at least this blur score, even when ordinary thresholds are relaxed.">i</span></span>
-              <input name="coverage_hard_min_blur" type="number" step="0.1" value="{{ preprocess_form_values.coverage_hard_min_blur or '' }}">
-            </label>
-            <label data-preprocess-video-only>
-              <span class="label-title">Coverage hard brightness min/max <span class="info-dot" tabindex="0" data-tip="Absolute brightness guardrails for fallback coverage frames. These protect against force-keeping frames that are too dark or blown out.">i</span></span>
-              <span class="split-inputs">
-                <input name="coverage_hard_min_brightness" type="number" step="0.1" value="{{ preprocess_form_values.coverage_hard_min_brightness or '' }}" placeholder="min">
-                <input name="coverage_hard_max_brightness" type="number" step="0.1" value="{{ preprocess_form_values.coverage_hard_max_brightness or '' }}" placeholder="max">
-              </span>
-            </label>
-          </div>
-          <div class="grid two tight">
-            <label data-preprocess-video-only>
-              <span class="label-title">Coverage hard min contrast <span class="info-dot" tabindex="0" data-tip="Absolute minimum contrast for fallback coverage frames.">i</span></span>
-              <input name="coverage_hard_min_contrast" type="number" step="0.1" value="{{ preprocess_form_values.coverage_hard_min_contrast or '' }}">
-            </label>
-            <label data-preprocess-video-only>
-              <span class="label-title">Coverage hard min entropy <span class="info-dot" tabindex="0" data-tip="Absolute minimum entropy for fallback coverage frames so they still carry enough detail for matching.">i</span></span>
-              <input name="coverage_hard_min_entropy" type="number" step="0.1" value="{{ preprocess_form_values.coverage_hard_min_entropy or '' }}">
-            </label>
-          </div>
-          <label>
-            <span class="label-title">R2 endpoint override <span class="info-dot" tabindex="0" data-tip="Optional S3-compatible endpoint override for this queued run. Leave empty to use the Compose environment value.">i</span></span>
-            <input name="endpoint_url" value="{{ preprocess_form_values.endpoint_url or '' }}" placeholder="Optional; normally from environment">
-          </label>
-          <div class="button-row">
-            <label class="checkbox-row">
-              <input type="checkbox" name="dry_run" value="true">
-              Dry run
-            </label>
-            <button type="submit">Queue preprocess rerun</button>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <section class="panel">
-      <div class="panel-heading">
-        <h2>Loaded Raw Files</h2>
-        {% if raw_source_summary.loaded %}
-          <span class="muted">{{ raw_source_summary.source_count }} files from sources_manifest.json</span>
-        {% elif raw_source_summary.error %}
-          <span class="status status-failed">manifest unavailable</span>
-        {% else %}
-          <span class="muted">Waiting for upload</span>
-        {% endif %}
-      </div>
-      <div class="grid two">
         <div class="table-wrap">
           <table class="compact">
             <thead>
               <tr>
-                <th>Group</th>
-                <th>Value</th>
+                <th>Role</th>
+                <th>Location</th>
                 <th>Files</th>
               </tr>
             </thead>
             <tbody>
               {% for row in raw_source_summary.rows %}
                 <tr>
-                  <td>{{ row.group }}</td>
-                  <td>{{ row.value }}</td>
+                  <td>{{ row.role }}</td>
+                  <td>{{ row.location }}</td>
                   <td>{{ row.count }}</td>
                 </tr>
               {% else %}
@@ -239,6 +119,7 @@
                 <th>Group</th>
                 <th>COLMAP</th>
                 <th>Loaded</th>
+                <th>Preprocess</th>
                 <th>Action</th>
               </tr>
             </thead>
@@ -248,174 +129,215 @@
                   <td class="mono">{{ source.relative_path }}</td>
                   <td>{{ source.resolution }}</td>
                   <td>{{ source.role }}</td>
-                  <td>{{ source.camera_group or source.location or "" }}</td>
+                  <td>{{ source.location or "" }}</td>
                   <td>{{ source.colmap_policy }}</td>
                   <td>{{ source.loaded_at or "" }}</td>
+                  <td>{{ "stale" if source.preprocess_stale else "current" }}</td>
                   <td><button type="button" class="danger secondary raw-remove-button" data-raw-path="{{ source.relative_path }}">Remove</button></td>
                 </tr>
               {% else %}
-                <tr><td colspan="7" class="empty">No manifest sources listed.</td></tr>
+                <tr><td colspan="8" class="empty">No manifest sources listed.</td></tr>
               {% endfor %}
             </tbody>
           </table>
         </div>
-      </div>
-      {% if raw_source_summary.error %}
-        <p class="empty">{{ raw_source_summary.error }}</p>
-      {% endif %}
-    </section>
-
-    <div class="grid two">
-      <div class="panel">
-        <div class="panel-heading">
-          <h2>Quality Distribution</h2>
-          <span class="muted">Use these percentiles when tuning thresholds</span>
-        </div>
-        <div class="table-wrap">
-          <table class="compact">
-            <thead>
-              <tr>
-                <th>Metric</th>
-                <th>Min</th>
-                <th>P10</th>
-                <th>P50</th>
-                <th>Mean</th>
-                <th>P90</th>
-                <th>Max</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for row in preprocess_quality_rows %}
-                <tr>
-                  <th>{{ row.label }}</th>
-                  <td>{{ row.distribution.min }}</td>
-                  <td>{{ row.distribution.p10 }}</td>
-                  <td>{{ row.distribution.p50 }}</td>
-                  <td>{{ row.distribution.mean }}</td>
-                  <td>{{ row.distribution.p90 }}</td>
-                  <td>{{ row.distribution.max }}</td>
-                </tr>
-              {% else %}
-                <tr><td colspan="7" class="empty">No quality distribution available yet.</td></tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-heading">
-          <h2>Video Summary</h2>
-          <span class="muted">{{ preprocess_video_rows|length }} sources</span>
-        </div>
-        <div class="table-wrap">
-          <table class="compact">
-            <thead>
-              <tr>
-                <th>Source</th>
-                <th>Duration</th>
-                <th>Candidates</th>
-                <th>Selected</th>
-                <th>Fallback</th>
-                <th>Gaps</th>
-                <th>Warnings</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for video in preprocess_video_rows %}
-                <tr>
-                  <td>{{ video.source_id }}</td>
-                  <td>{{ video.duration_seconds }}</td>
-                  <td>{{ video.candidate_frame_count }}</td>
-                  <td>{{ video.selected_frame_count }}</td>
-                  <td>{{ video.fallback_count }}</td>
-                  <td>{{ video.coverage_gaps }}{% if video.largest_gap_seconds %}<span class="subline">largest {{ video.largest_gap_seconds }}s</span>{% endif %}</td>
-                  <td>{{ video.warnings|join(", ") }}</td>
-                </tr>
-              {% else %}
-                <tr><td colspan="7" class="empty">No video summary available yet.</td></tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
+        {% if raw_source_summary.error %}
+          <p class="empty">{{ raw_source_summary.error }}</p>
+        {% endif %}
       </div>
     </div>
 
-    <section class="panel">
-      <div class="panel-heading">
-        <h2>Coverage Videos</h2>
-        {% if preprocess_capture_report %}
-          <span class="muted">Each video source gets its own timeline bar</span>
-        {% elif preprocess_video_timeline_blocks %}
-          <span class="muted">Compact selected-frame timeline from summary_json</span>
-        {% else %}
-          <span class="muted">Waiting for preprocess output</span>
-        {% endif %}
-      </div>
-      <div class="legend">
-        <span style="--legend-color:#2267c7;">quality selected</span>
-        <span style="--legend-color:#13a36f;">coverage fallback</span>
-        <span style="--legend-color:rgba(101,112,128,0.45);">rejected</span>
-        <span style="--legend-color:#b7791f;">trimmed</span>
-        <span style="--legend-color:rgba(201,60,60,0.25);">coverage gap</span>
-      </div>
-      {% for block in preprocess_video_timeline_blocks %}
-        <section class="timeline-card">
-          <h3>{{ block.source_id }}</h3>
-          <div class="timeline-meta">
-            selected {{ block.meta.selected }}
-            {% if block.meta.quality is not none %}| quality {{ block.meta.quality }}{% endif %}
-            {% if block.meta.fallback is not none %}| fallback {{ block.meta.fallback }}{% endif %}
-            {% if block.meta.coverage_gaps is not none %}| coverage gaps {{ block.meta.coverage_gaps }}{% endif %}
-            {% if block.meta.largest_gap_seconds is not none %}| largest gap {{ block.meta.largest_gap_seconds }}s{% endif %}
+    <div class="source-blocks">
+      {% for block in preprocess_location_blocks %}
+        <section class="panel source-location-block">
+          <div class="panel-heading">
+            <div>
+              <h2>{{ block.location }}</h2>
+              <p class="muted">
+                {{ block.coverage_kind }} coverage · {{ block.coverage_count }} coverage file{% if block.coverage_count != 1 %}s{% endif %}
+                · {{ block.hero_count }} hero image{% if block.hero_count != 1 %}s{% endif %}
+              </p>
+            </div>
+            <div class="button-row">
+              {% if block.conflict %}
+                <span class="status status-failed">coverage conflict</span>
+              {% elif block.stale %}
+                <span class="status status-history">needs reprocess</span>
+              {% endif %}
+              {% if latest_preprocess_run %}
+                <span class="status status-{{ latest_preprocess_run.status }}">{{ latest_preprocess_run.status }}</span>
+              {% endif %}
+            </div>
           </div>
-          <div class="timeline-wrap">
-            <div class="timeline-track">
-              {% for gap in block.gaps %}
-                <span class="gap-window" style="left:{{ '%.3f'|format(gap.left) }}%;width:{{ '%.3f'|format(gap.width) }}%;" title="{{ gap.title }}"></span>
-              {% endfor %}
-              {% for tick in block.ticks %}
-                <span class="tick tick-{{ tick.decision }}" style="left:{{ '%.3f'|format(tick.left) }}%;" title="{{ tick.title }}"></span>
-              {% endfor %}
+
+          {% if block.conflict %}
+            <p class="empty">This location has an invalid coverage mix. Keep either one coverage video or coverage images, then use hero images for extra stills.</p>
+          {% endif %}
+
+          <form
+            method="post"
+            action="/ui/projects/{{ project.id }}/preprocess"
+            class="stack preprocess-queue-form"
+            data-profile-defaults='{{ preprocess_profile_defaults|tojson }}'
+          >
+            <input name="raw_uri" type="hidden" value="{{ preprocess_form_values.raw_uri or project.raw_uri or default_raw_uri }}">
+            <input name="output_uri" type="hidden" value="{{ preprocess_form_values.output_uri or default_preprocess_uri }}">
+            <input name="endpoint_url" type="hidden" value="{{ preprocess_form_values.endpoint_url or '' }}">
+            <input name="group_settings_json" type="hidden">
+            <section class="preprocess-group-card" data-preprocess-group="{{ block.group_key }}">
+              <div class="grid three tight">
+                <label>
+                  <span class="label-title">Profile <span class="info-dot" tabindex="0" data-tip="Preset defaults for this source location. Changing this fills the visible threshold fields.">i</span></span>
+                  <select name="profile" data-group-field="profile">
+                    {% for profile_name in preprocess_profile_defaults %}
+                      <option value="{{ profile_name }}" {% if profile_name == (preprocess_form_values.profile or 'indoor_room') %}selected{% endif %}>{{ profile_name }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label>
+                  <span class="label-title">Candidate FPS <span class="info-dot" tabindex="0" data-tip="How many candidate frames per second to score from this video. Images ignore this.">i</span></span>
+                  <input data-group-field="candidate_fps" type="number" step="0.1" value="{{ block.defaults.candidate_fps }}">
+                </label>
+                <label>
+                  <span class="label-title">Target min/max <span class="info-dot" tabindex="0" data-tip="Desired selected image count range for this source location.">i</span></span>
+                  <span class="split-inputs"><input data-group-field="target_min" type="number" value="{{ block.defaults.target_min }}"><input data-group-field="target_max" type="number" value="{{ block.defaults.target_max }}"></span>
+                </label>
+                <label>
+                  <span class="label-title">Min blur <span class="info-dot" tabindex="0" data-tip="Minimum blur score. Raise to reject more soft frames/images; lower if too many are rejected.">i</span></span>
+                  <input data-group-field="min_blur" type="number" step="0.1" value="{{ block.defaults.min_blur }}">
+                </label>
+                <label>
+                  <span class="label-title">Brightness min/max <span class="info-dot" tabindex="0" data-tip="Allowed mean brightness range for this source location.">i</span></span>
+                  <span class="split-inputs"><input data-group-field="min_brightness" type="number" step="0.1" value="{{ block.defaults.min_brightness }}"><input data-group-field="max_brightness" type="number" step="0.1" value="{{ block.defaults.max_brightness }}"></span>
+                </label>
+                <label>
+                  <span class="label-title">Min contrast <span class="info-dot" tabindex="0" data-tip="Minimum grayscale contrast for this source location.">i</span></span>
+                  <input data-group-field="min_contrast" type="number" step="0.1" value="{{ block.defaults.min_contrast }}">
+                </label>
+                <label>
+                  <span class="label-title">Min entropy <span class="info-dot" tabindex="0" data-tip="Minimum entropy. Useful for rejecting low-information frames/images.">i</span></span>
+                  <input data-group-field="min_entropy" type="number" step="0.1" value="{{ block.defaults.min_entropy }}">
+                </label>
+                <label class="{% if block.coverage_kind != 'video' %}is-disabled{% endif %}">
+                  <span class="label-title">Force keep interval <span class="info-dot" tabindex="0" data-tip="Maximum number of consecutive candidate frames allowed to be skipped before keeping the best available candidate. Video only.">i</span></span>
+                  <input data-group-field="force_keep_interval" type="number" step="1" value="{{ block.defaults.force_keep_interval }}" {% if block.coverage_kind != 'video' %}disabled{% endif %}>
+                </label>
+              </div>
+            </section>
+            <div class="button-row">
+              <label class="checkbox-row">
+                <input type="checkbox" name="dry_run" value="true">
+                Dry run
+              </label>
+              <button type="submit" {% if block.conflict %}disabled{% endif %}>Queue preprocessing</button>
             </div>
-            <div class="time-markers">
-              {% for marker in block.markers %}
-                <span style="left:{{ '%.3f'|format(marker.left) }}%;">{{ marker.label }}</span>
-              {% endfor %}
-            </div>
+          </form>
+
+          <div class="source-review-grid">
+            <section>
+              <h3>Coverage</h3>
+              {% if block.coverage_kind == "video" %}
+                <div class="legend">
+                  <span style="--legend-color:#2267c7;">quality selected</span>
+                  <span style="--legend-color:#13a36f;">coverage fallback</span>
+                  <span style="--legend-color:rgba(101,112,128,0.45);">rejected</span>
+                  <span style="--legend-color:#b7791f;">trimmed</span>
+                  <span style="--legend-color:rgba(201,60,60,0.25);">coverage gap</span>
+                </div>
+                {% for timeline in block.timeline_blocks %}
+                  <section class="timeline-card">
+                    <h3>{{ timeline.source_id }}</h3>
+                    <div class="timeline-meta">
+                      selected {{ timeline.meta.selected }}
+                      {% if timeline.meta.quality is not none %}| quality {{ timeline.meta.quality }}{% endif %}
+                      {% if timeline.meta.fallback is not none %}| fallback {{ timeline.meta.fallback }}{% endif %}
+                      {% if timeline.meta.coverage_gaps is not none %}| coverage gaps {{ timeline.meta.coverage_gaps }}{% endif %}
+                      {% if timeline.meta.largest_gap_seconds is not none %}| largest gap {{ timeline.meta.largest_gap_seconds }}s{% endif %}
+                    </div>
+                    <div class="timeline-wrap">
+                      <div class="timeline-track">
+                        {% for gap in timeline.gaps %}
+                          <span class="gap-window" style="left:{{ '%.3f'|format(gap.left) }}%;width:{{ '%.3f'|format(gap.width) }}%;" title="{{ gap.title }}"></span>
+                        {% endfor %}
+                        {% for tick in timeline.ticks %}
+                          <span class="tick tick-{{ tick.decision }}" style="left:{{ '%.3f'|format(tick.left) }}%;" title="{{ tick.title }}"></span>
+                        {% endfor %}
+                      </div>
+                      <div class="time-markers">
+                        {% for marker in timeline.markers %}
+                          <span style="left:{{ '%.3f'|format(marker.left) }}%;">{{ marker.label }}</span>
+                        {% endfor %}
+                      </div>
+                    </div>
+                  </section>
+                {% else %}
+                  <div class="timeline-empty">No processed video timeline yet.</div>
+                {% endfor %}
+              {% elif block.coverage_kind == "images" %}
+                <div class="legend">
+                  <span style="--legend-color:#2267c7;">selected</span>
+                  <span style="--legend-color:rgba(101,112,128,0.45);">rejected</span>
+                </div>
+                {% if block.coverage_image_grid["items"] %}
+                  <div class="image-selection-grid">
+                    {% for item in block.coverage_image_grid["items"] %}
+                      <span class="image-selection-dot tick-{{ item.decision }}" title="{{ item.title }}"></span>
+                    {% endfor %}
+                  </div>
+                {% else %}
+                  <div class="timeline-empty">No processed coverage image grid yet.</div>
+                {% endif %}
+              {% else %}
+                <div class="timeline-empty">No coverage source for this location.</div>
+              {% endif %}
+            </section>
+
+            <section>
+              <h3>Hero Images</h3>
+              {% if block.hero_image_grid["items"] %}
+                <div class="image-selection-grid hero-grid">
+                  {% for item in block.hero_image_grid["items"] %}
+                    <span class="image-selection-dot tick-{{ item.decision }}" title="{{ item.title }}"></span>
+                  {% endfor %}
+                </div>
+              {% elif block.hero_images %}
+                <div class="image-selection-grid hero-grid">
+                  {% for item in block.hero_images %}
+                    <span class="image-selection-dot tick-selected" title="{{ item.relative_path }}{% if item.resolution %} | {{ item.resolution }}{% endif %}"></span>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <div class="timeline-empty">No hero images for this location.</div>
+              {% endif %}
+
+              <h3>Processing Results</h3>
+              <dl class="stat-list">
+                <dt>Selected</dt><dd>{{ block.result_summary.selected }}</dd>
+                <dt>Fallbacks</dt><dd>{{ block.result_summary.fallback }}</dd>
+                <dt>Gaps</dt><dd>{{ block.result_summary.gaps }}</dd>
+                <dt>Warnings</dt><dd>{{ block.result_summary.warnings|join(", ") }}</dd>
+              </dl>
+              <div class="table-wrap compact-quality-table">
+                <table class="compact">
+                  <thead><tr><th>Metric</th><th>Min</th><th>P10</th><th>P50</th><th>Mean</th><th>P90</th><th>Max</th></tr></thead>
+                  <tbody>
+                    {% for row in block.quality_rows %}
+                      <tr><th>{{ row.label }}</th><td>{{ row.distribution.min }}</td><td>{{ row.distribution.p10 }}</td><td>{{ row.distribution.p50 }}</td><td>{{ row.distribution.mean }}</td><td>{{ row.distribution.p90 }}</td><td>{{ row.distribution.max }}</td></tr>
+                    {% else %}
+                      <tr><td colspan="7" class="empty">No quality distribution available yet.</td></tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </section>
           </div>
         </section>
       {% else %}
-        <div class="timeline-empty">No coverage video timeline available yet.</div>
+        <section class="panel">
+          <p class="empty">Upload source files to create source-location preprocessing blocks.</p>
+        </section>
       {% endfor %}
-    </section>
-
-    <section class="panel">
-      <div class="panel-heading">
-        <h2>Coverage Images</h2>
-        {% if preprocess_image_grid["items"] %}
-          <span class="muted">
-            {{ preprocess_image_grid["counts"].get("selected", 0) }} selected
-            {% if preprocess_image_grid["counts"].get("rejected") %}| {{ preprocess_image_grid["counts"].get("rejected") }} rejected{% endif %}
-          </span>
-        {% else %}
-          <span class="muted">No coverage image set detected</span>
-        {% endif %}
-      </div>
-      <div class="legend">
-        <span style="--legend-color:#2267c7;">selected</span>
-        <span style="--legend-color:rgba(101,112,128,0.45);">rejected</span>
-      </div>
-      {% if preprocess_image_grid["items"] %}
-        <div class="image-selection-grid">
-          {% for item in preprocess_image_grid["items"] %}
-            <span class="image-selection-dot tick-{{ item.decision }}" title="{{ item.title }}"></span>
-          {% endfor %}
-        </div>
-      {% else %}
-        <div class="timeline-empty">No coverage image decisions available yet.</div>
-      {% endif %}
-    </section>
+    </div>
 
     {% if preprocess_runs %}
       <section class="panel">
