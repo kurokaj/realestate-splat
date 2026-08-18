@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git wget curl ca-certificates gnupg \
     build-essential cmake ninja-build pkg-config ccache \
     gcc-10 g++-10 \
-    python3 \
+    python3 python3-dev python3-pip \
     libboost-program-options-dev libboost-graph-dev libboost-system-dev libboost-filesystem-dev \
     libeigen3-dev libopenimageio-dev openimageio-tools libopenexr-dev \
     libmetis-dev libgoogle-glog-dev libgflags-dev \
@@ -73,6 +73,11 @@ RUN git clone --branch "${COLMAP_REF}" https://github.com/colmap/colmap.git \
       -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
     && ninja -j"${BUILD_JOBS}" \
     && ninja install \
+    && cd /opt/src/colmap \
+    && test -f python/pyproject.toml \
+    && mkdir -p /opt/pycolmap \
+    && CMAKE_ARGS="-Dcolmap_DIR=/opt/colmap-cuda/lib/cmake/colmap -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}" \
+      python3 -m pip install --no-cache-dir --target /opt/pycolmap ./python \
     && cd /opt/src \
     && rm -rf colmap
 
@@ -102,9 +107,11 @@ RUN curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2
 
 COPY --from=builder /opt/ceres-cuda /opt/ceres-cuda
 COPY --from=builder /opt/colmap-cuda /opt/colmap-cuda
+COPY --from=builder /opt/pycolmap /opt/pycolmap
 
 ENV PATH=/opt/colmap-cuda/bin:${PATH}
 ENV LD_LIBRARY_PATH=/opt/ceres-cuda/lib:/opt/colmap-cuda/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+ENV PYTHONPATH=/opt/pycolmap:${PYTHONPATH}
 
 RUN set -eux; \
     ldconfig; \
@@ -119,6 +126,7 @@ RUN set -eux; \
     colmap -h >/tmp/colmap_help.txt; \
     colmap global_mapper -h >/tmp/colmap_global_mapper_help.txt; \
     colmap view_graph_calibrator -h >/tmp/colmap_view_graph_calibrator_help.txt; \
+    python3 -c 'import pycolmap; assert hasattr(pycolmap, "match_image_pairs"); assert hasattr(pycolmap, "match_vocabtree"); print(pycolmap.__version__)' >/tmp/pycolmap_version.txt; \
     aws --version >/tmp/aws_version.txt
 
 # Future hardening option: preload COLMAP's ALIKED/LightGlue ONNX models into

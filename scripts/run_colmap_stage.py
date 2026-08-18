@@ -49,6 +49,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Absolute COLMAP binary path inside the GPU runtime.",
     )
     parser.add_argument("--config", type=Path, help="Optional JSON/YAML config passed to scripts/run_colmap.py.")
+    parser.add_argument(
+        "--matching-plan",
+        type=Path,
+        help="Local JSON matching plan. It is copied into the temporary COLMAP run before execution.",
+    )
     parser.add_argument("--mode", choices=["incremental", "global"], default="global", help="COLMAP mapper mode.")
     parser.add_argument(
         "--feature-extractor",
@@ -150,6 +155,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logs_dir.mkdir(parents=True, exist_ok=True)
         sync_directory(args.input_uri, input_dir, endpoint_url=args.endpoint_url)
         prepare_local_run(input_dir, local_run_dir)
+        if args.matching_plan is not None:
+            copy_if_exists(
+                args.matching_plan.expanduser(),
+                local_run_dir / "reports" / "matching_plan_input.json",
+            )
+            if not (local_run_dir / "reports" / "matching_plan_input.json").exists():
+                raise FileNotFoundError(f"Matching plan does not exist: {args.matching_plan}")
 
         colmap_result = run_colmap(args, local_run_dir, logs_dir)
         prepare_upload_payloads(
@@ -261,6 +273,8 @@ def build_colmap_command(args: argparse.Namespace, local_run_dir: Path) -> List[
         "--manifest-camera-groups" if args.manifest_camera_groups else "--no-manifest-camera-groups",
         "--overwrite",
     ]
+    if args.matching_plan is not None:
+        command.extend(["--matching-plan", str(local_run_dir / "reports" / "matching_plan_input.json")])
     if args.config is not None:
         command.extend(["--config", str(args.config)])
     if args.single_camera is not None:
@@ -306,6 +320,16 @@ def prepare_upload_payloads(
     report = read_json(report_path)
     write_json(current_dir / "reconstruction_report.json", report)
     write_json(history_dir / "reconstruction_report.json", report)
+    copy_if_exists(local_run_dir / "reports" / "matching_plan.json", current_dir / "matching_plan.json")
+    copy_if_exists(local_run_dir / "reports" / "matching_plan.json", history_dir / "matching_plan.json")
+    copy_if_exists(
+        local_run_dir / "colmap" / "logs" / "matching_stages" / "matching_results.json",
+        current_dir / "matching_results.json",
+    )
+    copy_if_exists(
+        local_run_dir / "colmap" / "logs" / "matching_stages" / "matching_results.json",
+        history_dir / "matching_results.json",
+    )
     generate_viewer_payloads(current_dir=current_dir, history_dir=history_dir)
 
     finished_at = utc_now()
@@ -456,6 +480,7 @@ def required_upload_objects(current_dir: Path) -> list[str]:
         "stage_result.json",
         "reconstruction_report.json",
         "matching_plan.json",
+        "matching_results.json",
         "viewer/sparse_scene.json",
         "sparse_txt/cameras.txt",
         "sparse_txt/images.txt",

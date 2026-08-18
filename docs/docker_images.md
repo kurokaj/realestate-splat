@@ -84,7 +84,7 @@ as build context:
 cd docker/colmap-gpu
 
 export IMAGE_NAME="docker.io/blackjokuro/buildvision3d-colmap-gpu"
-export IMAGE_TAG="cuda12.4-colmap-r2-runtime-onnx-cudnn-sm75-sm86-sm89-r3"
+export IMAGE_TAG="cuda12.4-colmap-r2-runtime-onnx-cudnn-pycolmap-sm75-sm86-sm89-r1"
 export CUDA_ARCHS="75;86;89"
 export BUILD_JOBS=8
 export COLMAP_REF="4.0.4"

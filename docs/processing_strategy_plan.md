@@ -454,6 +454,15 @@ After matching:
 - Execute sequential plus targeted matching.
 - Report hero registration and connection success.
 
+Implementation status:
+
+- The pinned COLMAP source is built with same-source PyCOLMAP bindings in the
+  runtime image.
+- A validated JSON plan can run per-group sequential stages and targeted
+  exhaustive or vocabulary-tree stages against the shared database.
+- The command-line and R2 stage wrappers accept a local matching plan; the UI
+  connection editor remains the next integration step.
+
 ### Phase 4: Multiple videos
 
 - Build one ordered group per video.

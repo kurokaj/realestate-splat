@@ -43,6 +43,7 @@ from controller_common.matching_plan import (
     matching_plan_summary,
     validate_matching_plan,
 )
+from controller_common.matching_executor import execute_matching_plan
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
@@ -126,8 +127,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--processing-strategy",
-        choices=["single"],
-        help="High-level matching strategy. Hybrid strategies will use the same plan model in a later phase.",
+        choices=["single", "video_plus_heroes", "multiple_videos", "multiple_videos_plus_heroes"],
+        help="High-level matching strategy. Hybrid strategies require --matching-plan.",
+    )
+    parser.add_argument(
+        "--matching-plan",
+        type=Path,
+        help="JSON matching plan. Omit for the current single-matcher compatibility path.",
     )
     parser.add_argument(
         "--feature-extractor",
@@ -469,8 +475,6 @@ def validate_settings(settings: Mapping[str, Any]) -> None:
         raise SystemExit("colmap.binary / --colmap-bin must be an absolute path; do not rely on PATH.")
     if settings.get("use_nerfstudio_colmap"):
         raise SystemExit("colmap.use_nerfstudio_colmap must be false; run_colmap.py owns reconstruction.")
-    if settings.get("processing_strategy", "single") != "single":
-        raise SystemExit("Only the single processing strategy is available in this phase.")
     if settings["mode"] not in {"incremental", "global"}:
         raise SystemExit("--mode must be incremental or global.")
     if settings["feature_extractor"] not in {"SIFT", "ALIKED_N16ROT", "ALIKED_N32"}:
@@ -918,6 +922,8 @@ def build_core_commands(
     settings: Mapping[str, Any],
     paths: Mapping[str, Path],
     option_names: ColmapOptionNames,
+    *,
+    include_matcher: bool = True,
 ) -> List[Tuple[str, List[str]]]:
     database_path = str(paths["database_path"])
     mapper_database_path = str(paths["database_global_path"] if should_run_view_graph_calibrator(settings) else paths["database_path"])
@@ -944,12 +950,10 @@ def build_core_commands(
     ]
     append_options(feature_command, settings.get("feature_options", {}))
 
-    matcher_command = build_matcher_command(colmap_bin, settings, database_path, option_names)
-
-    commands: List[Tuple[str, List[str]]] = [
-        ("feature_extractor", feature_command),
-        (f"{settings['matcher']}_matcher", matcher_command),
-    ]
+    commands: List[Tuple[str, List[str]]] = [("feature_extractor", feature_command)]
+    if include_matcher:
+        matcher_command = build_matcher_command(colmap_bin, settings, database_path, option_names)
+        commands.append((f"{settings['matcher']}_matcher", matcher_command))
 
     if should_run_view_graph_calibrator(settings):
         commands.append(
@@ -1289,6 +1293,7 @@ def build_report(
     image_count: int,
     image_manifest: Mapping[str, Any],
     matching_plan: Mapping[str, Any],
+    matching_results: Sequence[Mapping[str, Any]],
     colmap_bin: str,
     option_names: Optional[ColmapOptionNames],
     commands: Sequence[CommandResult],
@@ -1326,6 +1331,7 @@ def build_report(
         },
         "settings": {key: value for key, value in settings.items() if not str(key).startswith("_")},
         "matching_plan": matching_plan_summary(matching_plan),
+        "matching_results": list(matching_results),
         "environment": {
             "python": sys.version.split()[0],
             "platform": platform.platform(),
@@ -1585,6 +1591,7 @@ def print_dry_run(
     paths: Mapping[str, Path],
     settings: Mapping[str, Any],
     image_manifest: Mapping[str, Any],
+    matching_plan: Mapping[str, Any],
 ) -> None:
     print("Dry run. No files will be created or modified.\n")
     for name, command in commands:
@@ -1610,6 +1617,18 @@ def print_dry_run(
                     )
                 )
 
+    if matching_plan.get("strategy") != "single":
+        print("# PyCOLMAP matching stages:")
+        for stage in matching_plan.get("matching_stages", []):
+            print(
+                "#   {id}: {style} groups={groups} matching_type={matching_type}".format(
+                    id=stage.get("id"),
+                    style=stage.get("matching_style"),
+                    groups=stage.get("groups"),
+                    matching_type=stage.get("matching_type") or settings.get("matching_type"),
+                )
+            )
+
     assumed_model = paths["sparse_dir"] / "0"
     for _name, command in build_followup_commands("colmap", settings, paths, assumed_model):
         shown = list(command)
@@ -1623,7 +1642,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     run_dir = args.run.expanduser()
     image_manifest = load_image_manifest(run_dir)
     apply_manifest_camera_policy(settings, image_manifest)
-    matching_plan = build_single_matching_plan(image_manifest, settings)
+    if args.matching_plan is not None:
+        try:
+            matching_plan = json.loads(args.matching_plan.expanduser().read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"Could not read matching plan: {args.matching_plan}") from exc
+        if not isinstance(matching_plan, Mapping):
+            raise SystemExit("Matching plan root must be an object.")
+    else:
+        matching_plan = build_single_matching_plan(image_manifest, settings)
+        if str(settings.get("processing_strategy", "single")) != "single":
+            raise SystemExit("A hybrid processing strategy requires --matching-plan.")
     validate_matching_plan(matching_plan)
     paths = prepare_output_paths(run_dir, settings, args.overwrite, args.dry_run)
     if not args.dry_run:
@@ -1635,20 +1664,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     colmap_bin = resolve_colmap_bin(settings, args.dry_run)
     option_names = resolve_colmap_option_names(colmap_bin, settings, args.dry_run)
-    core_commands = build_core_commands(colmap_bin, settings, paths, option_names)
+    is_single_plan = matching_plan.get("strategy") == "single"
+    core_commands = build_core_commands(
+        colmap_bin,
+        settings,
+        paths,
+        option_names,
+        include_matcher=is_single_plan,
+    )
 
     if args.dry_run:
-        print_dry_run(core_commands, paths, settings, image_manifest)
+        print_dry_run(core_commands, paths, settings, image_manifest, matching_plan)
         return 0
 
     started_at = utc_now()
     command_results: List[CommandResult] = []
+    matching_results: List[Dict[str, Any]] = []
     selected_model: Optional[Path] = None
     status = "success"
     error: Optional[str] = None
 
     try:
+        deferred_commands: List[Tuple[str, List[str]]] = []
         for name, command in core_commands:
+            if not is_single_plan and name != "feature_extractor":
+                deferred_commands.append((name, command))
+                continue
             command_results.append(
                 run_command(
                     name,
@@ -1671,6 +1712,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     )
                 )
 
+        if not is_single_plan:
+            matching_results = execute_matching_plan(
+                plan=matching_plan,
+                image_manifest=image_manifest,
+                database_path=paths["database_path"],
+                work_dir=paths["logs_dir"] / "matching_stages",
+                matching_type=str(settings["matching_type"]),
+                use_gpu=bool(settings["use_gpu"]),
+                sequential_overlap=int(settings["sequential_overlap"]),
+            )
+
+            # Hybrid matching must be complete before view-graph calibration
+            # and mapping consume the database.
+            for name, command in deferred_commands:
+                command_results.append(run_command(name, command, paths["logs_dir"]))
+
         selected_model = find_sparse_model(paths["sparse_dir"])
         if selected_model is None:
             raise RuntimeError(f"COLMAP did not produce a sparse model under {paths['sparse_dir']}.")
@@ -1691,6 +1748,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             image_count=image_count,
             image_manifest=image_manifest,
             matching_plan=matching_plan,
+            matching_results=matching_results,
             colmap_bin=colmap_bin,
             option_names=option_names,
             commands=command_results,
@@ -1713,6 +1771,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         image_count=image_count,
         image_manifest=image_manifest,
         matching_plan=matching_plan,
+        matching_results=matching_results,
         colmap_bin=colmap_bin,
         option_names=option_names,
         commands=command_results,

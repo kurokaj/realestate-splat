@@ -20,6 +20,7 @@ SUPPORTED_STRATEGIES = {
     "multiple_videos",
     "multiple_videos_plus_heroes",
 }
+SUPPORTED_MATCHING_STYLES = {"sequential", "exhaustive", "vocab_tree"}
 
 
 def build_single_matching_plan(
@@ -105,6 +106,11 @@ def validate_matching_plan(plan: Mapping[str, Any]) -> None:
     for stage in stages:
         if not isinstance(stage, Mapping):
             raise ValueError("Matching plan stages must be objects")
+        style = stage.get("matching_style")
+        if style not in SUPPORTED_MATCHING_STYLES:
+            raise ValueError(f"Unsupported matching style in plan: {style}")
+        if not stage.get("groups"):
+            raise ValueError("Matching plan stages must reference at least one group")
         for group_id in stage.get("groups") or []:
             if group_id not in group_ids:
                 raise ValueError(f"Matching stage references unknown group: {group_id}")
