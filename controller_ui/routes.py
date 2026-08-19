@@ -731,7 +731,7 @@ def preprocess_review_context(project: dict[str, Any], stage_runs: list[dict[str
         summary = compact_summary
         videos = compact_summary.get("videos", []) if isinstance(compact_summary, dict) else []
     raw_summary = raw_source_summary(project)
-    group_reports = latest_group_capture_reports(preprocess_runs)
+    group_reports = latest_group_capture_reports(preprocess_runs, raw_summary)
     group_runs = latest_preprocess_runs_by_group(preprocess_runs)
     return {
         "latest_preprocess_run": latest_run,
@@ -750,14 +750,17 @@ def preprocess_review_context(project: dict[str, Any], stage_runs: list[dict[str
     }
 
 
-def latest_group_capture_reports(preprocess_runs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def latest_group_capture_reports(preprocess_runs: list[dict[str, Any]], raw_summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
     reports: dict[str, dict[str, Any]] = {}
+    current_group_keys = set(required_preprocess_group_keys(raw_summary))
     seen_groups: set[str] = set()
     for run in preprocess_runs:
         input_json = run.get("input_uri_json") if isinstance(run.get("input_uri_json"), dict) else {}
         if input_json.get("preprocess_scope") != "group":
             continue
         group_keys = preprocess_run_group_keys(run)
+        if current_group_keys:
+            group_keys = [group_key for group_key in group_keys if group_key in current_group_keys]
         if not group_keys:
             continue
         new_group_keys = [group_key for group_key in group_keys if group_key not in seen_groups]
