@@ -12,10 +12,14 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+ROOT_DIR = Path(__file__).resolve().parents[1]
+SRC_DIR = ROOT_DIR / "src"
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from controller_common.raw_upload import clear_preprocess_stale_groups, source_group_key  # noqa: E402
 from realestate_splat.cli import CommandResult, run_logged_command, utc_now, write_json  # noqa: E402
 from realestate_splat.stage_contract import StageResult, write_stage_result  # noqa: E402
 from realestate_splat.storage import sync_directory  # noqa: E402
@@ -105,6 +109,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
 
         upload_payloads(args, run_id, current_dir, history_dir)
+        clear_completed_group_stale_markers(args, local_run_dir)
         print(f"Preprocess stage complete: {run_id}")
         print(f"Current output: {args.output_uri.rstrip('/')}/current/")
         print(f"History output: {args.output_uri.rstrip('/')}/runs/{run_id}/")
@@ -217,9 +222,7 @@ def run_group_preprocess(
     for source in sources:
         if not isinstance(source, dict):
             continue
-        role = str(source.get("role") or "coverage_image")
-        location = str(source.get("location") or "unassigned")
-        grouped.setdefault(f"{role}:{location}", []).append(source)
+        grouped.setdefault(source_group_key(source), []).append(source)
 
     configs = {str(item.get("group_key")): item for item in requested if isinstance(item, dict) and item.get("group_key")}
     if not configs:
@@ -227,6 +230,7 @@ def run_group_preprocess(
             key: {"group_key": key, "profile": args.profile, "preprocess_args": list(args.preprocess_arg)}
             for key in grouped
         }
+    configs = include_location_hero_configs(configs, grouped)
     run_started = time.monotonic()
     merged_reports: List[Dict[str, Any]] = []
     merged_images: List[Dict[str, Any]] = []
@@ -263,11 +267,12 @@ def run_group_preprocess(
         report = read_json(group_output / "reports" / "capture_report.json")
         image_manifest = read_json(group_output / "reports" / "image_manifest.json")
         prefix = slug(group_key)
-        patch_group_artifacts(report, image_manifest, prefix, group_key, local_run_dir)
+        patch_group_artifacts(report, image_manifest, prefix, group_key, group_output, local_run_dir)
         merged_reports.append(report)
         merged_images.extend(image_manifest.get("images", []) if isinstance(image_manifest, dict) else [])
         group_summaries.append({"group_key": group_key, "profile": profile, "command": command, "duration_seconds": result.duration_seconds})
 
+    validate_selected_frame_files(local_run_dir, merged_images)
     aggregate_report = merge_group_reports(merged_reports, group_summaries, raw_dir, local_run_dir)
     reports_dir = local_run_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -286,19 +291,34 @@ def run_group_preprocess(
     )
 
 
+def include_location_hero_configs(
+    configs: Dict[str, Dict[str, Any]],
+    grouped: Dict[str, List[Dict[str, Any]]],
+) -> Dict[str, Dict[str, Any]]:
+    return dict(configs)
+
+
 def slug(value: str) -> str:
     return "".join(char if char.isalnum() else "_" for char in value.lower()).strip("_") or "group"
 
 
-def patch_group_artifacts(report: Dict[str, Any], image_manifest: Dict[str, Any], prefix: str, group_key: str, aggregate_dir: Path) -> None:
-    source_root = Path(str(report.get("out") or ""))
-    for path in sorted(source_root.glob("frames_selected/*")) if source_root.exists() else []:
+def patch_group_artifacts(
+    report: Dict[str, Any],
+    image_manifest: Dict[str, Any],
+    prefix: str,
+    group_key: str,
+    source_root: Path,
+    aggregate_dir: Path,
+) -> None:
+    for path in sorted((source_root / "frames_selected").glob("*")) if source_root.exists() else []:
         destination_name = f"{prefix}_{path.name}"
         shutil.copy2(path, aggregate_dir / "frames_selected" / destination_name)
         old = f"frames_selected/{path.name}"
         new = f"frames_selected/{destination_name}"
         replace_artifact_path(report, old, new)
         replace_artifact_path(image_manifest, old, new)
+        replace_artifact_path(image_manifest, path.name, destination_name)
+        replace_artifact_path(report, path.name, destination_name)
     for item in image_manifest.get("images", []) if isinstance(image_manifest, dict) else []:
         if isinstance(item, dict):
             role = str(item.get("role") or "coverage")
@@ -329,6 +349,21 @@ def replace_artifact_path(value: Any, old: str, new: str) -> None:
     elif isinstance(value, list):
         for child in value:
             replace_artifact_path(child, old, new)
+
+
+def validate_selected_frame_files(local_run_dir: Path, images: List[Dict[str, Any]]) -> None:
+    missing = []
+    for image in images:
+        image_name = image.get("image_name")
+        if not image_name:
+            continue
+        path = local_run_dir / "frames_selected" / str(image_name)
+        if not path.exists():
+            missing.append(str(image_name))
+        if len(missing) >= 5:
+            break
+    if missing:
+        raise RuntimeError("Grouped preprocess did not materialize selected frame files: " + ", ".join(missing))
 
 
 def merge_group_reports(reports: List[Dict[str, Any]], groups: List[Dict[str, Any]], raw_dir: Path, out_dir: Path) -> Dict[str, Any]:
@@ -616,7 +651,7 @@ def selected_timeline(capture_report: Dict[str, Any]) -> List[Dict[str, Any]]:
     for frame in frames:
         if not isinstance(frame, dict):
             continue
-        if frame.get("decision") not in {"selected", "coverage_fallback"}:
+        if frame.get("decision") not in {"selected", "coverage_fallback", "force_keep"}:
             continue
         timeline.append(
             {
@@ -652,6 +687,34 @@ def upload_payloads(args: argparse.Namespace, stage_run_id: str, current_dir: Pa
         endpoint_url=args.endpoint_url,
         delete=True,
         exclude=["capture_report.html"],
+    )
+
+
+def clear_completed_group_stale_markers(args: argparse.Namespace, local_run_dir: Path) -> None:
+    group_keys = processed_group_keys(local_run_dir)
+    if not group_keys:
+        return
+    result = clear_preprocess_stale_groups(
+        destination_uri=args.raw_uri,
+        group_keys=group_keys,
+        endpoint_url=args.endpoint_url,
+    )
+    if result.get("cleared_groups"):
+        print("Cleared raw preprocess stale groups: " + ", ".join(result["cleared_groups"]))
+
+
+def processed_group_keys(local_run_dir: Path) -> list[str]:
+    capture_report = read_json(local_run_dir / "reports" / "capture_report.json")
+    settings = capture_report.get("settings") if isinstance(capture_report, dict) else {}
+    groups = settings.get("groups") if isinstance(settings, dict) else []
+    if not isinstance(groups, list):
+        return []
+    return sorted(
+        {
+            str(group.get("group_key"))
+            for group in groups
+            if isinstance(group, dict) and group.get("group_key")
+        }
     )
 
 

@@ -420,7 +420,10 @@ def queue_preprocess(project_id: str, payload: PreprocessQueueRequest) -> dict[s
         raw_uri = payload.raw_uri or project.get("raw_uri")
         if not raw_uri:
             raise HTTPException(status_code=400, detail="Project raw_uri is required to queue preprocessing")
-        output_uri = payload.output_uri or f"r2://{default_r2_bucket()}/projects/{project_id}/preprocess"
+        output_uri = preprocess_output_base_uri(
+            payload.output_uri or f"r2://{default_r2_bucket()}/projects/{project_id}/preprocess",
+            project_id,
+        )
         require_r2_uri(raw_uri, "raw_uri")
         require_r2_uri(output_uri, "output_uri")
         preprocess_scope = "group" if len(payload.group_configs) == 1 else "project"
@@ -450,6 +453,15 @@ def queue_preprocess(project_id: str, payload: PreprocessQueueRequest) -> dict[s
 
 def api_slug(value: str) -> str:
     return "".join(char if char.isalnum() else "_" for char in value.lower()).strip("_") or "group"
+
+
+def preprocess_output_base_uri(value: str, project_id: str) -> str:
+    base = str(value or f"r2://{default_r2_bucket()}/projects/{project_id}/preprocess").rstrip("/")
+    while base.endswith("/current"):
+        base = base.rsplit("/current", 1)[0].rstrip("/")
+    if "/groups/" in base:
+        base = base.split("/groups/", 1)[0].rstrip("/")
+    return base
 
 
 @app.post("/projects/{project_id}/colmap", status_code=201)

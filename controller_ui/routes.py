@@ -38,6 +38,7 @@ from controller_common.runpod_gpus import (
     TRAINING_GPU_OPTIONS,
     normalize_gpu_name,
 )
+from controller_common.preprocess_assembly import assembled_project_preprocess_uri, preprocess_output_base_uri
 from src.realestate_splat.storage import copy_file, parse_storage_uri
 from scripts.preprocess_video import PROFILE_DEFAULTS
 from controller_common.raw_upload import source_group_key
@@ -73,6 +74,8 @@ COLMAP_CAMERA_MODEL_OPTIONS = [
     {"value": "PINHOLE", "label": "PINHOLE"},
     {"value": "SIMPLE_PINHOLE", "label": "SIMPLE_PINHOLE"},
 ]
+
+DEFAULT_PREPROCESS_PROFILE = "indoor_room"
 
 
 def json_pretty(value: Any) -> str:
@@ -173,7 +176,7 @@ def project_detail(request: Request, project_id: str) -> HTMLResponse:
     if data["project"] is None:
         raise HTTPException(status_code=404, detail="Project not found")
     review = preprocess_review_context(data["project"], data["stage_runs"])
-    colmap_review = colmap_review_context(data["project"], data["stage_runs"])
+    colmap_review = colmap_review_context(data["project"], data["stage_runs"], review["raw_source_summary"])
     training_review = training_review_context(data["project"], data["stage_runs"])
     return templates.TemplateResponse(
         request,
@@ -197,7 +200,7 @@ def ui_queue_preprocess(
     output_uri: Optional[str] = Form(default=None),
     endpoint_url: Optional[str] = Form(default=None),
     group_settings_json: Optional[str] = Form(default=None),
-    profile: str = Form(default="indoor_room"),
+    profile: str = Form(default=DEFAULT_PREPROCESS_PROFILE),
     candidate_fps: Optional[float] = Form(default=None),
     target_min: Optional[int] = Form(default=None),
     target_max: Optional[int] = Form(default=None),
@@ -223,7 +226,10 @@ def ui_queue_preprocess(
         resolved_raw_uri = empty_to_none(raw_uri) or project.get("raw_uri")
         if not resolved_raw_uri:
             raise HTTPException(status_code=400, detail="Project raw_uri is required to queue preprocessing")
-        resolved_output_uri = empty_to_none(output_uri) or f"r2://{default_r2_bucket()}/projects/{project_id}/preprocess"
+        resolved_output_uri = preprocess_output_base_uri(
+            empty_to_none(output_uri) or f"r2://{default_r2_bucket()}/projects/{project_id}/preprocess",
+            project_id,
+        )
         require_r2_uri(resolved_raw_uri, "raw_uri")
         require_r2_uri(resolved_output_uri, "output_uri")
         group_configs = parse_group_settings(group_settings_json)
@@ -296,10 +302,24 @@ def ui_queue_colmap(
         project = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
-        latest_preprocess = latest_stage_run(conn, project_id, "preprocess")
-        if not latest_preprocess or latest_preprocess.get("status") != "approved":
-            raise HTTPException(status_code=400, detail="Preprocess must be approved before COLMAP can be queued")
-        resolved_preprocess_uri = empty_to_none(preprocess_uri) or project.get("preprocess_current_uri")
+        preprocess_runs = rows_to_json(
+            conn.execute(
+                """
+                SELECT *
+                FROM stage_runs
+                WHERE project_id = %s AND stage = 'preprocess'
+                ORDER BY created_at DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        )
+        raw_summary = raw_source_summary(row_to_json(project))
+        if not all_location_preprocess_runs_approved(raw_summary, preprocess_runs):
+            raise HTTPException(status_code=400, detail="All source locations must have approved preprocess runs before COLMAP can be queued")
+        project_json = row_to_json(project)
+        assembled_preprocess_uri = assembled_project_preprocess_uri(project_json)
+        preprocess_group_outputs = approved_preprocess_group_outputs(raw_summary, preprocess_runs)
+        resolved_preprocess_uri = assembled_preprocess_uri or project.get("preprocess_current_uri")
         if not resolved_preprocess_uri:
             raise HTTPException(status_code=400, detail="Project preprocess_current_uri is required to queue COLMAP")
         resolved_output_uri = empty_to_none(output_uri) or f"r2://{default_r2_bucket()}/projects/{project_id}/colmap"
@@ -314,6 +334,8 @@ def ui_queue_colmap(
         resolved_vocab_tree = empty_to_none(vocab_tree) or default_colmap_vocab_tree()
         input_uri_json = {
             "preprocess_uri": resolved_preprocess_uri,
+            "preprocess_group_outputs": preprocess_group_outputs,
+            "raw_uri": project.get("raw_uri"),
             "output_uri": resolved_output_uri,
             "endpoint_url": empty_to_none(endpoint_url),
             "mode": mode,
@@ -448,10 +470,12 @@ def ui_cancel_stage_run(
 
 def run_stage_action(stage_run_id: str, notes: Optional[str], action: str) -> RedirectResponse:
     with connect() as conn:
-        stage_run = conn.execute("SELECT project_id FROM stage_runs WHERE id = %s", (stage_run_id,)).fetchone()
+        stage_run = conn.execute("SELECT project_id, status FROM stage_runs WHERE id = %s", (stage_run_id,)).fetchone()
         if stage_run is None:
             raise HTTPException(status_code=404, detail="Stage run not found")
         project_id = stage_run["project_id"]
+        if action == "approve" and stage_run["status"] == "approved":
+            return RedirectResponse(url=f"/ui/projects/{project_id}", status_code=303)
         with conn.transaction():
             try:
                 if action == "approve":
@@ -467,6 +491,8 @@ def run_stage_action(stage_run_id: str, notes: Optional[str], action: str) -> Re
             except LookupError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             except ValueError as exc:
+                if action == "approve" and "not awaiting approval" in str(exc):
+                    return RedirectResponse(url=f"/ui/projects/{project_id}", status_code=303)
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RedirectResponse(url=f"/ui/projects/{project_id}", status_code=303)
 
@@ -576,18 +602,31 @@ def apply_historical_approval_status(stage_runs: list[dict[str, Any]], approvals
 
 
 def apply_stage_history_labels(stage_runs: list[dict[str, Any]]) -> None:
-    latest_by_stage: dict[str, str] = {}
+    latest_by_scope: dict[str, str] = {}
     for run in stage_runs:
-        stage = run.get("stage")
+        scope_key = stage_run_history_scope(run)
         run_id = run.get("id")
-        if stage and run_id and stage not in latest_by_stage:
-            latest_by_stage[stage] = run_id
+        if scope_key and run_id and scope_key not in latest_by_scope:
+            latest_by_scope[scope_key] = run_id
     for run in stage_runs:
-        is_latest = latest_by_stage.get(run.get("stage")) == run.get("id")
+        is_latest = latest_by_scope.get(stage_run_history_scope(run)) == run.get("id")
         run["is_latest_stage_run"] = is_latest
         if not is_latest:
             run["status_label"] = "history run"
             run["status_css"] = "history"
+
+
+def stage_run_history_scope(run: dict[str, Any]) -> str:
+    stage = str(run.get("stage") or "unknown")
+    if stage != "preprocess":
+        return stage
+    group_keys = preprocess_run_group_keys(run)
+    if group_keys:
+        return f"{stage}:{','.join(group_keys)}"
+    input_json = run.get("input_uri_json") if isinstance(run.get("input_uri_json"), dict) else {}
+    if input_json.get("preprocess_scope") == "project":
+        return f"{stage}:project"
+    return f"{stage}:unknown"
 
 
 def apply_stage_durations(stage_runs: list[dict[str, Any]]) -> None:
@@ -627,15 +666,11 @@ def format_duration_label(seconds: float) -> str:
 def stage_signature(stage_runs: list[dict[str, Any]]) -> str:
     parts = []
     for run in stage_runs:
-        progress = run.get("progress_json") if isinstance(run.get("progress_json"), dict) else {}
         parts.append(
             ":".join(
                 [
                     str(run.get("id") or ""),
                     str(run.get("status") or ""),
-                    str(run.get("updated_at") or ""),
-                    str(progress.get("percent") or ""),
-                    str(progress.get("message") or ""),
                 ]
             )
         )
@@ -697,20 +732,19 @@ def preprocess_review_context(project: dict[str, Any], stage_runs: list[dict[str
         videos = compact_summary.get("videos", []) if isinstance(compact_summary, dict) else []
     raw_summary = raw_source_summary(project)
     group_reports = latest_group_capture_reports(preprocess_runs)
-    form_values = preprocess_form_values(project, latest_run, capture_report)
+    group_runs = latest_preprocess_runs_by_group(preprocess_runs)
     return {
         "latest_preprocess_run": latest_run,
         "preprocess_capture_report": capture_report,
         "preprocess_summary": summary,
         "preprocess_settings": preprocess_settings(latest_run, capture_report),
-        "preprocess_form_values": form_values,
+        "preprocess_form_values": preprocess_form_values(project, latest_run, capture_report),
         "preprocess_quality_rows": quality_distribution_rows(summary),
         "preprocess_video_timeline_blocks": video_timeline_blocks(capture_report, latest_run),
         "preprocess_image_grid": coverage_image_grid(capture_report),
-        "preprocess_location_blocks": preprocess_location_blocks(raw_summary, capture_report, form_values, group_reports),
+        "preprocess_location_blocks": preprocess_location_blocks(raw_summary, capture_report, group_reports, group_runs),
         "preprocess_video_rows": compact_video_rows(videos),
-        "preprocess_run_rows": preprocess_run_rows(preprocess_runs),
-        "preprocess_profile_defaults": ui_profile_defaults(),
+        "preprocess_run_rows": preprocess_run_rows(preprocess_runs, raw_summary),
         "raw_source_summary": raw_summary,
         "colmap_stats_rows": colmap_stats_rows(stage_runs),
     }
@@ -718,36 +752,99 @@ def preprocess_review_context(project: dict[str, Any], stage_runs: list[dict[str
 
 def latest_group_capture_reports(preprocess_runs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     reports: dict[str, dict[str, Any]] = {}
+    seen_groups: set[str] = set()
     for run in preprocess_runs:
         input_json = run.get("input_uri_json") if isinstance(run.get("input_uri_json"), dict) else {}
         if input_json.get("preprocess_scope") != "group":
             continue
-        group_configs = input_json.get("group_configs") if isinstance(input_json.get("group_configs"), list) else []
-        if len(group_configs) != 1 or not isinstance(group_configs[0], dict):
+        group_keys = preprocess_run_group_keys(run)
+        if not group_keys:
             continue
-        group_key = str(group_configs[0].get("group_key") or "")
-        if not group_key or group_key in reports:
+        new_group_keys = [group_key for group_key in group_keys if group_key not in seen_groups]
+        if not new_group_keys:
+            continue
+        seen_groups.update(new_group_keys)
+        if preprocess_run_is_active(run):
             continue
         report = load_capture_report(run)
-        if report:
+        if not report:
+            continue
+        for group_key in new_group_keys:
             reports[group_key] = report
     return reports
 
 
-def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, Any]]) -> dict[str, Any]:
+def latest_preprocess_runs_by_group(preprocess_runs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for run in preprocess_runs:
+        for group_key in preprocess_run_group_keys(run):
+            if group_key not in result:
+                result[group_key] = run
+    return result
+
+
+def all_location_preprocess_runs_approved(raw_summary: dict[str, Any], preprocess_runs: list[dict[str, Any]]) -> bool:
+    location_blocks = raw_summary.get("location_blocks") if isinstance(raw_summary, dict) else []
+    if not isinstance(location_blocks, list) or not location_blocks:
+        return False
+    latest_by_group = latest_preprocess_runs_by_group(preprocess_runs)
+    required_group_keys = [
+        str(block.get("coverage_group_key"))
+        for block in location_blocks
+        if isinstance(block, dict)
+        and not block.get("conflict")
+        and block.get("coverage_kind") in {"video", "images"}
+        and block.get("coverage_group_key")
+    ]
+    if not required_group_keys:
+        return False
+    for group_key in required_group_keys:
+        run = latest_by_group.get(group_key)
+        if not run or run.get("status") != "approved":
+            return False
+    return True
+
+
+def approved_preprocess_group_outputs(raw_summary: dict[str, Any], preprocess_runs: list[dict[str, Any]]) -> list[dict[str, str]]:
+    latest_by_group = latest_preprocess_runs_by_group(preprocess_runs)
+    outputs: list[dict[str, str]] = []
+    for group_key in required_preprocess_group_keys(raw_summary):
+        run = latest_by_group.get(group_key)
+        if not run or run.get("status") != "approved" or not run.get("output_uri"):
+            raise HTTPException(status_code=400, detail=f"Missing approved preprocess output for {group_key}")
+        outputs.append({"group_key": group_key, "output_uri": str(run["output_uri"]).rstrip("/")})
+    return outputs
+
+
+def required_preprocess_group_keys(raw_summary: dict[str, Any]) -> list[str]:
+    location_blocks = raw_summary.get("location_blocks") if isinstance(raw_summary, dict) else []
+    keys = []
+    for block in location_blocks if isinstance(location_blocks, list) else []:
+        if (
+            isinstance(block, dict)
+            and not block.get("conflict")
+            and block.get("coverage_kind") in {"video", "images"}
+            and block.get("coverage_group_key")
+        ):
+            keys.append(str(block["coverage_group_key"]))
+    return keys
+
+
+def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, Any]], raw_summary: dict[str, Any]) -> dict[str, Any]:
     preprocess_runs = [run for run in stage_runs if run.get("stage") == "preprocess"]
-    latest_preprocess = preprocess_runs[0] if preprocess_runs else None
+    preprocess_gate_open = all_location_preprocess_runs_approved(raw_summary, preprocess_runs)
     colmap_runs = [run for run in stage_runs if run.get("stage") == "colmap"]
     latest_run = colmap_runs[0] if colmap_runs else None
     input_json = latest_run.get("input_uri_json") if latest_run and isinstance(latest_run.get("input_uri_json"), dict) else {}
     selected_gpu = first_gpu_type(input_json.get("gpu_type_ids")) or DEFAULT_COLMAP_GPU
     colmap_output_base = project.get("colmap_current_uri", "").rsplit("/current", 1)[0] if project.get("colmap_current_uri") else ""
     feature_extractor = normalize_colmap_feature_extractor(input_json.get("feature_extractor") or "SIFT")
+    assembled_preprocess_uri = assembled_project_preprocess_uri(project)
     return {
-        "colmap_gate_open": bool(latest_preprocess and latest_preprocess.get("status") == "approved"),
+        "colmap_gate_open": preprocess_gate_open,
         "latest_colmap_run": latest_run,
         "colmap_form_values": {
-            "preprocess_uri": input_json.get("preprocess_uri") or project.get("preprocess_current_uri") or "",
+            "preprocess_uri": assembled_preprocess_uri,
             "output_uri": input_json.get("output_uri") or colmap_output_base,
             "endpoint_url": input_json.get("endpoint_url") or "",
             "mode": input_json.get("mode") or "global",
@@ -809,31 +906,6 @@ def training_review_context(project: dict[str, Any], stage_runs: list[dict[str, 
     }
 
 
-def ui_profile_defaults() -> dict[str, dict[str, Any]]:
-    visible_fields = {
-        "candidate_fps",
-        "target_min",
-        "target_max",
-        "min_blur",
-        "min_brightness",
-        "max_brightness",
-        "min_contrast",
-        "min_entropy",
-        "force_keep_interval",
-        "coverage_window_seconds",
-        "min_frames_per_window",
-        "coverage_hard_min_blur",
-        "coverage_hard_min_brightness",
-        "coverage_hard_max_brightness",
-        "coverage_hard_min_contrast",
-        "coverage_hard_min_entropy",
-    }
-    return {
-        profile: {key: value for key, value in defaults.items() if key in visible_fields}
-        for profile, defaults in sorted(PROFILE_DEFAULTS.items())
-    }
-
-
 def raw_source_summary(project: dict[str, Any]) -> dict[str, Any]:
     raw_uri = project.get("raw_uri") if project else None
     if not raw_uri:
@@ -853,7 +925,8 @@ def raw_source_summary(project: dict[str, Any]) -> dict[str, Any]:
     sources = manifest.get("sources") if isinstance(manifest, dict) else []
     if not isinstance(sources, list):
         sources = []
-    stale_groups = set(manifest.get("preprocess_stale_groups") or [])
+    stale_reasons = manifest.get("preprocess_stale_reasons") if isinstance(manifest.get("preprocess_stale_reasons"), dict) else {}
+    stale_groups = {str(group_key) for group_key in stale_reasons}
     compact_sources = compact_raw_sources(sources, stale_groups)
     return {
         "loaded": True,
@@ -903,15 +976,15 @@ def raw_source_location_blocks(sources: list[dict[str, Any]]) -> list[dict[str, 
         if has_video:
             block["coverage_kind"] = "video"
             block["coverage_count"] = len(block["coverage_videos"])
-            block["coverage_group_key"] = f"coverage_video:{location}"
+            block["coverage_group_key"] = f"location:{location}"
         elif has_images:
             block["coverage_kind"] = "images"
             block["coverage_count"] = len(block["coverage_images"])
-            block["coverage_group_key"] = f"coverage_image:{location}"
+            block["coverage_group_key"] = f"location:{location}"
         else:
             block["coverage_kind"] = "none"
             block["coverage_count"] = 0
-            block["coverage_group_key"] = f"hero_image:{location}"
+            block["coverage_group_key"] = f"location:{location}"
         block["hero_count"] = len(block["hero_images"])
         blocks.append(block)
     return blocks
@@ -1128,6 +1201,8 @@ def humanize_key(value: str) -> str:
 def load_capture_report(run: Optional[dict[str, Any]]) -> dict[str, Any]:
     if not run:
         return {}
+    if preprocess_run_is_active(run):
+        return {}
     output_uri = run.get("output_uri")
     if not output_uri:
         return {}
@@ -1135,6 +1210,13 @@ def load_capture_report(run: Optional[dict[str, Any]]) -> dict[str, Any]:
         return load_json_uri(f"{output_uri.rstrip('/')}/capture_report.json")
     except Exception:
         return {}
+
+
+def preprocess_run_is_active(run: dict[str, Any]) -> bool:
+    return str(run.get("status") or "") in {
+        "preprocess_queued",
+        "preprocess_running",
+    }
 
 
 def load_json_uri(uri: str) -> dict[str, Any]:
@@ -1157,7 +1239,7 @@ def preprocess_settings(run: Optional[dict[str, Any]], capture_report: dict[str,
     if not run:
         return {}
     input_json = run.get("input_uri_json") if isinstance(run.get("input_uri_json"), dict) else {}
-    profile = str(input_json.get("profile") or "indoor_room")
+    profile = str(input_json.get("profile") or DEFAULT_PREPROCESS_PROFILE)
     settings = dict(PROFILE_DEFAULTS.get(profile, {}))
     settings["profile"] = profile
     settings.update(parse_preprocess_args(input_json.get("preprocess_args")))
@@ -1178,11 +1260,12 @@ def preprocess_form_values(project: dict[str, Any], run: Optional[dict[str, Any]
     input_json = run.get("input_uri_json") if run and isinstance(run.get("input_uri_json"), dict) else {}
     settings = preprocess_settings(run, capture_report)
     preprocess_current_uri = project.get("preprocess_current_uri") or ""
+    output_uri = input_json.get("output_uri") or preprocess_current_uri.rsplit("/current", 1)[0] or f"r2://{default_r2_bucket()}/projects/{project.get('id')}/preprocess"
     return {
         "raw_uri": input_json.get("raw_uri") or project.get("raw_uri") or "",
-        "output_uri": input_json.get("output_uri") or preprocess_current_uri.rsplit("/current", 1)[0] or "",
+        "output_uri": preprocess_output_base_uri(output_uri, str(project.get("id") or "")),
         "endpoint_url": input_json.get("endpoint_url") or "",
-        "profile": settings.get("profile") or input_json.get("profile") or "indoor_room",
+        "profile": settings.get("profile") or input_json.get("profile") or DEFAULT_PREPROCESS_PROFILE,
         **settings,
     }
 
@@ -1229,13 +1312,42 @@ def parse_preprocess_args(values: Any) -> dict[str, Any]:
     return parsed
 
 
-def preprocess_run_rows(stage_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def preprocess_run_rows(stage_runs: list[dict[str, Any]], raw_summary: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+    current_group_keys = set(required_preprocess_group_keys(raw_summary or {}))
     rows = []
     for run in stage_runs:
         run_copy = dict(run)
+        run_copy["preprocess_location"] = preprocess_run_location_label(run_copy)
+        group_keys = set(preprocess_run_group_keys(run_copy))
+        if current_group_keys and group_keys and group_keys.isdisjoint(current_group_keys):
+            run_copy["is_latest_stage_run"] = False
+            run_copy["status_label"] = "history run"
+            run_copy["status_css"] = "history"
         run_copy.update(preprocess_run_metrics(run_copy))
         rows.append(run_copy)
     return rows
+
+
+def preprocess_run_group_keys(run: dict[str, Any]) -> list[str]:
+    input_json = run.get("input_uri_json") if isinstance(run.get("input_uri_json"), dict) else {}
+    group_configs = input_json.get("group_configs") if isinstance(input_json.get("group_configs"), list) else []
+    keys = []
+    for item in group_configs:
+        if isinstance(item, dict) and item.get("group_key"):
+            keys.append(str(item["group_key"]))
+    return keys
+
+
+def preprocess_run_location_label(run: dict[str, Any]) -> str:
+    keys = preprocess_run_group_keys(run)
+    if not keys:
+        return "project"
+    locations = []
+    for key in keys:
+        location = key.split(":", 1)[1] if ":" in key else key
+        if location not in locations:
+            locations.append(location)
+    return ", ".join(locations)
 
 
 def preprocess_run_metrics(run: dict[str, Any]) -> dict[str, Any]:
@@ -1245,9 +1357,11 @@ def preprocess_run_metrics(run: dict[str, Any]) -> dict[str, Any]:
     if not rows:
         return {"selected_total": "", "fallback_total": "", "gap_total": "", "warning_summary": ""}
     warning_count = sum(len(row.get("warnings", [])) for row in rows)
+    selected_by = summary.get("selected_by") if isinstance(summary.get("selected_by"), dict) else {}
+    force_keep_total = int(selected_by.get("force_keep") or 0)
     return {
         "selected_total": sum(int(row.get("selected_frame_count") or 0) for row in rows),
-        "fallback_total": sum(int(row.get("fallback_count") or 0) for row in rows),
+        "fallback_total": force_keep_total,
         "gap_total": sum(int(row.get("coverage_gaps") or 0) for row in rows),
         "warning_summary": f"{warning_count} warning{'s' if warning_count != 1 else ''}" if warning_count else "",
     }
@@ -1280,22 +1394,33 @@ def quality_distribution_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
 def preprocess_location_blocks(
     raw_summary: dict[str, Any],
     capture_report: dict[str, Any],
-    form_values: dict[str, Any],
     group_reports: Optional[dict[str, dict[str, Any]]] = None,
+    group_runs: Optional[dict[str, dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
-    defaults = PROFILE_DEFAULTS.get(str(form_values.get("profile") or "indoor_room"), {})
     blocks = []
     for raw_block in raw_summary.get("location_blocks", []):
         if not isinstance(raw_block, dict):
             continue
         location = str(raw_block.get("location") or "unassigned")
         coverage_group_key = str(raw_block.get("coverage_group_key") or f"coverage_image:{location}")
-        review_report = (group_reports or {}).get(coverage_group_key) or capture_report
+        active_run = (group_runs or {}).get(coverage_group_key)
+        hero_group_key = f"hero_image:{location}"
+        if active_run is None:
+            active_run = (group_runs or {}).get(hero_group_key)
+        review_report = (group_reports or {}).get(coverage_group_key)
+        if review_report is None and active_run is None:
+            review_report = capture_report
+        if review_report is None:
+            review_report = {}
         summary = group_summary(review_report, coverage_group_key, location)
+        field_values = preprocess_parameter_values(active_run)
         block = {
             **raw_block,
             "group_key": coverage_group_key,
-            "defaults": {key: form_values.get(key, defaults.get(key)) for key in ui_preprocess_field_names()},
+            "hero_group_key": hero_group_key,
+            "latest_run": active_run,
+            "last_parameter_rows": preprocess_parameter_rows(active_run),
+            "form_values": field_values,
             "timeline_blocks": [
                 item for item in full_timeline_blocks(review_report)
                 if item.get("group_key") == coverage_group_key or item.get("location") == location
@@ -1307,6 +1432,42 @@ def preprocess_location_blocks(
         }
         blocks.append(block)
     return blocks
+
+
+def preprocess_parameter_values(run: Optional[dict[str, Any]]) -> dict[str, Any]:
+    values = {
+        key: value
+        for key, value in PROFILE_DEFAULTS.get(DEFAULT_PREPROCESS_PROFILE, {}).items()
+        if key in ui_preprocess_field_names()
+    }
+    if run:
+        input_json = run.get("input_uri_json") if isinstance(run.get("input_uri_json"), dict) else {}
+        group_configs = input_json.get("group_configs") if isinstance(input_json.get("group_configs"), list) else []
+        if group_configs and isinstance(group_configs[0], dict):
+            values.update(parse_preprocess_args(group_configs[0].get("preprocess_args")))
+        else:
+            values.update(parse_preprocess_args(input_json.get("preprocess_args")))
+    return values
+
+
+def preprocess_parameter_rows(run: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
+    values = preprocess_parameter_values(run)
+    fields = [
+        ("Candidate FPS", "candidate_fps"),
+        ("Target min", "target_min"),
+        ("Target max", "target_max"),
+        ("Min blur", "min_blur"),
+        ("Brightness min", "min_brightness"),
+        ("Brightness max", "max_brightness"),
+        ("Min contrast", "min_contrast"),
+        ("Min entropy", "min_entropy"),
+        ("Force keep interval", "force_keep_interval"),
+    ]
+    return [
+        {"label": label, "value": values.get(key)}
+        for label, key in fields
+        if values.get(key) not in (None, "", [], {})
+    ]
 
 
 def ui_preprocess_field_names() -> tuple[str, ...]:
@@ -1336,13 +1497,23 @@ def group_summary(capture_report: dict[str, Any], group_key: str, location: str)
 
 
 def compact_group_result_summary(capture_report: dict[str, Any], group_key: str, location: str) -> dict[str, Any]:
+    if not capture_report:
+        return {
+            "selected": "",
+            "force_keep": "",
+            "gaps": "",
+            "warnings": [],
+            "coverage_selected": "",
+            "coverage_rejected": "",
+            "hero_count": "",
+        }
     frames = group_frames(capture_report, group_key, location)
     videos = [
         video for video in capture_report.get("videos", []) if isinstance(video, dict)
         and (video.get("group_key") == group_key or video.get("location") == location)
     ] if isinstance(capture_report, dict) else []
     selected = sum(1 for frame in frames if image_decision(frame) == "selected")
-    fallback = sum(1 for frame in frames if frame.get("selected_by") == "coverage_fallback")
+    force_keep = sum(1 for frame in frames if frame.get("selected_by") == "force_keep" or frame.get("decision") == "force_keep")
     gaps = 0
     warnings: list[str] = []
     for video in videos:
@@ -1353,7 +1524,7 @@ def compact_group_result_summary(capture_report: dict[str, Any], group_key: str,
     hero_images = hero_image_grid(capture_report, location=location)
     return {
         "selected": selected,
-        "fallback": fallback,
+        "force_keep": force_keep,
         "gaps": gaps,
         "warnings": sorted(set(warnings)),
         "coverage_selected": coverage_images["counts"].get("selected", 0),
@@ -1497,6 +1668,7 @@ def full_timeline_blocks(capture_report: dict[str, Any]) -> list[dict[str, Any]]
         max_time = max([duration, *[float(frame.get("timestamp_seconds") or 0.0) for frame in source_frames], 0.001])
         coverage = video.get("coverage") if isinstance(video.get("coverage"), dict) else {}
         selected_by = video.get("selected_by") if isinstance(video.get("selected_by"), dict) else {}
+        force_keep_count = selected_by.get("force_keep", 0)
         blocks.append(
             {
                 "source_id": source_id,
@@ -1505,7 +1677,7 @@ def full_timeline_blocks(capture_report: dict[str, Any]) -> list[dict[str, Any]]
                 "meta": {
                     "selected": video.get("selected_frame_count"),
                     "quality": selected_by.get("quality", 0),
-                    "fallback": video.get("coverage_fallback_frame_count") or coverage.get("coverage_fallback_frame_count"),
+                    "force_keep": force_keep_count,
                     "coverage_gaps": coverage.get("windows_below_minimum_count", 0),
                     "largest_gap_seconds": coverage.get("largest_selected_gap_seconds"),
                 },
@@ -1532,7 +1704,7 @@ def compact_selected_timeline_blocks(summary: dict[str, Any]) -> list[dict[str, 
         blocks.append(
             {
                 "source_id": source_id,
-                "meta": {"selected": len(frames), "quality": None, "fallback": None, "coverage_gaps": None, "largest_gap_seconds": None},
+                "meta": {"selected": len(frames), "quality": None, "force_keep": None, "coverage_gaps": None, "largest_gap_seconds": None},
                 "ticks": [timeline_tick(frame, max_time) for frame in frames],
                 "gaps": [],
                 "markers": time_markers(max_time),
@@ -1545,6 +1717,9 @@ def compact_selected_timeline_blocks(summary: dict[str, Any]) -> list[dict[str, 
 def timeline_tick(frame: dict[str, Any], max_time: float) -> dict[str, Any]:
     timestamp = float(frame.get("timestamp_seconds") or 0.0)
     decision = str(frame.get("decision") or frame.get("selected_by") or "selected")
+    selected_by = str(frame.get("selected_by") or "")
+    if selected_by in {"force_keep", "coverage_fallback"}:
+        decision = selected_by
     if decision == "quality":
         decision = "selected"
     return {
@@ -1570,7 +1745,7 @@ def video_hover_title(frame: dict[str, Any], decision: str) -> str:
     timestamp = frame.get("timestamp_seconds")
     blur_score = frame.get("blur_score")
     parts = [f"{timestamp}s", f"blur {blur_score}"]
-    if decision not in {"selected", "coverage_fallback"}:
+    if decision not in {"selected", "coverage_fallback", "force_keep"}:
         parts.append(str(frame.get("reject_reason") or decision))
     return " | ".join(parts)
 
@@ -1579,14 +1754,14 @@ def image_hover_title(frame: dict[str, Any], decision: str) -> str:
     filename = frame.get("source_image") or frame.get("output_file") or frame.get("frame_index") or "image"
     blur_score = frame.get("blur_score")
     parts = [Path(str(filename)).name, f"blur {blur_score}"]
-    if decision not in {"selected", "coverage_fallback"}:
+    if decision not in {"selected", "coverage_fallback", "force_keep"}:
         parts.append(str(frame.get("reject_reason") or decision))
     return " | ".join(parts)
 
 
 def image_decision(frame: dict[str, Any]) -> str:
     decision = str(frame.get("decision") or frame.get("selected_by") or "selected")
-    if decision in {"quality", "selected", "coverage_fallback"}:
+    if decision in {"quality", "selected", "coverage_fallback", "force_keep"}:
         return "selected"
     return "rejected"
 

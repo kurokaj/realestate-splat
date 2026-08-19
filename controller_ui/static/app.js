@@ -20,12 +20,19 @@ function optionList(options) {
   return options.map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
 }
 
+let lastFormEditAt = 0;
+
+function markFormEdited() {
+  lastFormEditAt = Date.now();
+}
+
 function setupRawUploadForm(form) {
   const fileInput = form.querySelector('input[type="file"]');
   const tableWrap = form.querySelector(".upload-table-wrap");
   const tbody = form.querySelector("#upload-metadata-table tbody");
   const result = form.querySelector("#upload-result");
   const metadataInput = form.querySelector('input[name="metadata_json"]');
+  const batchLocationInput = form.querySelector('input[name="batch_location"]');
 
   fileInput.addEventListener("change", () => {
     tbody.innerHTML = "";
@@ -35,7 +42,6 @@ function setupRawUploadForm(form) {
       row.innerHTML = `
         <td class="mono">${file.name}</td>
         <td><select data-field="role">${optionList(fileRoleOptions())}</select></td>
-        <td><input data-field="location" placeholder="room / angle"></td>
         <td><select data-field="colmap_policy">${optionList(colmapPolicyOptions())}</select></td>
       `;
       tbody.appendChild(row);
@@ -49,13 +55,13 @@ function setupRawUploadForm(form) {
     result.textContent = "Uploading...";
 
     const metadata = [];
+    const batchLocation = (batchLocationInput?.value || "").trim();
     tbody.querySelectorAll("tr").forEach((row) => {
       const role = row.querySelector('[data-field="role"]').value;
-      const location = row.querySelector('[data-field="location"]').value.trim();
       const colmapPolicy = row.querySelector('[data-field="colmap_policy"]').value;
       const item = { filename: row.dataset.filename };
       if (role && role !== "auto") item.role = role;
-      if (location) item.location = location;
+      if (batchLocation) item.location = batchLocation;
       if (colmapPolicy) item.colmap_policy = colmapPolicy;
       if (Object.keys(item).length > 1) metadata.push(item);
     });
@@ -120,28 +126,30 @@ function setupRawUploadForm(form) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  document.addEventListener("input", markFormEdited, true);
+  document.addEventListener("change", markFormEdited, true);
   document.querySelectorAll("#raw-upload-form").forEach(setupRawUploadForm);
   document.querySelectorAll(".preprocess-queue-form").forEach((form) => {
-    setupPreprocessProfileDefaults(form);
     setupPreprocessDependencyState(form);
+    setupPreprocessDraftPersistence(form);
     form.addEventListener("submit", () => {
       const hidden = form.querySelector('input[name="group_settings_json"]');
       if (!hidden) return;
-      const fields = ["profile", "candidate_fps", "target_min", "target_max", "min_blur", "min_brightness", "max_brightness", "min_contrast", "min_entropy", "force_keep_interval"];
+      const fields = ["candidate_fps", "target_min", "target_max", "min_blur", "min_brightness", "max_brightness", "min_contrast", "min_entropy", "force_keep_interval"];
       const groups = Array.from(form.querySelectorAll("[data-preprocess-group]")).map((card) => {
         const item = { group_key: card.dataset.preprocessGroup, preprocess_args: [] };
         const values = {};
         fields.forEach((field) => {
           const input = card.querySelector(`[data-group-field="${field}"]`);
           if (!input || input.value === "") return;
-          if (field === "profile") item.profile = input.value;
-          else values[field] = input.type === "number" ? Number(input.value) : input.value;
+          values[field] = input.type === "number" ? Number(input.value) : input.value;
         });
         const flags = { candidate_fps: "--candidate-fps", target_min: "--target-min", target_max: "--target-max", min_blur: "--min-blur", min_brightness: "--min-brightness", max_brightness: "--max-brightness", min_contrast: "--min-contrast", min_entropy: "--min-entropy", force_keep_interval: "--force-keep-interval" };
         Object.entries(values).forEach(([key, value]) => { item.preprocess_args.push(flags[key], String(value)); });
         return item;
       });
       hidden.value = JSON.stringify(groups);
+      clearPreprocessDraft(form);
     });
   });
   document.querySelectorAll('form[action$="/colmap"]').forEach((form) => {
@@ -151,7 +159,6 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll('form[action$="/training"]').forEach(setupProviderDependencyState);
   setupTabs();
   setupAutoRefresh();
-  document.querySelectorAll("[data-colmap-viewer-url]").forEach(setupColmapViewer);
 });
 
 function setupColmapFormBehavior(form) {
@@ -210,6 +217,9 @@ function setupTabs() {
     buttons.forEach((item) => item.classList.toggle("is-active", item.dataset.tabTarget === target));
     panels.forEach((panel) => panel.classList.toggle("is-active", panel.dataset.tabPanel === target));
     if (storageKey) sessionStorage.setItem(storageKey, target);
+    if (target === "colmap") {
+      setupVisibleColmapViewers();
+    }
   }
 
   const requested = window.location.hash.replace("#", "");
@@ -224,37 +234,68 @@ function setupTabs() {
       activate(button.dataset.tabTarget);
     });
   });
+
+  if (document.querySelector('[data-tab-panel="colmap"].is-active')) {
+    setupVisibleColmapViewers();
+  }
 }
 
-function setupPreprocessProfileDefaults(form) {
-  let defaultsByProfile = {};
+function setupVisibleColmapViewers() {
+  document.querySelectorAll('[data-tab-panel="colmap"].is-active [data-colmap-viewer-url]').forEach((root) => {
+    if (root.dataset.viewerInitialized === "true") return;
+    root.dataset.viewerInitialized = "true";
+    setupColmapViewer(root);
+  });
+}
+
+function setupPreprocessDraftPersistence(form) {
+  restorePreprocessDraft(form);
+  form.addEventListener("input", () => savePreprocessDraft(form));
+  form.addEventListener("change", () => savePreprocessDraft(form));
+}
+
+function preprocessDraftKey(form) {
+  const projectRoot = document.querySelector("[data-project-id]");
+  const projectId = projectRoot?.dataset.projectId || "unknown-project";
+  const group = form.querySelector("[data-preprocess-group]");
+  const groupKey = group?.dataset.preprocessGroup || "project";
+  return `buildvision3d:${projectId}:preprocess-draft:${groupKey}`;
+}
+
+function preprocessDraftFields(form) {
+  return Array.from(form.querySelectorAll("[data-group-field]"));
+}
+
+function savePreprocessDraft(form) {
+  const values = {};
+  preprocessDraftFields(form).forEach((input) => {
+    values[input.dataset.groupField] = input.value;
+  });
+  form.dataset.userDirty = "true";
+  sessionStorage.setItem(preprocessDraftKey(form), JSON.stringify(values));
+}
+
+function restorePreprocessDraft(form) {
+  let values = {};
   try {
-    defaultsByProfile = JSON.parse(form.dataset.profileDefaults || "{}");
+    values = JSON.parse(sessionStorage.getItem(preprocessDraftKey(form)) || "{}");
   } catch {
-    defaultsByProfile = {};
+    values = {};
   }
-  const profileSelect = form.querySelector('select[name="profile"]');
-  if (!profileSelect) return;
-
-  profileSelect.addEventListener("change", () => {
-    const defaults = defaultsByProfile[profileSelect.value] || {};
-    Object.entries(defaults).forEach(([field, value]) => {
-      const input = form.querySelector(`[name="${CSS.escape(field)}"]`);
-      if (input) input.value = value;
-    });
+  if (!values || typeof values !== "object") return;
+  let restored = false;
+  preprocessDraftFields(form).forEach((input) => {
+    if (Object.prototype.hasOwnProperty.call(values, input.dataset.groupField)) {
+      input.value = values[input.dataset.groupField];
+      restored = true;
+    }
   });
+  if (restored) form.dataset.userDirty = "true";
+}
 
-  form.querySelectorAll("[data-preprocess-group]").forEach((group) => {
-    const select = group.querySelector('[data-group-field="profile"]');
-    if (!select) return;
-    select.addEventListener("change", () => {
-      const defaults = defaultsByProfile[select.value] || {};
-      Object.entries(defaults).forEach(([field, value]) => {
-        const input = group.querySelector(`[data-group-field="${CSS.escape(field)}"]`);
-        if (input) input.value = value;
-      });
-    });
-  });
+function clearPreprocessDraft(form) {
+  form.dataset.userDirty = "false";
+  sessionStorage.removeItem(preprocessDraftKey(form));
 }
 
 function setupPreprocessDependencyState(form) {
@@ -309,6 +350,14 @@ function setupAutoRefresh() {
     "training_pod_starting",
     "training_running",
   ]);
+  currentSignature = compactStageSignature(currentSignature);
+
+  function userIsEditing() {
+    const active = document.activeElement;
+    const editable = active?.matches?.("input, select, textarea");
+    const hasDirtyPreprocessForm = Boolean(document.querySelector('.preprocess-queue-form[data-user-dirty="true"]'));
+    return Boolean(editable) || hasDirtyPreprocessForm || Date.now() - lastFormEditAt < 15000;
+  }
 
   async function poll() {
     try {
@@ -317,14 +366,10 @@ function setupAutoRefresh() {
       });
       if (!response.ok) return;
       const runs = await response.json();
-      const nextSignature = runs
-        .map((run) => {
-          const progress = run.progress_json || {};
-          return `${run.id || ""}:${run.status || ""}:${run.updated_at || ""}:${progress.percent || ""}:${progress.message || ""}`;
-        })
-        .join("|");
+      const nextSignature = runs.map(stageRunSignature).join("|");
       const hasActiveRun = runs.some((run) => activeStatuses.has(run.status));
       if (nextSignature && nextSignature !== currentSignature) {
+        if (userIsEditing()) return;
         window.location.reload();
         return;
       }
@@ -338,6 +383,18 @@ function setupAutoRefresh() {
   }
 
   const timer = window.setInterval(poll, 5000);
+}
+
+function stageRunSignature(run) {
+  return `${run.id || ""}:${run.status || ""}`;
+}
+
+function compactStageSignature(signature) {
+  return String(signature || "")
+    .split("|")
+    .filter(Boolean)
+    .map((part) => part.split(":").slice(0, 2).join(":"))
+    .join("|");
 }
 
 async function setupColmapViewer(root) {

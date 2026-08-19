@@ -254,7 +254,7 @@ def append_argparse_value(command: list[str], option: str, value: Any) -> None:
 
 def run_runpod_colmap(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]:
     stage_run_id = stage_run["id"]
-    inputs = stage_run["input_uri_json"] or {}
+    inputs = dict(stage_run["input_uri_json"] or {})
     preprocess_uri = inputs.get("preprocess_uri") or inputs.get("input_uri")
     output_base_uri = inputs.get("output_uri")
     if not preprocess_uri:
@@ -488,6 +488,11 @@ def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str
         "--colmap-bin",
         inputs.get("colmap_bin", "/opt/colmap-cuda/bin/colmap"),
     ]
+    if inputs.get("raw_uri"):
+        command.extend(["--raw-uri", inputs["raw_uri"]])
+    for group_output in inputs.get("preprocess_group_outputs", []):
+        if isinstance(group_output, dict):
+            command.extend(["--preprocess-group-output", json.dumps(group_output, separators=(",", ":"))])
     if inputs.get("vocab_tree"):
         command.extend(["--vocab-tree", inputs["vocab_tree"]])
     for colmap_arg in inputs.get("colmap_args", []):

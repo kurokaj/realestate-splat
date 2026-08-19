@@ -656,6 +656,15 @@ summary {
   overflow-wrap: anywhere;
 }
 
+.compact-stat-list {
+  background: #fbfcfd;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  grid-template-columns: minmax(90px, 0.34fr) minmax(0, 0.66fr) minmax(90px, 0.34fr) minmax(0, 0.66fr);
+  margin-bottom: 16px;
+  padding: 12px;
+}
+
 .inline-form {
   display: grid;
   gap: 5px;
@@ -749,6 +758,11 @@ pre {
 }
 
 .tick-coverage_fallback {
+  background: #13a36f;
+  z-index: 3;
+}
+
+.tick-force_keep {
   background: #13a36f;
   z-index: 3;
 }

@@ -118,9 +118,17 @@ def upload_raw_directory(
     if duplicate_videos and not override_video:
         location, paths = next(iter(duplicate_videos.items()))
         raise DuplicateCoverageVideoError(location, paths)
+    deleted_group_keys: set[str] = set()
     if not dry_run:
         if (duplicate_videos or coverage_conflicts) and override_video:
             replacement_locations = set(duplicate_videos) | set(coverage_conflicts)
+            deleted_group_keys = {
+                source_group_key(source)
+                for source in existing_sources
+                if isinstance(source, dict)
+                and source.get("role") in {"coverage_video", "coverage_image"}
+                and str(source.get("location") or "unassigned") in replacement_locations
+            }
             old_paths = {
                 source.get("relative_path")
                 for source in existing_sources
@@ -136,10 +144,14 @@ def upload_raw_directory(
                 "sources": [source for source in existing_sources if source.get("relative_path") not in old_paths],
             }
         manifest = merge_with_existing_manifest(manifest, destination_uri, endpoint_url, existing=existing)
-    manifest["preprocess_stale_groups"] = sorted(
-        set(existing.get("preprocess_stale_groups") or [])
-        | {source_group_key(source) for source in incoming_sources if isinstance(source, dict)}
-    )
+    stale_reasons = dict(existing.get("preprocess_stale_reasons") or {})
+    for group_key in deleted_group_keys:
+        stale_reasons[group_key] = "deleted"
+    for source in incoming_sources:
+        if isinstance(source, dict):
+            stale_reasons[source_group_key(source)] = "uploaded"
+    manifest["preprocess_stale_reasons"] = stale_reasons
+    manifest["preprocess_stale_groups"] = sorted(stale_reasons)
     sync_directory(
         input_dir,
         destination_uri,
@@ -166,9 +178,10 @@ def utc_now() -> str:
 
 def load_manifest(destination_uri: str, endpoint_url: Optional[str]) -> dict[str, Any]:
     manifest_uri = f"{destination_uri.rstrip('/')}/sources_manifest.json"
-    with tempfile.NamedTemporaryFile("w+b", suffix=".json") as handle:
+    with tempfile.TemporaryDirectory(prefix="buildvision3d-load-manifest-") as temp_dir:
+        manifest_path = Path(temp_dir) / "sources_manifest.json"
         try:
-            copy_file(manifest_uri, handle.name, endpoint_url=endpoint_url)
+            copy_file(manifest_uri, manifest_path, endpoint_url=endpoint_url)
         except subprocess.CalledProcessError as exc:
             if exc.returncode == 1:
                 return {}
@@ -177,9 +190,8 @@ def load_manifest(destination_uri: str, endpoint_url: Optional[str]) -> dict[str
             return {}
         except Exception as exc:
             raise RuntimeError(f"Existing raw sources manifest could not be loaded: {manifest_uri}") from exc
-        handle.seek(0)
         try:
-            payload = json.loads(handle.read().decode("utf-8"))
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"Existing raw sources manifest is not valid JSON: {manifest_uri}") from exc
     return payload if isinstance(payload, dict) else {}
@@ -213,7 +225,7 @@ def merge_with_existing_manifest(
 
 
 def source_group_key(source: dict[str, Any]) -> str:
-    return f"{source.get('role') or 'unknown'}:{source.get('location') or 'unassigned'}"
+    return f"location:{source.get('location') or 'unassigned'}"
 
 
 def duplicate_coverage_videos(sources: Iterable[Any]) -> dict[str, list[str]]:
@@ -255,19 +267,21 @@ def remove_raw_source(
     if len(remaining) == len(sources):
         raise ValueError(f"Raw source is not present in the manifest: {safe_path}")
     if not dry_run:
+        deleted_groups = {
+            source_group_key(source)
+            for source in sources
+            if isinstance(source, dict) and source.get("relative_path") == safe_path
+        }
+        stale_reasons = dict(manifest.get("preprocess_stale_reasons") or {})
+        for group_key in deleted_groups:
+            stale_reasons[group_key] = "deleted"
         delete_file(f"{destination_uri.rstrip('/')}/{safe_path}", endpoint_url=endpoint_url)
         manifest = {
             **manifest,
             "updated_at": utc_now(),
             "sources": remaining,
-            "preprocess_stale_groups": sorted(
-                set(manifest.get("preprocess_stale_groups") or [])
-                | {
-                    source_group_key(source)
-                    for source in sources
-                    if isinstance(source, dict) and source.get("relative_path") == safe_path
-                },
-            ),
+            "preprocess_stale_reasons": stale_reasons,
+            "preprocess_stale_groups": sorted(stale_reasons),
         }
         with tempfile.TemporaryDirectory(prefix="buildvision3d-raw-remove-") as temp_dir:
             manifest_path = Path(temp_dir) / "sources_manifest.json"
@@ -278,6 +292,39 @@ def remove_raw_source(
                 endpoint_url=endpoint_url,
             )
     return {"relative_path": safe_path, "remaining_source_count": len(remaining), "dry_run": dry_run}
+
+
+def clear_preprocess_stale_groups(
+    *,
+    destination_uri: str,
+    group_keys: Iterable[str],
+    endpoint_url: Optional[str],
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Clear stale markers for groups that were successfully preprocessed."""
+    manifest = load_manifest(destination_uri, endpoint_url)
+    stale_reasons = dict(manifest.get("preprocess_stale_reasons") or {})
+    cleared = []
+    for group_key in sorted({str(key) for key in group_keys if key}):
+        if group_key in stale_reasons:
+            stale_reasons.pop(group_key, None)
+            cleared.append(group_key)
+    manifest = {
+        **manifest,
+        "updated_at": utc_now(),
+        "preprocess_stale_reasons": stale_reasons,
+        "preprocess_stale_groups": sorted(stale_reasons),
+    }
+    if not dry_run and cleared:
+        with tempfile.TemporaryDirectory(prefix="buildvision3d-raw-clear-stale-") as temp_dir:
+            manifest_path = Path(temp_dir) / "sources_manifest.json"
+            write_json(manifest_path, manifest)
+            copy_file(
+                manifest_path,
+                f"{destination_uri.rstrip('/')}/sources_manifest.json",
+                endpoint_url=endpoint_url,
+            )
+    return {"cleared_groups": cleared, "remaining_stale_groups": sorted(stale_reasons), "dry_run": dry_run}
 
 
 def metadata_overrides_by_filename(metadata: Optional[dict[str, Any]]) -> dict[str, dict[str, Any]]:

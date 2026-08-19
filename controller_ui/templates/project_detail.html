@@ -47,6 +47,10 @@
             <input name="destination_uri" value="{{ project.raw_uri or default_raw_uri }}">
           </label>
           <label>
+            Batch location
+            <input name="batch_location" placeholder="livingroom / hallway / livingroom_kitchen">
+          </label>
+          <label>
             Files
             <input name="files" type="file" multiple required>
           </label>
@@ -56,7 +60,6 @@
                 <tr>
                   <th>File</th>
                   <th>Role</th>
-                  <th>Location</th>
                   <th>COLMAP</th>
                 </tr>
               </thead>
@@ -164,8 +167,8 @@
               {% elif block.stale %}
                 <span class="status status-history">needs reprocess</span>
               {% endif %}
-              {% if latest_preprocess_run %}
-                <span class="status status-{{ latest_preprocess_run.status }}">{{ latest_preprocess_run.status }}</span>
+              {% if block.latest_run %}
+                <span class="status status-{{ block.latest_run.status_css or block.latest_run.status }}">{{ block.latest_run.status_label or block.latest_run.status }}</span>
               {% endif %}
             </div>
           </div>
@@ -178,7 +181,6 @@
             method="post"
             action="/ui/projects/{{ project.id }}/preprocess"
             class="stack preprocess-queue-form"
-            data-profile-defaults='{{ preprocess_profile_defaults|tojson }}'
           >
             <input name="raw_uri" type="hidden" value="{{ preprocess_form_values.raw_uri or project.raw_uri or default_raw_uri }}">
             <input name="output_uri" type="hidden" value="{{ preprocess_form_values.output_uri or default_preprocess_uri }}">
@@ -187,40 +189,32 @@
             <section class="preprocess-group-card" data-preprocess-group="{{ block.group_key }}">
               <div class="grid three tight">
                 <label>
-                  <span class="label-title">Profile <span class="info-dot" tabindex="0" data-tip="Preset defaults for this source location. Changing this fills the visible threshold fields.">i</span></span>
-                  <select name="profile" data-group-field="profile">
-                    {% for profile_name in preprocess_profile_defaults %}
-                      <option value="{{ profile_name }}" {% if profile_name == (preprocess_form_values.profile or 'indoor_room') %}selected{% endif %}>{{ profile_name }}</option>
-                    {% endfor %}
-                  </select>
-                </label>
-                <label>
                   <span class="label-title">Candidate FPS <span class="info-dot" tabindex="0" data-tip="How many candidate frames per second to score from this video. Images ignore this.">i</span></span>
-                  <input data-group-field="candidate_fps" type="number" step="0.1" value="{{ block.defaults.candidate_fps }}">
+                  <input data-group-field="candidate_fps" type="number" step="0.1" value="{{ block.form_values.candidate_fps }}">
                 </label>
                 <label>
                   <span class="label-title">Target min/max <span class="info-dot" tabindex="0" data-tip="Desired selected image count range for this source location.">i</span></span>
-                  <span class="split-inputs"><input data-group-field="target_min" type="number" value="{{ block.defaults.target_min }}"><input data-group-field="target_max" type="number" value="{{ block.defaults.target_max }}"></span>
+                  <span class="split-inputs"><input data-group-field="target_min" type="number" value="{{ block.form_values.target_min }}"><input data-group-field="target_max" type="number" value="{{ block.form_values.target_max }}"></span>
                 </label>
                 <label>
                   <span class="label-title">Min blur <span class="info-dot" tabindex="0" data-tip="Minimum blur score. Raise to reject more soft frames/images; lower if too many are rejected.">i</span></span>
-                  <input data-group-field="min_blur" type="number" step="0.1" value="{{ block.defaults.min_blur }}">
+                  <input data-group-field="min_blur" type="number" step="0.1" value="{{ block.form_values.min_blur }}">
                 </label>
                 <label>
                   <span class="label-title">Brightness min/max <span class="info-dot" tabindex="0" data-tip="Allowed mean brightness range for this source location.">i</span></span>
-                  <span class="split-inputs"><input data-group-field="min_brightness" type="number" step="0.1" value="{{ block.defaults.min_brightness }}"><input data-group-field="max_brightness" type="number" step="0.1" value="{{ block.defaults.max_brightness }}"></span>
+                  <span class="split-inputs"><input data-group-field="min_brightness" type="number" step="0.1" value="{{ block.form_values.min_brightness }}"><input data-group-field="max_brightness" type="number" step="0.1" value="{{ block.form_values.max_brightness }}"></span>
                 </label>
                 <label>
                   <span class="label-title">Min contrast <span class="info-dot" tabindex="0" data-tip="Minimum grayscale contrast for this source location.">i</span></span>
-                  <input data-group-field="min_contrast" type="number" step="0.1" value="{{ block.defaults.min_contrast }}">
+                  <input data-group-field="min_contrast" type="number" step="0.1" value="{{ block.form_values.min_contrast }}">
                 </label>
                 <label>
                   <span class="label-title">Min entropy <span class="info-dot" tabindex="0" data-tip="Minimum entropy. Useful for rejecting low-information frames/images.">i</span></span>
-                  <input data-group-field="min_entropy" type="number" step="0.1" value="{{ block.defaults.min_entropy }}">
+                  <input data-group-field="min_entropy" type="number" step="0.1" value="{{ block.form_values.min_entropy }}">
                 </label>
                 <label class="{% if block.coverage_kind != 'video' %}is-disabled{% endif %}">
                   <span class="label-title">Force keep interval <span class="info-dot" tabindex="0" data-tip="Maximum number of consecutive candidate frames allowed to be skipped before keeping the best available candidate. Video only.">i</span></span>
-                  <input data-group-field="force_keep_interval" type="number" step="1" value="{{ block.defaults.force_keep_interval }}" {% if block.coverage_kind != 'video' %}disabled{% endif %}>
+                  <input data-group-field="force_keep_interval" type="number" step="1" value="{{ block.form_values.force_keep_interval }}" {% if block.coverage_kind != 'video' %}disabled{% endif %}>
                 </label>
               </div>
             </section>
@@ -235,11 +229,22 @@
 
           <div class="source-review-grid">
             <section>
+              <h3>Last Parameters</h3>
+              {% if block.last_parameter_rows %}
+                <dl class="stat-list compact-stat-list">
+                  {% for row in block.last_parameter_rows %}
+                    <dt>{{ row.label }}</dt><dd>{{ row.value }}</dd>
+                  {% endfor %}
+                </dl>
+              {% else %}
+                <div class="timeline-empty">No completed run parameters yet.</div>
+              {% endif %}
+
               <h3>Coverage</h3>
               {% if block.coverage_kind == "video" %}
                 <div class="legend">
                   <span style="--legend-color:#2267c7;">quality selected</span>
-                  <span style="--legend-color:#13a36f;">coverage fallback</span>
+                  <span style="--legend-color:#13a36f;">force keep</span>
                   <span style="--legend-color:rgba(101,112,128,0.45);">rejected</span>
                   <span style="--legend-color:#b7791f;">trimmed</span>
                   <span style="--legend-color:rgba(201,60,60,0.25);">coverage gap</span>
@@ -250,7 +255,7 @@
                     <div class="timeline-meta">
                       selected {{ timeline.meta.selected }}
                       {% if timeline.meta.quality is not none %}| quality {{ timeline.meta.quality }}{% endif %}
-                      {% if timeline.meta.fallback is not none %}| fallback {{ timeline.meta.fallback }}{% endif %}
+                      {% if timeline.meta.force_keep is not none %}| force keep {{ timeline.meta.force_keep }}{% endif %}
                       {% if timeline.meta.coverage_gaps is not none %}| coverage gaps {{ timeline.meta.coverage_gaps }}{% endif %}
                       {% if timeline.meta.largest_gap_seconds is not none %}| largest gap {{ timeline.meta.largest_gap_seconds }}s{% endif %}
                     </div>
@@ -290,9 +295,7 @@
               {% else %}
                 <div class="timeline-empty">No coverage source for this location.</div>
               {% endif %}
-            </section>
 
-            <section>
               <h3>Hero Images</h3>
               {% if block.hero_image_grid["items"] %}
                 <div class="image-selection-grid hero-grid">
@@ -309,11 +312,13 @@
               {% else %}
                 <div class="timeline-empty">No hero images for this location.</div>
               {% endif %}
+            </section>
 
+            <section>
               <h3>Processing Results</h3>
               <dl class="stat-list">
                 <dt>Selected</dt><dd>{{ block.result_summary.selected }}</dd>
-                <dt>Fallbacks</dt><dd>{{ block.result_summary.fallback }}</dd>
+                <dt>Force kept</dt><dd>{{ block.result_summary.force_keep }}</dd>
                 <dt>Gaps</dt><dd>{{ block.result_summary.gaps }}</dd>
                 <dt>Warnings</dt><dd>{{ block.result_summary.warnings|join(", ") }}</dd>
               </dl>

@@ -774,6 +774,11 @@ def best_quality_frames(records: Sequence[FrameRecord], limit: int) -> List[Fram
     return ranked[:limit]
 
 
+def best_quality_frame(records: Sequence[FrameRecord]) -> Optional[FrameRecord]:
+    best = best_quality_frames(records, 1)
+    return best[0] if best else None
+
+
 def coverage_fallback_allowed(record: FrameRecord, settings: Dict[str, Any]) -> bool:
     if record.blur_score < float(settings["coverage_hard_min_blur"]):
         return False
@@ -814,6 +819,7 @@ def finalize_selection(
     mandatory: List[FrameRecord] = []
     mandatory_ids: set = set()
     coverage_fallback_ids: set = set()
+    force_keep_ids: set = set()
 
     if records and min_frames_per_window > 0 and window_seconds > 0:
         windows = records_by_coverage_window(records, window_seconds)
@@ -836,6 +842,27 @@ def finalize_selection(
                 add_unique_frame(mandatory, mandatory_ids, record)
                 coverage_fallback_ids.add(id(record))
 
+    force_keep_interval = int(settings.get("force_keep_interval") or 0)
+    if records and force_keep_interval > 0:
+        selected_ids_for_gaps = normal_ids | mandatory_ids
+        ordered_records = sorted(records, key=lambda record: (record.timestamp_seconds, record.frame_index))
+        selected_positions = [
+            index for index, record in enumerate(ordered_records)
+            if id(record) in selected_ids_for_gaps
+        ]
+        previous = -1
+        for selected_position in selected_positions + [len(ordered_records)]:
+            gap = ordered_records[previous + 1:selected_position]
+            while len(gap) > force_keep_interval:
+                candidate = best_quality_frame(gap[:force_keep_interval + 1])
+                if candidate is None:
+                    break
+                add_unique_frame(mandatory, mandatory_ids, candidate)
+                force_keep_ids.add(id(candidate))
+                candidate_offset = gap.index(candidate)
+                gap = gap[candidate_offset + 1:]
+            previous = selected_position
+
     pool: List[FrameRecord] = []
     pool_ids: set = set()
     for record in mandatory:
@@ -844,10 +871,7 @@ def finalize_selection(
         add_unique_frame(pool, pool_ids, record)
 
     if len(mandatory) >= target_max:
-        selected_final = pick_evenly(
-            sorted(mandatory, key=lambda record: (record.timestamp_seconds, record.frame_index)),
-            target_max,
-        )
+        selected_final = sorted(mandatory, key=lambda record: (record.timestamp_seconds, record.frame_index))
     else:
         extra_budget = target_max - len(mandatory)
         extra_candidates = [
@@ -865,7 +889,12 @@ def finalize_selection(
     for record in records:
         if id(record) in selected_ids:
             record.selected_final = True
-            record.selected_by = "coverage_fallback" if id(record) in coverage_fallback_ids else "quality"
+            if id(record) in coverage_fallback_ids:
+                record.selected_by = "coverage_fallback"
+            elif id(record) in force_keep_ids:
+                record.selected_by = "force_keep"
+            else:
+                record.selected_by = "quality"
         elif record.selected_initial:
             record.reject_reason = "trimmed_after_target_max"
 
@@ -1594,8 +1623,8 @@ def build_multi_capture_report(
 
 def frame_record_to_dict(record: FrameRecord) -> Dict[str, Any]:
     data = asdict(record)
-    if record.selected_final and record.selected_by == "coverage_fallback":
-        data["decision"] = "coverage_fallback"
+    if record.selected_final and record.selected_by in {"coverage_fallback", "force_keep"}:
+        data["decision"] = record.selected_by
     elif record.selected_final:
         data["decision"] = "selected"
     elif record.reject_reason == "trimmed_after_target_max":
@@ -1645,7 +1674,7 @@ def metric_table(report: Dict[str, Any]) -> str:
 
 
 def selected_frame_rows(report: Dict[str, Any], limit: int = 100) -> str:
-    selected = [frame for frame in report["frames"] if frame["decision"] in {"selected", "coverage_fallback"}]
+    selected = [frame for frame in report["frames"] if frame["decision"] in {"selected", "coverage_fallback", "force_keep"}]
     rows = []
     for frame in selected[:limit]:
         rows.append(
@@ -1690,6 +1719,9 @@ def timeline_segments(frames: Sequence[Dict[str, Any]], duration_seconds: Option
         timestamp = float(frame.get("timestamp_seconds") or 0.0)
         left = max(0.0, min(100.0, (timestamp / max_time) * 100.0))
         decision = str(frame.get("decision") or "rejected")
+        selected_by = str(frame.get("selected_by") or "")
+        if selected_by in {"coverage_fallback", "force_keep"}:
+            decision = selected_by
         title = (
             "{time}s | {decision} | blur {blur} | brightness {brightness} | {file}".format(
                 time=frame.get("timestamp_seconds"),
@@ -1767,7 +1799,7 @@ def video_timeline_blocks(report: Dict[str, Any]) -> str:
         summary = {
             "selected": video.get("selected_frame_count"),
             "quality": selected_by.get("quality", 0),
-            "coverage_fallback": video.get("coverage_fallback_frame_count"),
+            "force_keep": selected_by.get("force_keep", 0),
             "largest_gap_seconds": largest_gap if largest_gap is not None else "n/a",
             "coverage_gaps": coverage.get("windows_below_minimum_count", 0),
         }
@@ -1787,7 +1819,7 @@ def video_timeline_blocks(report: Dict[str, Any]) -> str:
 """.format(
                 source=html.escape(source_id),
                 meta=html.escape(
-                    "selected {selected} | quality {quality} | fallback {coverage_fallback} | coverage gaps {coverage_gaps} | largest gap {largest_gap_seconds}s".format(
+                    "selected {selected} | quality {quality} | force keep {force_keep} | coverage gaps {coverage_gaps} | largest gap {largest_gap_seconds}s".format(
                         **summary
                     )
                 ),
@@ -1804,7 +1836,7 @@ def video_summary_rows(report: Dict[str, Any]) -> str:
     for video in report.get("videos", []):
         coverage = video.get("coverage", {})
         rows.append(
-            "<tr><td>{source}</td><td>{path}</td><td>{duration}</td><td>{resolution}</td><td>{candidates}</td><td>{selected}</td><td>{fallback}</td><td>{gap}</td><td>{warnings}</td></tr>".format(
+            "<tr><td>{source}</td><td>{path}</td><td>{duration}</td><td>{resolution}</td><td>{candidates}</td><td>{selected}</td><td>{force_keep}</td><td>{gap}</td><td>{warnings}</td></tr>".format(
                 source=html.escape(str(video.get("source_id"))),
                 path=html.escape(str(video.get("path"))),
                 duration=html.escape(str(video.get("video", {}).get("duration_seconds"))),
@@ -1816,7 +1848,7 @@ def video_summary_rows(report: Dict[str, Any]) -> str:
                 ),
                 candidates=html.escape(str(video.get("candidate_frame_count"))),
                 selected=html.escape(str(video.get("selected_frame_count"))),
-                fallback=html.escape(str(video.get("coverage_fallback_frame_count"))),
+                force_keep=html.escape(str((video.get("selected_by") or {}).get("force_keep", 0))),
                 gap=html.escape(str(coverage.get("largest_selected_gap_seconds"))),
                 warnings=html.escape(", ".join(video.get("warnings") or [])),
             )
@@ -2036,6 +2068,10 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
       background: #13a36f;
       z-index: 3;
     }}
+    .tick-force_keep {{
+      background: #13a36f;
+      z-index: 3;
+    }}
     .tick-rejected {{
       background: rgba(101, 112, 128, 0.32);
       height: 24px;
@@ -2103,7 +2139,7 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
 
   <h2>Videos</h2>
   <table>
-    <tr><th>Source</th><th>Path</th><th>Duration (s)</th><th>Resolution</th><th>Candidates</th><th>Selected</th><th>Fallback</th><th>Largest Gap (s)</th><th>Warnings</th></tr>
+    <tr><th>Source</th><th>Path</th><th>Duration (s)</th><th>Resolution</th><th>Candidates</th><th>Selected</th><th>Force kept</th><th>Largest Gap (s)</th><th>Warnings</th></tr>
     {video_rows}
   </table>
 
@@ -2142,7 +2178,7 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
   <p class="note">Each tick is a scored candidate frame. Red background bands mark coverage windows that still have no selected frame.</p>
   <div class="legend">
     <span style="--legend-color:#2267c7;">quality selected</span>
-    <span style="--legend-color:#13a36f;">coverage fallback</span>
+    <span style="--legend-color:#13a36f;">force keep</span>
     <span style="--legend-color:rgba(101,112,128,0.45);">rejected</span>
     <span style="--legend-color:#b7791f;">trimmed</span>
     <span style="--legend-color:rgba(201,60,60,0.25);">coverage gap</span>

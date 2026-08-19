@@ -22,6 +22,7 @@ from realestate_splat.cli import CommandResult, run_logged_command, utc_now, wri
 from realestate_splat.stage_contract import StageResult, write_stage_result  # noqa: E402
 from realestate_splat.storage import copy_file, sync_directory  # noqa: E402
 from controller_common.colmap_viewer import write_sparse_viewer_payload  # noqa: E402
+from controller_common.preprocess_assembly import assemble_preprocess_groups_local, parse_group_output_specs  # noqa: E402
 
 
 DEFAULT_COLMAP_BIN = Path("/opt/colmap-cuda/bin/colmap")
@@ -37,6 +38,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--input-uri",
         required=True,
         help="Preprocess current URI, e.g. r2://bucket/projects/id/preprocess/current.",
+    )
+    parser.add_argument("--raw-uri", help="Optional raw project URI used only to copy sources_manifest.json into the local COLMAP input.")
+    parser.add_argument(
+        "--preprocess-group-output",
+        action="append",
+        default=[],
+        metavar="JSON",
+        help=(
+            "Approved grouped preprocess output as JSON with group_key and output_uri. "
+            "When provided, groups are downloaded and assembled locally instead of syncing --input-uri."
+        ),
     )
     parser.add_argument("--output-uri", required=True, help="COLMAP output URI, e.g. r2://bucket/projects/id/colmap.")
     parser.add_argument("--endpoint-url", help="S3-compatible endpoint URL. For r2://, R2_ENDPOINT is used by default.")
@@ -153,7 +165,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         input_dir.mkdir(parents=True, exist_ok=True)
         logs_dir.mkdir(parents=True, exist_ok=True)
-        sync_directory(args.input_uri, input_dir, endpoint_url=args.endpoint_url)
+        group_outputs = parse_group_output_specs(args.preprocess_group_output)
+        if group_outputs:
+            assemble_preprocess_groups_local(
+                group_outputs=group_outputs,
+                destination_dir=input_dir,
+                endpoint_url=args.endpoint_url,
+                project_id=args.project_id,
+                raw_uri=args.raw_uri or "",
+            )
+        else:
+            sync_directory(args.input_uri, input_dir, endpoint_url=args.endpoint_url)
         prepare_local_run(input_dir, local_run_dir)
         if args.matching_plan is not None:
             copy_if_exists(
@@ -220,7 +242,10 @@ def print_plan(
     history_dir: Path,
 ) -> None:
     print(f"Stage run id: {run_id}")
-    print(f"$ sync {args.input_uri} -> {input_dir}")
+    if args.preprocess_group_output:
+        print(f"$ assemble {len(args.preprocess_group_output)} preprocess group outputs -> {input_dir}")
+    else:
+        print(f"$ sync {args.input_uri} -> {input_dir}")
     print(f"$ prepare local COLMAP run -> {local_run_dir}")
     print("$ " + " ".join(build_colmap_command(args, local_run_dir)))
     print(f"$ prepare current payload -> {current_dir}")

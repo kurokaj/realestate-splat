@@ -6,14 +6,18 @@
     <thead>
       <tr>
         <th>Run</th>
-        <th>Stage</th>
+        {% if stage_table_variant == "preprocess" %}
+          <th>Location</th>
+        {% else %}
+          <th>Stage</th>
+        {% endif %}
         <th>Status</th>
         <th>Provider</th>
         <th>Progress</th>
         <th>Duration</th>
         {% if stage_table_variant == "preprocess" %}
           <th>Selected</th>
-          <th>Fallback</th>
+          <th>Force kept</th>
           <th>Gaps</th>
           <th>Warnings</th>
         {% elif stage_table_variant == "colmap" %}
@@ -37,7 +41,7 @@
             <span class="mono">{{ run.id }}</span>
             <span class="subline">attempt {{ run.attempt }} · {{ run.created_at }}</span>
           </td>
-          <td>{{ run.stage }}</td>
+          <td>{{ run.preprocess_location if stage_table_variant == "preprocess" else run.stage }}</td>
           <td><span class="status status-{{ run.status_css or run.status }}">{{ run.status_label or run.status }}</span></td>
           <td>{{ run.provider }}</td>
           <td>
