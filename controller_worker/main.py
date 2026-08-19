@@ -43,6 +43,8 @@ from controller_common.runpod_provider import RunpodClient
 
 
 STOP_REQUESTED = False
+ABSENT_POD_STATUS = "ABSENT"
+TERMINAL_POD_STATUSES = {ABSENT_POD_STATUS, "DELETED", "EXITED", "FAILED", "STOPPED", "TERMINATED"}
 
 
 def request_stop(signum: int, _frame: Any) -> None:
@@ -771,6 +773,8 @@ def wait_for_runpod_stage_result(
                         stage_run_id,
                     ),
                 )
+        if pod_status and pod_status.upper() in TERMINAL_POD_STATUSES:
+            raise RuntimeError(f"RunPod {stage_label} pod ended before publishing stage_result.json: {pod_status}")
 
         if time.monotonic() - started > timeout_seconds:
             raise TimeoutError(f"Timed out waiting for {result_uri}")
@@ -791,6 +795,7 @@ def cleanup_runpod_colmap_pods(*, worker_id: str) -> None:
         return
 
     timeout_seconds = max(runpod_colmap_timeout_seconds(), runpod_training_timeout_seconds())
+    active_statuses = ["colmap_pod_starting", "colmap_running", "training_pod_starting", "training_running"]
     with connect() as conn:
         rows = conn.execute(
             """
@@ -800,10 +805,7 @@ def cleanup_runpod_colmap_pods(*, worker_id: str) -> None:
               AND provider_pod_id IS NOT NULL
               AND (
                     status = ANY(%s)
-                    OR (
-                        status = ANY(%s)
-                        AND now() - COALESCE(updated_at, started_at, claimed_at, created_at) > (%s * interval '1 second')
-                    )
+                    OR status = ANY(%s)
               )
             ORDER BY updated_at ASC
             LIMIT 20
@@ -818,8 +820,7 @@ def cleanup_runpod_colmap_pods(*, worker_id: str) -> None:
                     "colmap_rejected",
                     "awaiting_training_approval",
                 ],
-                ["colmap_pod_starting", "colmap_running", "training_pod_starting", "training_running"],
-                timeout_seconds,
+                active_statuses,
             ),
         ).fetchall()
 
@@ -830,7 +831,13 @@ def cleanup_runpod_colmap_pods(*, worker_id: str) -> None:
         stage_run_id = row["id"]
         pod_id = row["provider_pod_id"]
         status = row["status"]
-        timed_out = status in {"colmap_pod_starting", "colmap_running", "training_pod_starting", "training_running"}
+        active = status in active_statuses
+        reference_time = row.get("updated_at") or row.get("started_at") or row.get("claimed_at") or row.get("created_at")
+        timed_out = bool(active and reference_time and (time.time() - reference_time.timestamp()) > timeout_seconds)
+        pod_status = provider_pod_status(client, pod_id) if active and not timed_out else None
+        pod_absent_or_terminal = bool(pod_status and pod_status.upper() in TERMINAL_POD_STATUSES)
+        if active and not timed_out and not pod_absent_or_terminal:
+            continue
         if timed_out:
             with connect() as conn:
                 create_event(
@@ -851,6 +858,28 @@ def cleanup_runpod_colmap_pods(*, worker_id: str) -> None:
                     WHERE id = %s
                     """,
                     (f"RunPod watchdog timed out after {timeout_seconds:.0f} seconds", stage_run_id),
+                )
+            cleanup_stage_multipart_uploads(row)
+        elif pod_absent_or_terminal:
+            with connect() as conn:
+                create_event(
+                    conn,
+                    stage_run_id=stage_run_id,
+                    kind="runpod_watchdog_pod_terminal",
+                    level="warning",
+                    message=f"RunPod {row['stage']} pod is {pod_status} before stage completion",
+                    payload={"pod_id": pod_id, "worker_id": worker_id, "pod_status": pod_status},
+                )
+                conn.execute(
+                    """
+                    UPDATE stage_runs
+                    SET status = 'failed',
+                        error_message = COALESCE(error_message, %s),
+                        finished_at = COALESCE(finished_at, now()),
+                        updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (f"RunPod pod ended before stage completion: {pod_status}", stage_run_id),
                 )
             cleanup_stage_multipart_uploads(row)
         delete_runpod_pod(client, stage_run_id=stage_run_id, pod_id=pod_id, reason="watchdog_cleanup")
@@ -945,9 +974,11 @@ def cleanup_stage_multipart_uploads(stage_run: dict[str, Any]) -> None:
 def provider_pod_status(client: RunpodClient, pod_id: str) -> Optional[str]:
     try:
         pod = client.get_pod(pod_id)
-    except Exception:
+    except Exception as exc:
+        if "HTTP 404" in str(exc):
+            return ABSENT_POD_STATUS
         return None
-    for key in ("desiredStatus", "status", "lastStatusChange"):
+    for key in ("desiredStatus", "status"):
         value = pod.get(key)
         if value:
             return str(value)
@@ -1188,8 +1219,12 @@ def fake_output_uri(stage_run: dict[str, Any]) -> str:
 
 def run_forever(*, worker_id: str, poll_seconds: float) -> None:
     print(f"Starting controller worker {worker_id}", flush=True)
+    last_watchdog_at = 0.0
     while not STOP_REQUESTED:
         did_work = run_once(worker_id=worker_id)
+        if not did_work and time.monotonic() - last_watchdog_at > 30:
+            cleanup_runpod_colmap_pods(worker_id=worker_id)
+            last_watchdog_at = time.monotonic()
         if not did_work:
             time.sleep(poll_seconds)
     print("Controller worker stopped.", flush=True)
