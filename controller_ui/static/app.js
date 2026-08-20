@@ -609,14 +609,15 @@ function renderSparseViewer(canvas, scene) {
       const stroke = camera.stroke_color || [163, 178, 194];
       const fill = camera.fill_color || stroke;
       ctx.strokeStyle = `rgba(${stroke[0]}, ${stroke[1]}, ${stroke[2]}, 0.95)`;
-      ctx.lineWidth = 1.2 * dpr;
+      const isHero = camera.role === "hero";
+      ctx.lineWidth = (isHero ? 2.4 : 1.2) * dpr;
       ctx.beginPath();
       ctx.moveTo(origin.x, origin.y);
       ctx.lineTo(tip.x, tip.y);
       ctx.stroke();
       ctx.fillStyle = `rgb(${fill[0]}, ${fill[1]}, ${fill[2]})`;
       ctx.beginPath();
-      ctx.arc(origin.x, origin.y, 2.6 * dpr, 0, Math.PI * 2);
+      ctx.arc(origin.x, origin.y, (isHero ? 5 : 2.6) * dpr, 0, Math.PI * 2);
       ctx.fill();
     }
   }

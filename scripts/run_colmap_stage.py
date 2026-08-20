@@ -364,6 +364,8 @@ def prepare_upload_payloads(
     history_dir.mkdir(parents=True, exist_ok=True)
 
     copy_colmap_outputs(local_run_dir, current_dir)
+    copy_if_exists(local_run_dir / "reports" / "image_manifest.json", current_dir / "image_manifest.json")
+    copy_if_exists(local_run_dir / "reports" / "image_manifest.json", history_dir / "image_manifest.json")
     report_path = local_run_dir / "reports" / "reconstruction_report.json"
     if not report_path.exists():
         raise FileNotFoundError(f"COLMAP finished without reconstruction_report.json: {report_path}")
@@ -535,6 +537,7 @@ def validate_complete_payload(current_dir: Path) -> None:
         return
     required = [
         "stage_result.json",
+        "image_manifest.json",
         "reconstruction_report.json",
         "matching_plan.json",
         "viewer/sparse_scene.json",
@@ -550,6 +553,7 @@ def validate_complete_payload(current_dir: Path) -> None:
 def uploaded_objects(current_dir: Path) -> list[str]:
     expected = [
         "stage_result.json",
+        "image_manifest.json",
         "reconstruction_report.json",
         "matching_plan.json",
         "matching_results.json",

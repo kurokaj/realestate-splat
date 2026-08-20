@@ -39,9 +39,10 @@ GROUP_COLOR_PALETTES: dict[str, list[dict[str, list[int]]]] = {
         {"stroke": [255, 164, 72], "fill": [255, 192, 117]},
     ],
     "hero": [
-        {"stroke": [90, 214, 130], "fill": [128, 234, 160]},
-        {"stroke": [55, 181, 112], "fill": [104, 218, 151]},
-        {"stroke": [144, 232, 104], "fill": [180, 244, 145]},
+        {"stroke": [255, 42, 156], "fill": [255, 112, 194]},
+        {"stroke": [0, 220, 210], "fill": [76, 255, 235]},
+        {"stroke": [255, 128, 24], "fill": [255, 182, 86]},
+        {"stroke": [190, 74, 255], "fill": [222, 139, 255]},
     ],
     "unknown": [ROLE_CAMERA_COLORS["unknown"]],
 }
@@ -113,10 +114,13 @@ def build_sparse_viewer_payload(sparse_txt_dir: Path, *, max_points: int = 25000
 
 
 def load_manifest_by_name(sparse_txt_dir: Path) -> dict[str, dict[str, Any]]:
-    # sparse_txt is <run>/colmap/sparse_txt; reports is a sibling of colmap.
-    reports_dir = sparse_txt_dir.parents[1] / "reports"
-    manifest_path = reports_dir / "image_manifest.json"
-    if not manifest_path.exists():
+    # Support both the local run layout and the flattened R2 current layout.
+    candidates = [
+        sparse_txt_dir.parent / "image_manifest.json",
+        sparse_txt_dir.parents[1] / "reports" / "image_manifest.json",
+    ]
+    manifest_path = next((path for path in candidates if path.is_file()), None)
+    if manifest_path is None:
         return {}
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
