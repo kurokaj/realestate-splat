@@ -798,6 +798,7 @@ def round_float(value: Optional[float]) -> Optional[float]:
 
 def upload_payloads(args: argparse.Namespace, stage_run_id: str, current_dir: Path, history_dir: Path) -> None:
     output = args.output_uri.rstrip("/")
+    validate_complete_payload(current_dir)
     sync_directory(current_dir, f"{output}/current", endpoint_url=args.endpoint_url, delete=True)
     sync_directory(history_dir, f"{output}/runs/{stage_run_id}", endpoint_url=args.endpoint_url, delete=True)
     write_upload_complete_markers(args, stage_run_id, current_dir, history_dir)
@@ -808,7 +809,7 @@ def write_upload_complete_markers(args: argparse.Namespace, stage_run_id: str, c
         "stage": "training",
         "stage_run_id": stage_run_id,
         "uploaded_at": utc_now(),
-        "required_objects": required_upload_objects(current_dir),
+        "uploaded_objects": uploaded_objects(current_dir),
     }
     current_marker = current_dir / "upload_complete.json"
     history_marker = history_dir / "upload_complete.json"
@@ -819,8 +820,26 @@ def write_upload_complete_markers(args: argparse.Namespace, stage_run_id: str, c
     copy_file(history_marker, f"{output}/runs/{stage_run_id}/upload_complete.json", endpoint_url=args.endpoint_url)
 
 
-def required_upload_objects(current_dir: Path) -> list[str]:
+def validate_complete_payload(current_dir: Path) -> None:
+    stage_result_path = current_dir / "stage_result.json"
+    if not stage_result_path.is_file():
+        raise FileNotFoundError("Training stage payload is incomplete; missing: stage_result.json")
+    stage_result = json.loads(stage_result_path.read_text(encoding="utf-8"))
+    if stage_result.get("status") != "completed":
+        return
     required = [
+        "stage_result.json",
+        "training_summary.json",
+        "nerfstudio/transforms.json",
+        "nerfstudio/colmap_points3D.ply",
+    ]
+    missing = [relative_path for relative_path in required if not (current_dir / relative_path).is_file()]
+    if missing:
+        raise FileNotFoundError(f"Training stage payload is incomplete; missing: {', '.join(missing)}")
+
+
+def uploaded_objects(current_dir: Path) -> list[str]:
+    expected = [
         "stage_result.json",
         "training_summary.json",
         "nerfstudio/transforms.json",
@@ -831,7 +850,7 @@ def required_upload_objects(current_dir: Path) -> list[str]:
         "outputs/**/*.ckpt",
         "exports/*.ply",
     ]
-    existing: list[str] = list(required)
+    existing: list[str] = [relative_path for relative_path in expected if (current_dir / relative_path).is_file()]
     for pattern in optional_patterns:
         candidates = sorted(path for path in current_dir.glob(pattern) if path.is_file())
         if candidates:

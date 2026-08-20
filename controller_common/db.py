@@ -183,6 +183,7 @@ def complete_stage_run(
             summary_json = %s,
             progress_json = jsonb_build_object('percent', 100, 'message', 'Stage complete'),
             output_uri = COALESCE(%s, output_uri),
+            error_message = NULL,
             finished_at = now(),
             updated_at = now()
         WHERE id = %s

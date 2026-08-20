@@ -484,6 +484,7 @@ def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str
         inputs.get("matching_type", "SIFT_BRUTEFORCE"),
         "--camera-model",
         inputs.get("camera_model", "SIMPLE_RADIAL"),
+        "--use-gpu" if inputs.get("use_gpu", True) else "--no-use-gpu",
         "--max-image-size",
         str(inputs.get("max_image_size", 3200)),
         "--sequential-loop-detection" if inputs.get("sequential_loop_detection", True) else "--no-sequential-loop-detection",
@@ -500,18 +501,12 @@ def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str
     for colmap_arg in inputs.get("colmap_args", []):
         append_argparse_value(command, "--colmap-arg", colmap_arg)
 
-    return "\n".join(
-        [
-            "set -euo pipefail",
-            "mkdir -p /workspace",
-            "cd /workspace",
-            f"if [ ! -d Buildvision3D/.git ]; then git clone --branch {shlex.quote(git_ref)} {shlex.quote(repo_url)} Buildvision3D; fi",
-            "cd /workspace/Buildvision3D",
-            f"git fetch origin {shlex.quote(git_ref)} || true",
-            f"git checkout {shlex.quote(git_ref)}",
-            "git pull --ff-only || true",
-            " ".join(shlex.quote(part) for part in command),
-        ]
+    return guarded_runpod_stage_shell_command(
+        stage_run=stage_run,
+        repo_url=repo_url,
+        git_ref=git_ref,
+        command=command,
+        stage_label="COLMAP",
     )
 
 
@@ -555,9 +550,31 @@ def build_training_stage_shell_command(stage_run: dict[str, Any], inputs: dict[s
     for train_arg in inputs.get("train_options", []):
         append_argparse_value(command, "--train-option", train_arg)
 
+    return guarded_runpod_stage_shell_command(
+        stage_run=stage_run,
+        repo_url=repo_url,
+        git_ref=git_ref,
+        command=command,
+        stage_label="training",
+    )
+
+
+def guarded_runpod_stage_shell_command(
+    *,
+    stage_run: dict[str, Any],
+    repo_url: str,
+    git_ref: str,
+    command: list[str],
+    stage_label: str,
+) -> str:
+    stage_run_id = shlex.quote(str(stage_run["id"]))
+    sentinel_dir = "/workspace/.buildvision3d_stage_guards"
+    sentinel = f"{sentinel_dir}/{stage_run_id}.done"
     return "\n".join(
         [
             "set -euo pipefail",
+            f"mkdir -p {sentinel_dir}",
+            f"if [ -f {sentinel} ]; then echo 'Buildvision3D {stage_label} stage {stage_run_id} already executed; waiting for controller cleanup'; sleep infinity; fi",
             "mkdir -p /workspace",
             "cd /workspace",
             f"if [ ! -d Buildvision3D/.git ]; then git clone --branch {shlex.quote(git_ref)} {shlex.quote(repo_url)} Buildvision3D; fi",
@@ -565,7 +582,11 @@ def build_training_stage_shell_command(stage_run: dict[str, Any], inputs: dict[s
             f"git fetch origin {shlex.quote(git_ref)} || true",
             f"git checkout {shlex.quote(git_ref)}",
             "git pull --ff-only || true",
-            " ".join(shlex.quote(part) for part in command),
+            "stage_exit=0",
+            " ".join(shlex.quote(part) for part in command) + " || stage_exit=$?",
+            f"touch {sentinel}",
+            "if [ \"$stage_exit\" -eq 0 ]; then echo 'Buildvision3D stage complete; waiting for controller cleanup'; sleep infinity; fi",
+            "exit \"$stage_exit\"",
         ]
     )
 
@@ -725,17 +746,6 @@ def wait_for_runpod_stage_result(
                     else:
                         stale_upload_run_id = None
                 if upload_complete:
-                    required_objects = upload_complete.get("required_objects") if isinstance(upload_complete.get("required_objects"), list) else []
-                    missing_objects = missing_required_objects(output_base_uri, required_objects)
-                    if missing_objects:
-                        record_progress(
-                            stage_run_id,
-                            97,
-                            f"Waiting for {len(missing_objects)} required {stage_label} object(s)",
-                            kind=f"runpod_{stage}_waiting_required_objects",
-                        )
-                        time.sleep(poll_seconds)
-                        continue
                     record_progress(stage_run_id, 100, f"Found {stage_label} upload_complete.json", kind=f"runpod_{stage}_upload_complete")
                     return stage_result
                 record_progress(
@@ -836,6 +846,9 @@ def cleanup_runpod_colmap_pods(*, worker_id: str) -> None:
         timed_out = bool(active and reference_time and (time.time() - reference_time.timestamp()) > timeout_seconds)
         pod_status = provider_pod_status(client, pod_id) if active and not timed_out else None
         pod_absent_or_terminal = bool(pod_status and pod_status.upper() in TERMINAL_POD_STATUSES)
+        if active and try_complete_uploaded_runpod_stage(row):
+            delete_runpod_pod(client, stage_run_id=stage_run_id, pod_id=pod_id, reason="watchdog_completed_stage")
+            continue
         if active and not timed_out and not pod_absent_or_terminal:
             continue
         if timed_out:
@@ -883,6 +896,73 @@ def cleanup_runpod_colmap_pods(*, worker_id: str) -> None:
                 )
             cleanup_stage_multipart_uploads(row)
         delete_runpod_pod(client, stage_run_id=stage_run_id, pod_id=pod_id, reason="watchdog_cleanup")
+
+
+def try_complete_uploaded_runpod_stage(stage_run: dict[str, Any]) -> bool:
+    inputs = stage_run.get("input_uri_json") or {}
+    output_base_uri = inputs.get("output_uri")
+    stage = stage_run.get("stage")
+    if not output_base_uri or stage not in {"colmap", "training"}:
+        return False
+    current_uri = f"{str(output_base_uri).rstrip('/')}/current"
+    stage_result = load_optional_json_from_r2(f"{current_uri}/stage_result.json")
+    if not stage_result:
+        return False
+    if stage_result.get("stage_run_id") and stage_result.get("stage_run_id") != stage_run["id"]:
+        return False
+    status = stage_result.get("status")
+    if status != "completed":
+        with connect() as conn:
+            create_event(
+                conn,
+                stage_run_id=stage_run["id"],
+                kind=f"runpod_{stage}_stage_result",
+                level="error",
+                message=f"Found {str(stage).upper()} stage_result.json with status {status}",
+                payload={"stage_result": stage_result},
+            )
+            conn.execute(
+                """
+                UPDATE stage_runs
+                SET status = 'failed',
+                    error_message = COALESCE(error_message, %s),
+                    finished_at = COALESCE(finished_at, now()),
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (stage_result.get("error_message") or f"{str(stage).upper()} stage_result status was {status}", stage_run["id"]),
+            )
+        return True
+    upload_complete = load_optional_json_from_r2(f"{current_uri}/upload_complete.json")
+    if not upload_complete:
+        return False
+    if upload_complete.get("stage_run_id") and upload_complete.get("stage_run_id") != stage_run["id"]:
+        return False
+    if stage == "colmap":
+        reconstruction_report = load_optional_json_from_r2(f"{current_uri}/reconstruction_report.json")
+        summary = compact_colmap_summary(
+            stage_result,
+            reconstruction_report,
+            provider_job_id=stage_run.get("provider_job_id") or stage_run.get("provider_pod_id") or "",
+        )
+    else:
+        training_summary = load_optional_json_from_r2(f"{current_uri}/training_summary.json")
+        summary = compact_training_summary(
+            stage_result,
+            training_summary,
+            provider_job_id=stage_run.get("provider_job_id") or stage_run.get("provider_pod_id") or "",
+        )
+    with connect() as conn:
+        with conn.transaction():
+            complete_stage_run(conn, stage_run_id=stage_run["id"], summary=summary, output_uri=current_uri)
+            create_event(
+                conn,
+                stage_run_id=stage_run["id"],
+                kind=f"runpod_{stage}_watchdog_completed_stage",
+                message=f"Recovered completed {stage} stage from R2 upload markers",
+                payload={"output_uri": current_uri},
+            )
+    return True
 
 
 def delete_runpod_pod(client: RunpodClient, *, stage_run_id: str, pod_id: str, reason: str) -> None:
@@ -1154,37 +1234,6 @@ def abort_multipart_uploads_for_prefix(uri: str) -> int:
         subprocess.run(abort_command, check=True)
         aborted += 1
     return aborted
-
-
-def missing_required_objects(output_base_uri: str, required_objects: list[str]) -> list[str]:
-    missing: list[str] = []
-    for relative_path in required_objects:
-        uri = f"{output_base_uri.rstrip('/')}/current/{relative_path.lstrip('/')}"
-        if not object_exists_in_r2(uri):
-            missing.append(relative_path)
-    return missing
-
-
-def object_exists_in_r2(uri: str) -> bool:
-    parsed = urlparse(uri)
-    if parsed.scheme != "r2" or not parsed.netloc:
-        raise ValueError(f"Expected r2:// URI: {uri}")
-    command = ["aws"]
-    endpoint_url = r2_endpoint()
-    if endpoint_url:
-        command.extend(["--endpoint-url", endpoint_url])
-    command.extend(
-        [
-            "s3api",
-            "head-object",
-            "--bucket",
-            parsed.netloc,
-            "--key",
-            parsed.path.lstrip("/"),
-        ]
-    )
-    completed = subprocess.run(command, capture_output=True, text=True)
-    return completed.returncode == 0
 
 
 def aws_cp_stdout_command(uri: str) -> list[str]:
