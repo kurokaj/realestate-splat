@@ -8,6 +8,7 @@ import json
 import shutil
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -260,6 +261,30 @@ def prepare_local_run(input_dir: Path, local_run_dir: Path) -> None:
         raise FileNotFoundError(f"Preprocess input is missing frames_selected/: {frames_dir}")
     if not any(path.is_file() for path in frames_dir.iterdir()):
         raise RuntimeError(f"Preprocess input has no selected frame files: {frames_dir}")
+
+    manifest_path = input_dir / "image_manifest.json"
+    if manifest_path.is_file():
+        manifest = read_json(manifest_path)
+        entries = manifest.get("images") if isinstance(manifest, dict) else None
+        if not isinstance(entries, list):
+            raise RuntimeError("Preprocess image_manifest.json has no images list")
+        frame_names = sorted(path.name for path in frames_dir.iterdir() if path.is_file())
+        manifest_names = [Path(str(item.get("image_name") or "")).name for item in entries if isinstance(item, dict)]
+        duplicate_manifest_names = sorted(name for name, count in Counter(manifest_names).items() if name and count > 1)
+        if duplicate_manifest_names:
+            raise RuntimeError(
+                "Preprocess image manifest contains duplicate image names: "
+                + ", ".join(duplicate_manifest_names[:10])
+            )
+        if len(frame_names) != len(manifest_names) or set(frame_names) != set(manifest_names):
+            missing_from_manifest = sorted(set(frame_names) - set(manifest_names))
+            missing_from_frames = sorted(set(manifest_names) - set(frame_names))
+            raise RuntimeError(
+                "Preprocess input mismatch before COLMAP: "
+                f"frames_selected={len(frame_names)}, manifest_images={len(manifest_names)}; "
+                f"missing_from_manifest={missing_from_manifest[:5]}, "
+                f"missing_from_frames={missing_from_frames[:5]}"
+            )
 
     copy_tree(frames_dir, local_run_dir / "frames_selected")
     reports_dir = local_run_dir / "reports"
