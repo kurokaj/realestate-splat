@@ -306,15 +306,18 @@ def prepare_local_run(input_dir: Path, local_run_dir: Path) -> None:
 
 
 def load_blacklist(uri: str, endpoint_url: Optional[str]) -> set[str]:
-    with tempfile.NamedTemporaryFile("w+", suffix=".json") as handle:
+    # Download into a closed path before parsing. The S3 CLI overwrites the
+    # destination, so reading through an already-open NamedTemporaryFile can
+    # observe stale buffered state on some runtimes.
+    with tempfile.TemporaryDirectory(prefix="buildvision3d-colmap-blacklist-") as temp_dir:
+        path = Path(temp_dir) / "colmap_blacklist.json"
         try:
-            copy_file(uri, handle.name, endpoint_url=endpoint_url)
+            copy_file(uri, path, endpoint_url=endpoint_url)
         except Exception:
             return set()
-        handle.seek(0)
         try:
-            payload = json.load(handle)
-        except json.JSONDecodeError as exc:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"COLMAP blacklist is not valid JSON: {uri}") from exc
     entries = payload.get("excluded_images") if isinstance(payload, dict) else None
     if not isinstance(entries, list):
