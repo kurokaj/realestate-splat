@@ -20,6 +20,7 @@ from controller_common.config import (
     controller_git_ref,
     controller_id,
     controller_repo_url,
+    default_r2_bucket,
     poll_interval_seconds,
     r2_endpoint,
     runpod_colmap_cloud_type,
@@ -40,6 +41,7 @@ from controller_common.db import claim_next_queued_stage, complete_stage_run, co
 from controller_common.fake_provider import FakeProvider
 from controller_common.runpod_gpus import normalize_gpu_types
 from controller_common.runpod_provider import RunpodClient
+from src.realestate_splat.storage import delete_file
 
 
 STOP_REQUESTED = False
@@ -65,6 +67,8 @@ def run_once(*, worker_id: str) -> bool:
     try:
         if stage_run["provider"] == "local_preprocess" and stage_run["stage"] == "preprocess":
             summary, output_uri = run_local_preprocess(stage_run)
+            if not bool((stage_run.get("input_uri_json") or {}).get("dry_run")):
+                invalidate_colmap_blacklist(stage_run["project_id"])
         elif stage_run["provider"] == "runpod_colmap" and stage_run["stage"] == "colmap":
             summary, output_uri = run_runpod_colmap(stage_run)
         elif stage_run["provider"] == "runpod_training" and stage_run["stage"] == "training":
@@ -135,6 +139,15 @@ def run_fake_stage(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]:
     summary = provider.run_stage(stage_run, progress=progress)
     output_uri = stage_run["output_uri"] or fake_output_uri(stage_run)
     return summary, output_uri
+
+
+def invalidate_colmap_blacklist(project_id: str) -> None:
+    blacklist_uri = (
+        f"r2://{default_r2_bucket()}/projects/{project_id}/"
+        "colmap/review/colmap_blacklist.json"
+    )
+    delete_file(blacklist_uri, endpoint_url=r2_endpoint())
+    print(f"Cleared COLMAP blacklist after successful preprocess: {blacklist_uri}", flush=True)
 
 
 def run_local_preprocess(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]:
