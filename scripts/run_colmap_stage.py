@@ -183,6 +183,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             sync_directory(args.input_uri, input_dir, endpoint_url=args.endpoint_url)
         if args.blacklist_uri:
             excluded_images = load_blacklist(args.blacklist_uri, args.endpoint_url)
+            print(
+                f"COLMAP blacklist loaded: {len(excluded_images)} image(s) from {args.blacklist_uri}",
+                flush=True,
+            )
             apply_blacklist(input_dir, excluded_images)
         prepare_local_run(input_dir, local_run_dir)
         if args.matching_plan is not None:
@@ -325,6 +329,7 @@ def load_blacklist(uri: str, endpoint_url: Optional[str]) -> set[str]:
 
 def apply_blacklist(input_dir: Path, excluded_images: set[str]) -> None:
     if not excluded_images:
+        print("COLMAP blacklist contains no image entries.", flush=True)
         return
     frames_dir = input_dir / "frames_selected"
     removed = {path.name for path in frames_dir.iterdir() if path.is_file() and path.name in excluded_images}
@@ -344,9 +349,15 @@ def apply_blacklist(input_dir: Path, excluded_images: set[str]) -> None:
             manifest["blacklisted_images"] = sorted(removed)
             write_json(manifest_path, manifest)
     if not removed:
-        print(f"COLMAP blacklist matched no local frames ({len(excluded_images)} requested).", flush=True)
+        print(
+            f"COLMAP blacklist matched no local frames ({len(excluded_images)} requested).",
+            flush=True,
+        )
     else:
-        print(f"COLMAP blacklist removed {len(removed)} image(s) before feature extraction.", flush=True)
+        print(
+            f"COLMAP blacklist removed {len(removed)}/{len(excluded_images)} image(s) before feature extraction.",
+            flush=True,
+        )
 
 
 def build_colmap_command(args: argparse.Namespace, local_run_dir: Path) -> List[str]:
