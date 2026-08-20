@@ -167,6 +167,21 @@ def project_colmap_viewer(project_id: str) -> JSONResponse:
     payload = load_json_uri(f"{colmap_current_uri.rstrip('/')}/viewer/sparse_scene.json")
     if not payload:
         raise HTTPException(status_code=404, detail="COLMAP viewer artifact is not available yet")
+    blacklist = load_colmap_blacklist(row_to_json(project))
+    excluded_names = {
+        Path(str(entry.get("image_name") or "")).name
+        for entry in blacklist.get("excluded_images", [])
+        if isinstance(entry, dict) and entry.get("image_name")
+    }
+    if excluded_names and isinstance(payload.get("cameras"), list):
+        original_cameras = payload["cameras"]
+        payload = dict(payload)
+        payload["cameras"] = [
+            camera
+            for camera in original_cameras
+            if Path(str(camera.get("name") or camera.get("image_name") or "")).name not in excluded_names
+        ]
+        payload["blacklisted_camera_count"] = len(original_cameras) - len(payload["cameras"])
     return JSONResponse(payload)
 
 
