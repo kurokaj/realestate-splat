@@ -295,7 +295,34 @@ def include_location_hero_configs(
     configs: Dict[str, Dict[str, Any]],
     grouped: Dict[str, List[Dict[str, Any]]],
 ) -> Dict[str, Dict[str, Any]]:
-    return dict(configs)
+    updated = {key: dict(value) for key, value in configs.items()}
+    heroes_by_location: Dict[str, List[Dict[str, Any]]] = {}
+    for key, sources in grouped.items():
+        if key.startswith("hero_image:"):
+            heroes_by_location.setdefault(key.split(":", 1)[1], []).extend(sources)
+
+    for location, hero_sources in heroes_by_location.items():
+        coverage_key = next(
+            (
+                key for key in updated
+                if key.split(":", 1)[-1] == location
+                and key.split(":", 1)[0] in {"coverage_video", "coverage_image"}
+            ),
+            None,
+        )
+        if coverage_key is None:
+            coverage_key = f"hero_image:{location}"
+            updated.setdefault(coverage_key, {"group_key": coverage_key, "profile": "indoor_room", "preprocess_args": []})
+        else:
+            # Heroes are part of the location's single preprocessing input;
+            # do not run the same hero files again as a separate group.
+            updated.pop(f"hero_image:{location}", None)
+        grouped.setdefault(coverage_key, [])
+        existing_paths = {str(item.get("relative_path")) for item in grouped[coverage_key]}
+        grouped[coverage_key].extend(
+            source for source in hero_sources if str(source.get("relative_path")) not in existing_paths
+        )
+    return updated
 
 
 def slug(value: str) -> str:

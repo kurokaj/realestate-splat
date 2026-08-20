@@ -1082,6 +1082,19 @@ def compact_colmap_summary(
     wrapper_summary = metadata.get("summary") if isinstance(metadata.get("summary"), dict) else {}
     metrics = reconstruction_report.get("reconstruction_metrics") if isinstance(reconstruction_report.get("reconstruction_metrics"), dict) else {}
     settings = reconstruction_report.get("settings") if isinstance(reconstruction_report.get("settings"), dict) else {}
+    manifest_reconstruction = reconstruction_report.get("manifest_reconstruction") if isinstance(reconstruction_report.get("manifest_reconstruction"), dict) else {}
+    by_location = manifest_reconstruction.get("by_location") if isinstance(manifest_reconstruction.get("by_location"), dict) else {}
+    by_group = manifest_reconstruction.get("by_group") if isinstance(manifest_reconstruction.get("by_group"), list) else []
+    location_summary = "; ".join(
+        f"{location}: {counts.get('registered', 0)}/{counts.get('total', 0)}"
+        for location, counts in sorted(by_location.items())
+        if isinstance(counts, dict)
+    )
+    group_summary = "; ".join(
+        f"{item.get('camera_group')}: {item.get('registered', 0)}/{item.get('total', 0)}"
+        for item in by_group
+        if isinstance(item, dict)
+    )
     return {
         "provider": "runpod_colmap",
         "provider_job_id": provider_job_id,
@@ -1095,6 +1108,8 @@ def compact_colmap_summary(
         "selected_sparse_model": wrapper_summary.get("selected_sparse_model") or reconstruction_report.get("selected_sparse_model"),
         "registered_images": metrics.get("registered_images"),
         "registered_frames": metrics.get("registered_frames"),
+        "registered_by_location": location_summary,
+        "registered_by_group": group_summary,
         "point_count": metrics.get("points"),
         "mean_track_length": metrics.get("mean_track_length"),
         "mean_observations_per_image": metrics.get("mean_observations_per_image"),

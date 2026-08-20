@@ -317,7 +317,7 @@
             <section>
               <h3>Processing Results</h3>
               <dl class="stat-list">
-                <dt>Selected</dt><dd>{{ block.result_summary.selected }}</dd>
+                <dt>Selected</dt><dd>Coverage: {{ block.result_summary.coverage_selected }} · Hero: {{ block.result_summary.hero_selected }}</dd>
                 <dt>Force kept</dt><dd>{{ block.result_summary.force_keep }}</dd>
                 <dt>Gaps</dt><dd>{{ block.result_summary.gaps }}</dd>
                 <dt>Warnings</dt><dd>{{ block.result_summary.warnings|join(", ") }}</dd>

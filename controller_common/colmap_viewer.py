@@ -113,7 +113,8 @@ def build_sparse_viewer_payload(sparse_txt_dir: Path, *, max_points: int = 25000
 
 
 def load_manifest_by_name(sparse_txt_dir: Path) -> dict[str, dict[str, Any]]:
-    reports_dir = sparse_txt_dir.parents[2] / "reports"
+    # sparse_txt is <run>/colmap/sparse_txt; reports is a sibling of colmap.
+    reports_dir = sparse_txt_dir.parents[1] / "reports"
     manifest_path = reports_dir / "image_manifest.json"
     if not manifest_path.exists():
         return {}

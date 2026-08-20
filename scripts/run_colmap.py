@@ -1235,9 +1235,33 @@ def parse_registered_image_names(sparse_text_dir: Path) -> List[str]:
 def build_manifest_reconstruction_summary(manifest: Mapping[str, Any], sparse_text_dir: Path) -> Dict[str, Any]:
     images = [entry for entry in manifest.get("images") or [] if isinstance(entry, dict)]
     registered_names = set(parse_registered_image_names(sparse_text_dir))
+    def is_registered(entry: Mapping[str, Any]) -> bool:
+        name = str(entry.get("image_name") or "")
+        return name in registered_names or Path(name).name in registered_names
+
     hero_images = [entry for entry in images if entry.get("role") == "hero"]
-    hero_registered = [entry for entry in hero_images if entry.get("image_name") in registered_names]
-    hero_dropped = [entry for entry in hero_images if entry.get("image_name") not in registered_names]
+    hero_registered = [entry for entry in hero_images if is_registered(entry)]
+    hero_dropped = [entry for entry in hero_images if not is_registered(entry)]
+    by_location: Dict[str, Dict[str, int]] = {}
+    by_role: Dict[str, Dict[str, int]] = {}
+    by_group: Dict[str, Dict[str, Any]] = {}
+    for entry in images:
+        role = str(entry.get("role") or "unknown")
+        location = str(entry.get("location") or "unassigned")
+        group = str(entry.get("camera_group") or "unknown")
+        registered = is_registered(entry)
+        for target, key in ((by_location, location), (by_role, role)):
+            counts = target.setdefault(key, {"total": 0, "registered": 0, "dropped": 0})
+            counts["total"] += 1
+            counts["registered"] += int(registered)
+            counts["dropped"] += int(not registered)
+        counts = by_group.setdefault(
+            group,
+            {"camera_group": group, "role": role, "location": location, "total": 0, "registered": 0, "dropped": 0},
+        )
+        counts["total"] += 1
+        counts["registered"] += int(registered)
+        counts["dropped"] += int(not registered)
     return {
         "hero": {
             "total": len(hero_images),
@@ -1247,10 +1271,13 @@ def build_manifest_reconstruction_summary(manifest: Mapping[str, Any], sparse_te
             "dropped_images": [entry.get("image_name") for entry in hero_dropped],
         },
         "registered_image_count_from_text": len(registered_names),
+        "by_location": by_location,
+        "by_role": by_role,
+        "by_group": sorted(by_group.values(), key=lambda item: str(item["camera_group"])),
     }
 
 
-def build_camera_group_summary(manifest: Mapping[str, Any]) -> List[Dict[str, Any]]:
+def build_camera_group_summary(manifest: Mapping[str, Any], registered_names: Optional[set[str]] = None) -> List[Dict[str, Any]]:
     groups: Dict[str, Dict[str, Any]] = {}
     for entry in manifest.get("images") or []:
         if not isinstance(entry, dict):
@@ -1265,11 +1292,19 @@ def build_camera_group_summary(manifest: Mapping[str, Any]) -> List[Dict[str, An
                 "width": entry.get("width"),
                 "height": entry.get("height"),
                 "image_count": 0,
+                "registered_image_count": 0,
+                "dropped_image_count": 0,
                 "hero": entry.get("role") == "hero",
                 "locations": set(),
             },
         )
         group["image_count"] += 1
+        image_name = str(entry.get("image_name") or "")
+        is_registered = registered_names is not None and (
+            image_name in registered_names or Path(image_name).name in registered_names
+        )
+        group["registered_image_count"] += int(is_registered)
+        group["dropped_image_count"] += int(not is_registered)
         if entry.get("role") == "hero":
             group["hero"] = True
         if entry.get("location"):
@@ -1285,6 +1320,8 @@ def build_camera_group_summary(manifest: Mapping[str, Any]) -> List[Dict[str, An
                 "width": group["width"],
                 "height": group["height"],
                 "image_count": group["image_count"],
+                "registered_image_count": group["registered_image_count"],
+                "dropped_image_count": group["dropped_image_count"],
                 "hero": group["hero"],
                 "locations": sorted(group["locations"]),
             }
@@ -1313,7 +1350,8 @@ def build_report(
 ) -> Dict[str, Any]:
     reconstruction_metrics = parse_model_analyzer_metrics(paths["logs_dir"] / "model_analyzer.log")
     manifest_summary = build_manifest_reconstruction_summary(image_manifest, paths["sparse_text_dir"])
-    camera_groups = build_camera_group_summary(image_manifest)
+    registered_names = set(parse_registered_image_names(paths["sparse_text_dir"]))
+    camera_groups = build_camera_group_summary(image_manifest, registered_names)
     outputs = {
         "database": relative_to(paths["database_path"], run_dir),
         "database_global": relative_to(paths["database_global_path"], run_dir),

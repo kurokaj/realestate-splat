@@ -870,7 +870,7 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
         "colmap_feature_matcher_options": COLMAP_FEATURE_MATCHER_OPTIONS,
         "colmap_camera_model_options": COLMAP_CAMERA_MODEL_OPTIONS,
         "colmap_gpu_options": COLMAP_GPU_OPTIONS,
-        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "point_count", "feature_extractor", "matching_type", "matcher", "sequential_loop_detection", "vocab_tree", "camera_model", "max_image_size", "mode", "container_disk_gb"]),
+        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "registered_by_location", "registered_by_group", "point_count", "feature_extractor", "matching_type", "matcher", "sequential_loop_detection", "vocab_tree", "camera_model", "max_image_size", "mode", "container_disk_gb"]),
     }
 
 
@@ -1145,6 +1145,8 @@ def colmap_stats_rows(stage_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if isinstance(summary, dict):
         preferred = [
             "registered_images",
+            "registered_by_location",
+            "registered_by_group",
             "total_images",
             "points3D",
             "point_count",
@@ -1507,6 +1509,7 @@ def compact_group_result_summary(capture_report: dict[str, Any], group_key: str,
             "gaps": "",
             "warnings": [],
             "coverage_selected": "",
+            "hero_selected": "",
             "coverage_rejected": "",
             "hero_count": "",
         }
@@ -1525,12 +1528,15 @@ def compact_group_result_summary(capture_report: dict[str, Any], group_key: str,
         warnings.extend(str(item) for item in video.get("warnings", []) if item)
     coverage_images = coverage_image_grid(capture_report, group_key=group_key, location=location)
     hero_images = hero_image_grid(capture_report, location=location)
+    coverage_selected = sum(1 for frame in frames if image_decision(frame) == "selected")
+    hero_selected = hero_images["counts"].get("selected", 0)
     return {
         "selected": selected,
         "force_keep": force_keep,
         "gaps": gaps,
         "warnings": sorted(set(warnings)),
-        "coverage_selected": coverage_images["counts"].get("selected", 0),
+        "coverage_selected": coverage_selected,
+        "hero_selected": hero_selected,
         "coverage_rejected": coverage_images["counts"].get("rejected", 0),
         "hero_count": len(hero_images["items"]),
     }
