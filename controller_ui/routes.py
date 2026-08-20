@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, Body, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -168,6 +168,47 @@ def project_colmap_viewer(project_id: str) -> JSONResponse:
     if not payload:
         raise HTTPException(status_code=404, detail="COLMAP viewer artifact is not available yet")
     return JSONResponse(payload)
+
+
+@router.post("/projects/{project_id}/colmap-blacklist")
+def blacklist_colmap_image(project_id: str, payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+    image_name = str(payload.get("image_name") or "").strip()
+    if not image_name or "/" in image_name or "\\" in image_name:
+        raise HTTPException(status_code=400, detail="A plain COLMAP image filename is required")
+    with connect() as conn:
+        project = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_json = row_to_json(project)
+    blacklist_uri = colmap_blacklist_uri(project_json)
+    blacklist = load_colmap_blacklist(project_json)
+    entries = blacklist.get("excluded_images")
+    if not isinstance(entries, list):
+        entries = []
+    if any(isinstance(entry, dict) and entry.get("image_name") == image_name for entry in entries):
+        return JSONResponse({"status": "already_blacklisted", "image_name": image_name})
+    entries.append(
+        {
+            "image_name": image_name,
+            "role": payload.get("role"),
+            "location": payload.get("location"),
+            "camera_group": payload.get("camera_group"),
+            "reason": str(payload.get("reason") or "Manually flagged in COLMAP viewer"),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    document = {
+        "schema_version": 1,
+        "project_id": project_id,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "excluded_images": entries,
+    }
+    with tempfile.NamedTemporaryFile("w+", suffix=".json") as handle:
+        handle.write(json.dumps(document, indent=2) + "\n")
+        handle.flush()
+        copy_file(handle.name, blacklist_uri)
+    return JSONResponse({"status": "blacklisted", "image_name": image_name, "count": len(entries)})
 
 
 @router.get("/projects/{project_id}", response_class=HTMLResponse)
@@ -336,6 +377,7 @@ def ui_queue_colmap(
             "preprocess_uri": resolved_preprocess_uri,
             "preprocess_group_outputs": preprocess_group_outputs,
             "raw_uri": project.get("raw_uri"),
+            "blacklist_uri": colmap_blacklist_uri(project_json),
             "output_uri": resolved_output_uri,
             "endpoint_url": empty_to_none(endpoint_url),
             "mode": mode,
@@ -871,6 +913,7 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
         "colmap_camera_model_options": COLMAP_CAMERA_MODEL_OPTIONS,
         "colmap_gpu_options": COLMAP_GPU_OPTIONS,
         "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "registered_by_location", "registered_by_group", "point_count", "feature_extractor", "matching_type", "matcher", "sequential_loop_detection", "vocab_tree", "camera_model", "max_image_size", "mode", "container_disk_gb"]),
+        "colmap_blacklist": load_colmap_blacklist(project),
     }
 
 
@@ -1238,6 +1281,31 @@ def load_json_uri(uri: str) -> dict[str, Any]:
     if not payload:
         return {}
     return json.loads(payload)
+
+
+def colmap_blacklist_uri(project: dict[str, Any]) -> str:
+    project_id = str(project.get("id") or "project")
+    current_uri = str(project.get("colmap_current_uri") or "").rstrip("/")
+    if current_uri.endswith("/current"):
+        base_uri = current_uri[: -len("/current")].rstrip("/")
+    else:
+        base_uri = f"r2://{default_r2_bucket()}/projects/{project_id}/colmap"
+    return f"{base_uri}/review/colmap_blacklist.json"
+
+
+def load_colmap_blacklist(project: dict[str, Any]) -> dict[str, Any]:
+    try:
+        payload = load_json_uri(colmap_blacklist_uri(project))
+    except Exception:
+        payload = {}
+    entries = payload.get("excluded_images") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        entries = []
+    return {
+        "schema_version": int(payload.get("schema_version") or 1) if isinstance(payload, dict) else 1,
+        "project_id": str(project.get("id") or ""),
+        "excluded_images": [entry for entry in entries if isinstance(entry, dict)],
+    }
 
 
 def preprocess_settings(run: Optional[dict[str, Any]], capture_report: dict[str, Any]) -> dict[str, Any]:

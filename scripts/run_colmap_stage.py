@@ -42,6 +42,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--raw-uri", help="Optional raw project URI used only to copy sources_manifest.json into the local COLMAP input.")
     parser.add_argument(
+        "--blacklist-uri",
+        help="Optional R2 JSON artifact listing image_name values to exclude from this COLMAP run.",
+    )
+    parser.add_argument(
         "--preprocess-group-output",
         action="append",
         default=[],
@@ -177,6 +181,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         else:
             sync_directory(args.input_uri, input_dir, endpoint_url=args.endpoint_url)
+        if args.blacklist_uri:
+            excluded_images = load_blacklist(args.blacklist_uri, args.endpoint_url)
+            apply_blacklist(input_dir, excluded_images)
         prepare_local_run(input_dir, local_run_dir)
         if args.matching_plan is not None:
             copy_if_exists(
@@ -292,6 +299,54 @@ def prepare_local_run(input_dir: Path, local_run_dir: Path) -> None:
     copy_if_exists(input_dir / "image_manifest.json", reports_dir / "image_manifest.json")
     copy_if_exists(input_dir / "capture_report.json", reports_dir / "capture_report.json")
     copy_if_exists(input_dir / "preprocess_summary.json", reports_dir / "preprocess_summary.json")
+
+
+def load_blacklist(uri: str, endpoint_url: Optional[str]) -> set[str]:
+    with tempfile.NamedTemporaryFile("w+", suffix=".json") as handle:
+        try:
+            copy_file(uri, handle.name, endpoint_url=endpoint_url)
+        except Exception:
+            return set()
+        handle.seek(0)
+        try:
+            payload = json.load(handle)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"COLMAP blacklist is not valid JSON: {uri}") from exc
+    entries = payload.get("excluded_images") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return set()
+    excluded: set[str] = set()
+    for entry in entries:
+        value = entry.get("image_name") if isinstance(entry, dict) else entry
+        if value:
+            excluded.add(Path(str(value)).name)
+    return excluded
+
+
+def apply_blacklist(input_dir: Path, excluded_images: set[str]) -> None:
+    if not excluded_images:
+        return
+    frames_dir = input_dir / "frames_selected"
+    removed = {path.name for path in frames_dir.iterdir() if path.is_file() and path.name in excluded_images}
+    for name in removed:
+        (frames_dir / name).unlink()
+
+    manifest_path = input_dir / "image_manifest.json"
+    if manifest_path.exists():
+        manifest = read_json(manifest_path)
+        images = manifest.get("images") if isinstance(manifest, dict) else None
+        if isinstance(images, list):
+            manifest["images"] = [
+                item
+                for item in images
+                if not isinstance(item, dict) or Path(str(item.get("image_name") or "")).name not in removed
+            ]
+            manifest["blacklisted_images"] = sorted(removed)
+            write_json(manifest_path, manifest)
+    if not removed:
+        print(f"COLMAP blacklist matched no local frames ({len(excluded_images)} requested).", flush=True)
+    else:
+        print(f"COLMAP blacklist removed {len(removed)} image(s) before feature extraction.", flush=True)
 
 
 def build_colmap_command(args: argparse.Namespace, local_run_dir: Path) -> List[str]:

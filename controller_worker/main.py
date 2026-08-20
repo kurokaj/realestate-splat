@@ -493,6 +493,8 @@ def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str
     ]
     if inputs.get("raw_uri"):
         command.extend(["--raw-uri", inputs["raw_uri"]])
+    if inputs.get("blacklist_uri"):
+        command.extend(["--blacklist-uri", inputs["blacklist_uri"]])
     for group_output in inputs.get("preprocess_group_outputs", []):
         if isinstance(group_output, dict):
             command.extend(["--preprocess-group-output", json.dumps(group_output, separators=(",", ":"))])

@@ -203,6 +203,8 @@ def camera_row(image: Any, manifest_entry: Mapping[str, Any] | None = None) -> d
         "image_id": image.image_id,
         "name": image.name,
         "role": role,
+        "location": (manifest_entry or {}).get("location"),
+        "source_id": (manifest_entry or {}).get("source_id"),
         "camera_group": (manifest_entry or {}).get("camera_group"),
         "viewer_group": group,
         "position": round_vector([transform[0][3], transform[1][3], transform[2][3]]),

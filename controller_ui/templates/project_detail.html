@@ -506,7 +506,7 @@
         {% endif %}
       </div>
       <div class="inspection-grid">
-        <div class="viewer-surface" data-colmap-viewer-url="/ui/projects/{{ project.id }}/colmap-viewer">
+        <div class="viewer-surface" data-colmap-viewer-url="/ui/projects/{{ project.id }}/colmap-viewer" data-colmap-blacklist-url="/ui/projects/{{ project.id }}/colmap-blacklist">
           <canvas class="viewer-canvas" tabindex="0" aria-label="COLMAP sparse viewer"></canvas>
           <div class="viewer-overlay">
             <span class="viewer-status">Loading sparse viewer...</span>
@@ -535,6 +535,31 @@
           {% endif %}
         </div>
       </div>
+      <section class="blacklist-block">
+        <div class="panel-heading">
+          <h3>Blacklisted Images</h3>
+          <span class="muted">Excluded from the next COLMAP run</span>
+        </div>
+        {% if colmap_blacklist.excluded_images %}
+          <div class="table-wrap scroll-table-wrap">
+            <table class="compact">
+              <thead><tr><th>Image</th><th>Role</th><th>Location</th><th>Reason</th></tr></thead>
+              <tbody>
+                {% for item in colmap_blacklist.excluded_images %}
+                  <tr>
+                    <td class="mono">{{ item.image_name }}</td>
+                    <td>{{ item.role or "" }}</td>
+                    <td>{{ item.location or "" }}</td>
+                    <td>{{ item.reason or "" }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="empty">No images blacklisted.</p>
+        {% endif %}
+      </section>
     </section>
 
     <section class="panel">

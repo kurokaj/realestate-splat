@@ -412,6 +412,29 @@ async function setupColmapViewer(root) {
     }
     const scene = await response.json();
     const viewer = renderSparseViewer(canvas, scene);
+    canvas.addEventListener("click", async (event) => {
+      const camera = viewer.pickCamera?.(event.clientX, event.clientY);
+      if (!camera || !root.dataset.colmapBlacklistUrl) return;
+      const details = [
+        camera.image_name || camera.name || "selected image",
+        camera.role ? `Role: ${camera.role}` : "",
+        camera.location ? `Location: ${camera.location}` : "",
+      ].filter(Boolean).join("\n");
+      if (!window.confirm(`Blacklist this image for the next COLMAP run?\n\n${details}`)) return;
+      const reason = window.prompt("Reason (optional):", "Camera pose is an outlier");
+      if (reason === null) return;
+      const blacklistResponse = await fetch(root.dataset.colmapBlacklistUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({ ...camera, image_name: camera.image_name || camera.name, reason }),
+      });
+      if (!blacklistResponse.ok) {
+        const message = await blacklistResponse.text();
+        window.alert(`Could not blacklist image: ${message}`);
+        return;
+      }
+      window.location.reload();
+    });
     renderViewerLegend(root.querySelector("[data-viewer-legend]"), scene.camera_group_colors || {});
     modeButtons.forEach((button) => {
       button.addEventListener("click", () => {
@@ -656,6 +679,26 @@ function renderSparseViewer(canvas, scene) {
     draw();
   }
 
+  function pickCamera(clientX, clientY) {
+    resizeCanvas();
+    const rect = canvas.getBoundingClientRect();
+    const x = (clientX - rect.left) * dpr;
+    const y = (clientY - rect.top) * dpr;
+    let selected = null;
+    let bestDistance = Infinity;
+    for (const camera of cameras) {
+      const projected = project(camera.position);
+      if (!projected) continue;
+      const distance = Math.hypot(projected.x - x, projected.y - y);
+      const threshold = (camera.role === "hero" ? 16 : 12) * dpr;
+      if (distance <= threshold && distance < bestDistance) {
+        selected = camera;
+        bestDistance = distance;
+      }
+    }
+    return selected;
+  }
+
   function tick(timestamp) {
     animationFrame = 0;
     const deltaSeconds = lastTick ? Math.min(0.05, (timestamp - lastTick) / 1000) : 0.016;
@@ -766,5 +809,5 @@ function renderSparseViewer(canvas, scene) {
   }
 
   draw();
-  return { setMode, reset };
+  return { setMode, reset, pickCamera };
 }
