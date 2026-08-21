@@ -17,7 +17,7 @@
   <section class="panel compact-panel">
     <dl class="kv four">
       <dt>Raw</dt><dd>{{ project.raw_uri or "" }}</dd>
-      <dt>Preprocess</dt><dd>{{ project.preprocess_current_uri or "" }}</dd>
+      <dt>Preprocess</dt><dd class="mono">r2://{{ default_bucket }}/projects/{{ project.id }}/preprocess/groups/*group_name*/current</dd>
       <dt>COLMAP</dt><dd>{{ project.colmap_current_uri or "" }}</dd>
       <dt>Training</dt><dd>{{ project.training_current_uri or "" }}</dd>
     </dl>
