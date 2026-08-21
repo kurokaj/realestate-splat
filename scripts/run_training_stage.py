@@ -16,13 +16,17 @@ from shutil import which
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from realestate_splat.cli import CommandResult, run_logged_command, utc_now, write_json  # noqa: E402
 from realestate_splat.stage_contract import StageResult, write_stage_result  # noqa: E402
 from realestate_splat.storage import copy_file, sync_directory  # noqa: E402
+from controller_common.preprocess_assembly import assemble_preprocess_groups_local, parse_group_output_specs  # noqa: E402
 
 
 DEFAULT_PIXI_BIN = Path("/opt/buildvision/pixi/bin/pixi")
@@ -43,6 +47,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Preprocess current URI, e.g. r2://bucket/projects/id/preprocess/current.",
     )
     parser.add_argument("--colmap-uri", required=True, help="COLMAP current URI, e.g. r2://bucket/projects/id/colmap/current.")
+    parser.add_argument(
+        "--preprocess-group-output",
+        action="append",
+        default=[],
+        metavar="JSON",
+        help="Approved grouped preprocess output as JSON; groups are assembled locally for training.",
+    )
     parser.add_argument("--output-uri", required=True, help="Training output URI, e.g. r2://bucket/projects/id/training.")
     parser.add_argument("--endpoint-url", help="S3-compatible endpoint URL. For r2://, R2_ENDPOINT is used by default.")
     parser.add_argument("--stage-run-id", help="Stable training run id. Defaults to a UTC timestamp.")
@@ -127,7 +138,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         preprocess_dir.mkdir(parents=True, exist_ok=True)
         colmap_dir.mkdir(parents=True, exist_ok=True)
         logs_dir.mkdir(parents=True, exist_ok=True)
-        sync_directory(args.preprocess_uri, preprocess_dir, endpoint_url=args.endpoint_url)
+        group_outputs = parse_group_output_specs(args.preprocess_group_output)
+        if group_outputs:
+            assemble_preprocess_groups_local(
+                group_outputs=group_outputs,
+                destination_dir=preprocess_dir,
+                endpoint_url=args.endpoint_url,
+                project_id=args.project_id,
+            )
+        else:
+            sync_directory(args.preprocess_uri, preprocess_dir, endpoint_url=args.endpoint_url)
         sync_directory(args.colmap_uri, colmap_dir, endpoint_url=args.endpoint_url)
         prepare_local_run(preprocess_dir, colmap_dir, local_run_dir)
 

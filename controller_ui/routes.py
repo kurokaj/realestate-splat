@@ -450,6 +450,22 @@ def ui_queue_training(
         latest_colmap = latest_stage_run(conn, project_id, "colmap")
         if not latest_colmap or latest_colmap.get("status") != "approved":
             raise HTTPException(status_code=400, detail="COLMAP must be approved before training can be queued")
+        preprocess_runs = rows_to_json(
+            conn.execute(
+                """
+                SELECT *
+                FROM stage_runs
+                WHERE project_id = %s AND stage = 'preprocess'
+                ORDER BY created_at DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        )
+        project_json = row_to_json(project)
+        preprocess_group_outputs = approved_preprocess_group_outputs(
+            raw_source_summary(project_json),
+            preprocess_runs,
+        )
         resolved_preprocess_uri = empty_to_none(preprocess_uri) or project.get("preprocess_current_uri")
         resolved_colmap_uri = empty_to_none(colmap_uri) or project.get("colmap_current_uri")
         resolved_output_uri = empty_to_none(output_uri) or f"r2://{default_r2_bucket()}/projects/{project_id}/training"
@@ -465,6 +481,7 @@ def ui_queue_training(
             splatfacto_options["use_scale_regularization"] = use_scale_regularization == "true"
         input_uri_json = {
             "preprocess_uri": resolved_preprocess_uri,
+            "preprocess_group_outputs": preprocess_group_outputs,
             "colmap_uri": resolved_colmap_uri,
             "output_uri": resolved_output_uri,
             "endpoint_url": empty_to_none(endpoint_url),

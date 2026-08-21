@@ -562,6 +562,9 @@ def build_training_stage_shell_command(stage_run: dict[str, Any], inputs: dict[s
     splatfacto_options = inputs.get("splatfacto_options")
     if isinstance(splatfacto_options, dict) and "use_scale_regularization" in splatfacto_options:
         command.append("--use-scale-regularization" if splatfacto_options.get("use_scale_regularization") else "--no-use-scale-regularization")
+    for group_output in inputs.get("preprocess_group_outputs", []):
+        if isinstance(group_output, dict):
+            command.extend(["--preprocess-group-output", json.dumps(group_output, separators=(",", ":"))])
     for train_arg in inputs.get("train_options", []):
         append_argparse_value(command, "--train-option", train_arg)
 
