@@ -493,6 +493,8 @@ def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str
         inputs.get("feature_extractor", "SIFT"),
         "--matcher",
         inputs.get("matcher", "exhaustive"),
+        "--processing-strategy",
+        inputs.get("processing_strategy", "single"),
         "--matching-type",
         inputs.get("matching_type", "SIFT_BRUTEFORCE"),
         "--camera-model",
@@ -508,6 +510,8 @@ def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str
         command.extend(["--raw-uri", inputs["raw_uri"]])
     if inputs.get("blacklist_uri"):
         command.extend(["--blacklist-uri", inputs["blacklist_uri"]])
+    if inputs.get("matching_plan_uri"):
+        command.extend(["--matching-plan-uri", inputs["matching_plan_uri"]])
     for group_output in inputs.get("preprocess_group_outputs", []):
         if isinstance(group_output, dict):
             command.extend(["--preprocess-group-output", json.dumps(group_output, separators=(",", ":"))])

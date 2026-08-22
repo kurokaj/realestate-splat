@@ -25,6 +25,7 @@
 
   <nav class="tabs" aria-label="Workflow tabs">
     <button type="button" class="tab-button is-active" data-tab-target="preprocess">Preprocess</button>
+    <button type="button" class="tab-button" data-tab-target="matching">Matching Strategy{% if not matching_gate_open %} (Locked){% endif %}</button>
     <button type="button" class="tab-button" data-tab-target="colmap">COLMAP{% if not colmap_gate_open %} (Locked){% endif %}</button>
     <button type="button" class="tab-button" data-tab-target="training">Training{% if not training_gate_open %} (Locked){% endif %}</button>
     <button type="button" class="tab-button" data-tab-target="activity">Activity</button>
@@ -357,6 +358,85 @@
     {% endif %}
   </section>
 
+  <section class="tab-panel" data-tab-panel="matching">
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>Matching Strategy</h2>
+        <span class="status status-{{ 'approved' if matching_plan_selected else 'waiting' }}">{{ matching_plan_status }}</span>
+      </div>
+      {% if matching_gate_open %}
+      <form method="post" action="/ui/projects/{{ project.id }}/matching-strategy" class="stack" data-matching-strategy-form>
+        <div class="grid two tight">
+          <label>
+            <span class="label-title">Strategy <span class="info-dot" tabindex="0" data-tip="Single is the direct fallback. Hybrid strategies run each ordered video separately, then match only the connections shown below.">i</span></span>
+            <select name="processing_strategy" data-colmap-processing-strategy>
+              {% for option in matching_strategy_options %}
+                <option value="{{ option.value }}" {% if colmap_form_values.processing_strategy == option.value %}selected{% endif %} {% if not option.enabled %}disabled{% endif %}>{{ option.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label data-single-style-row>
+            <span class="label-title">Matching style <span class="info-dot" tabindex="0" data-tip="The single-source matching route: sequential for ordered video, exhaustive for complete pair coverage, or vocabulary tree for large unordered sets.">i</span></span>
+            <select name="single_matching_style" data-single-matching-style>
+              <option value="sequential" {% if colmap_form_values.single_matching_style == "sequential" %}selected{% endif %}>Sequential</option>
+              <option value="exhaustive" {% if colmap_form_values.single_matching_style == "exhaustive" %}selected{% endif %}>Exhaustive</option>
+              <option value="vocab_tree" {% if colmap_form_values.single_matching_style == "vocab_tree" %}selected{% endif %}>Vocabulary tree</option>
+            </select>
+          </label>
+          {% if matching_has_heroes %}
+          <label data-hero-style-row>
+            <span class="label-title">Hero matching style <span class="info-dot" tabindex="0" data-tip="Hero images are already assigned to locations during preprocessing. This controls how those hero images are matched to their location coverage source.">i</span></span>
+            <select name="hero_matching_style" data-hero-matching-style>
+              <option value="exhaustive" {% if colmap_form_values.hero_matching_style != "vocab_tree" %}selected{% endif %}>Exhaustive</option>
+              <option value="vocab_tree" {% if colmap_form_values.hero_matching_style == "vocab_tree" %}selected{% endif %}>Vocabulary tree</option>
+            </select>
+          </label>
+          {% endif %}
+        </div>
+        {% if matching_has_multiple_coverages %}
+        <div class="grid two tight">
+          <label data-video-bridge-style-row>
+            <span class="label-title">Video bridge matching style <span class="info-dot" tabindex="0" data-tip="Matching used between connected video sources. Sequential matching is used inside each video; this style is used only across video-to-video connections.">i</span></span>
+            <select name="video_bridge_matching_style" data-video-bridge-style>
+              <option value="exhaustive" {% if colmap_form_values.video_bridge_matching_style != "vocab_tree" %}selected{% endif %}>Exhaustive</option>
+              <option value="vocab_tree" {% if colmap_form_values.video_bridge_matching_style == "vocab_tree" %}selected{% endif %}>Vocabulary tree</option>
+            </select>
+          </label>
+          <div aria-hidden="true"></div>
+        </div>
+        {% endif %}
+        <label data-loop-detection-row>
+          <span class="label-title">Sequential loop detection <span class="info-dot" tabindex="0" data-tip="Lets sequential COLMAP look for revisited areas. It is used only when a sequential stage exists.">i</span></span>
+          <span class="checkbox-row">
+            <input type="hidden" name="sequential_loop_detection" value="false">
+            <input type="checkbox" name="sequential_loop_detection" value="true" {% if colmap_form_values.sequential_loop_detection is not sameas false %}checked{% endif %} data-matching-loop-detection>
+            <span class="muted">Use for ordered video sources.</span>
+          </span>
+        </label>
+        <div class="matching-plan-editor" data-colmap-plan-editor>
+          <div class="panel-heading">
+            <h3>Overlapping coverage sources</h3>
+            <span class="muted">Connect videos that share visible space. Hero connections are generated from their preprocessing location.</span>
+          </div>
+          <div class="relation-editor-shell">
+            <div
+              class="drawflow relation-editor-canvas"
+              data-relation-editor
+              data-relation-entries="{{ colmap_source_groups|selectattr('kind', 'equalto', 'video')|list|tojson|forceescape }}"
+              data-relation-project="{{ project.id }}"
+            ></div>
+          </div>
+          <input type="hidden" name="matching_connections_json" value="{{ colmap_form_values.matching_connections_json or '[]' }}" data-colmap-connections-input>
+          <p class="muted">Drag blocks to arrange the graph. Connect the output handle of one video to the input handle of another. A line means the videos will receive targeted cross-source matching.</p>
+        </div>
+        <button type="submit">Save Matching Strategy</button>
+      </form>
+      {% else %}
+        <p class="empty">Approve all location preprocess runs first to unlock matching strategy selection.</p>
+      {% endif %}
+    </section>
+  </section>
+
   <section class="tab-panel" data-tab-panel="colmap">
     <section class="panel">
       <div class="panel-heading">
@@ -401,14 +481,6 @@
         </div>
         <div class="grid three tight">
           <label>
-            <span class="label-title">Matching style <span class="info-dot" tabindex="0" data-tip="COLMAP pair generation style: exhaustive compares all image pairs, sequential uses frame order, vocabulary tree is for larger unordered sets.">i</span></span>
-            <select name="matcher" data-colmap-matcher-select>
-              {% for option in colmap_matcher_options %}
-                <option value="{{ option.value }}" {% if colmap_form_values.matcher == option.value %}selected{% endif %}>{{ option.label }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>
             <span class="label-title">Feature matcher <span class="info-dot" tabindex="0" data-tip="COLMAP FeatureMatching.type. SIFT_BRUTEFORCE is the default; LightGlue can improve difficult pairs but downloads ONNX model files on first use.">i</span></span>
             <select name="matching_type" data-colmap-matching-type-select>
               {% for option in colmap_feature_matcher_options %}
@@ -427,30 +499,6 @@
           <label>
             <span class="label-title">Max image size <span class="info-dot" tabindex="0" data-tip="Maximum resized image dimension passed to COLMAP feature extraction. SIFT is fine around 3200. ALIKED is much heavier on VRAM; on 20 GB GPUs start around 2048 and drop lower if memory becomes a problem.">i</span></span>
             <input name="max_image_size" type="number" min="256" step="64" value="{{ colmap_form_values.max_image_size or 3200 }}">
-          </label>
-          <label data-colmap-loop-detection-row>
-            <span class="label-title">Loop detection <span class="info-dot" tabindex="0" data-tip="SequentialMatching.loop_detection. Leave this on for video-like captures so COLMAP can reconnect revisited areas and reduce split planes. It only applies to sequential matching style.">i</span></span>
-            <span class="checkbox-row">
-              <input type="hidden" name="sequential_loop_detection" value="false">
-              <input
-                type="checkbox"
-                name="sequential_loop_detection"
-                value="true"
-                {% if colmap_form_values.sequential_loop_detection is not sameas false %}checked{% endif %}
-                data-colmap-loop-detection-input
-              >
-              <span class="muted" data-colmap-loop-detection-note>Only applies when matching style is sequential.</span>
-            </span>
-          </label>
-          <label data-colmap-vocab-tree-row>
-            <span class="label-title">Vocabulary tree path <span class="info-dot" tabindex="0" data-tip="Optional override for COLMAP's pretrained vocabulary tree. Leave empty to use COLMAP's default auto-downloaded tree.">i</span></span>
-            <input
-              name="vocab_tree"
-              value="{{ colmap_form_values.vocab_tree or '' }}"
-              placeholder="Optional override; leave empty for COLMAP default"
-              data-colmap-vocab-tree-input
-            >
-            <span class="muted" data-colmap-vocab-tree-note>Only applies when matching style is vocabulary tree.</span>
           </label>
           <label>
             <span class="label-title">GPU <span class="info-dot" tabindex="0" data-tip="Only sub-$1.50/hour GPUs that match the current COLMAP image architecture shortlist are shown here.">i</span></span>
@@ -494,7 +542,7 @@
         </div>
       </form>
       {% else %}
-        <p class="empty">Approve the latest preprocess run first to unlock manual COLMAP queueing.</p>
+        <p class="empty">Approve preprocessing and save a matching strategy first to unlock COLMAP.</p>
       {% endif %}
     </section>
 

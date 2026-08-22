@@ -92,6 +92,10 @@ The manifests already provide most of the required identity information:
 The normalized processing plan should add only orchestration information. It
 should not duplicate full image metadata.
 
+The user-facing strategy choice is intentionally only `single` or `hybrid`.
+The internal plan may still record the concrete hybrid topology, such as one
+video plus heroes or multiple videos plus heroes.
+
 ## Normalized Processing Plan
 
 Create a small `matching_plan.json` for every COLMAP run. Its shape should be
@@ -460,8 +464,13 @@ Implementation status:
   runtime image.
 - A validated JSON plan can run per-group sequential stages and targeted
   exhaustive or vocabulary-tree stages against the shared database.
-- The command-line and R2 stage wrappers accept a local matching plan; the UI
-  connection editor remains the next integration step.
+- The command-line and R2 stage wrappers accept a local or R2 matching plan.
+- The UI now has a separate Matching Strategy gate between preprocessing and
+  COLMAP. It exposes only strategies supported by the discovered sources,
+  selects hero matching style when heroes exist, and shows manual video
+  connections as a source graph. Queueing persists the small plan in
+  `colmap/review/matching_plan.json`; the pod downloads it and assembles the
+  approved preprocess groups locally.
 
 ### Phase 4: Multiple videos
 

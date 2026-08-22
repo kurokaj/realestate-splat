@@ -303,6 +303,84 @@ label.is-disabled select:disabled {
   cursor: not-allowed;
 }
 
+.relation-editor-shell {
+  background: #101719;
+  border: 1px solid #263438;
+  border-radius: 8px;
+  height: 520px;
+  overflow: hidden;
+  position: relative;
+}
+
+.relation-editor-canvas {
+  background-color: #101719;
+  background-image: radial-gradient(#2a383b 1px, transparent 1px);
+  background-size: 22px 22px;
+  height: 100%;
+  width: 100%;
+}
+
+.relation-editor-canvas .drawflow-node {
+  background: #24383a !important;
+  border: 1px solid #6b8b87 !important;
+  border-radius: 12px;
+  box-shadow: 0 8px 18px rgba(5, 18, 20, 0.22);
+  color: #e7f0ed !important;
+  min-width: 190px;
+  padding: 0;
+}
+
+.relation-editor-canvas .drawflow-node.selected {
+  background: #31504d !important;
+  border-color: #d4a574 !important;
+  box-shadow: 0 0 0 2px rgba(212, 165, 116, 0.28), 0 10px 22px rgba(5, 18, 20, 0.28);
+}
+
+.relation-node-card {
+  display: grid;
+  gap: 5px;
+  padding: 13px 16px;
+}
+
+.relation-node-card span,
+.relation-node-card small {
+  color: #b9cbc6;
+  font-size: 12px;
+}
+
+.relation-editor-canvas .connection .main-path {
+  stroke: #c99d73;
+  stroke-width: 2.5px;
+}
+
+.relation-editor-canvas .drawflow-node .input,
+.relation-editor-canvas .drawflow-node .output {
+  background: #9bb9b0 !important;
+  border: 2px solid #d8e6df !important;
+  box-shadow: 0 2px 6px rgba(5, 18, 20, 0.25) !important;
+}
+
+.relation-editor-canvas .drawflow-node .drawflow_content_node,
+.relation-editor-canvas .drawflow-node .relation-node-card {
+  background: transparent !important;
+}
+
+.relation-editor-canvas .connection .main-path {
+  fill: none !important;
+  stroke: #c99d73 !important;
+}
+
+.relation-editor-canvas .connection .point {
+  fill: #c99d73 !important;
+  stroke: #c99d73 !important;
+}
+
+.relation-editor-canvas .drawflow-delete {
+  background: #6d5552 !important;
+  border: 1px solid #c7a7a0 !important;
+  color: #f4e8e4 !important;
+}
+
 .dependency-note {
   display: block;
   font-size: 11px;

@@ -42,6 +42,8 @@ from controller_common.preprocess_assembly import assembled_project_preprocess_u
 from src.realestate_splat.storage import copy_file, parse_storage_uri
 from scripts.preprocess_video import PROFILE_DEFAULTS
 from controller_common.raw_upload import source_group_key
+from controller_common.matching_plan import build_hybrid_matching_plan, build_single_matching_plan, build_source_groups, resolve_group_reference, validate_matching_plan
+from controller_common.matching_plan import SUPPORTED_STRATEGIES
 
 
 router = APIRouter(include_in_schema=False)
@@ -340,11 +342,13 @@ def ui_queue_colmap(
     endpoint_url: Optional[str] = Form(default=None),
     mode: str = Form(default="global"),
     feature_extractor: str = Form(default="SIFT"),
-    matcher: str = Form(default="exhaustive"),
+    matcher: Optional[str] = Form(default=None),
+    processing_strategy: Optional[str] = Form(default=None),
+    matching_connections_json: Optional[str] = Form(default=None),
     matching_type: str = Form(default="SIFT_BRUTEFORCE"),
     camera_model: str = Form(default="SIMPLE_RADIAL"),
     max_image_size: int = Form(default=0),
-    sequential_loop_detection: Optional[str] = Form(default="true"),
+    sequential_loop_detection: Optional[str] = Form(default=None),
     vocab_tree: Optional[str] = Form(default=None),
     provider: str = Form(default=default_colmap_provider()),
     image: Optional[str] = Form(default=None),
@@ -382,12 +386,54 @@ def ui_queue_colmap(
         require_r2_uri(resolved_preprocess_uri, "preprocess_uri")
         require_r2_uri(resolved_output_uri, "output_uri")
         validate_choice(feature_extractor, {option["value"] for option in COLMAP_FEATURE_EXTRACTOR_OPTIONS}, "feature_extractor")
-        validate_choice(matcher, {option["value"] for option in COLMAP_MATCHER_OPTIONS}, "matcher")
         validate_choice(matching_type, {option["value"] for option in COLMAP_FEATURE_MATCHER_OPTIONS}, "matching_type")
         validate_choice(camera_model, {option["value"] for option in COLMAP_CAMERA_MODEL_OPTIONS}, "camera_model")
         validate_colmap_feature_matcher(feature_extractor, matching_type)
         resolved_max_image_size = max_image_size if max_image_size > 0 else default_colmap_max_image_size(feature_extractor)
         resolved_vocab_tree = empty_to_none(vocab_tree) or default_colmap_vocab_tree()
+        source_manifest = approved_colmap_image_manifest(raw_summary, preprocess_runs)
+        connections = parse_matching_connections(matching_connections_json)
+        matching_plan = None
+        try:
+            saved_plan = load_json_uri(colmap_matching_plan_uri(project_json))
+        except Exception:
+            saved_plan = {}
+        if saved_plan.get("strategy") not in SUPPORTED_STRATEGIES:
+            raise HTTPException(status_code=400, detail="Select and save a matching strategy before queueing COLMAP")
+        if processing_strategy is None and saved_plan.get("strategy") in SUPPORTED_STRATEGIES:
+            matching_plan = saved_plan
+            processing_strategy = str(saved_plan["strategy"])
+        elif processing_strategy not in {None, "single"}:
+            try:
+                matching_plan = build_hybrid_matching_plan(
+                    source_manifest,
+                    {"processing_strategy": processing_strategy, "matching_type": matching_type},
+                    connections,
+                )
+                validate_matching_plan(matching_plan)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        processing_strategy = processing_strategy or "single"
+        if matching_plan is not None:
+            connections = matching_plan.get("connections") or connections
+        plan_matcher = next(
+            (stage.get("matching_style") for stage in (matching_plan or {}).get("matching_stages", []) if stage.get("id") == "single_matcher"),
+            None,
+        )
+        matcher = matcher or plan_matcher or "exhaustive"
+        validate_choice(matcher, {option["value"] for option in COLMAP_MATCHER_OPTIONS}, "matcher")
+        loop_detection = (
+            saved_plan.get("sequential_loop_detection", True)
+            if matching_plan is not None
+            else str(sequential_loop_detection if sequential_loop_detection is not None else "true").lower() == "true"
+        )
+        matching_plan_uri = None
+        if matching_plan is not None:
+            matching_plan_uri = colmap_matching_plan_uri(project_json)
+            with tempfile.NamedTemporaryFile("w+", suffix=".json") as handle:
+                handle.write(json.dumps(matching_plan, indent=2) + "\n")
+                handle.flush()
+                copy_file(handle.name, matching_plan_uri, endpoint_url=endpoint_url)
         input_uri_json = {
             "preprocess_uri": resolved_preprocess_uri,
             "preprocess_group_outputs": preprocess_group_outputs,
@@ -398,10 +444,13 @@ def ui_queue_colmap(
             "mode": mode,
             "feature_extractor": feature_extractor,
             "matcher": matcher,
+            "processing_strategy": processing_strategy,
+            "matching_connections": connections,
+            "matching_plan_uri": matching_plan_uri,
             "matching_type": matching_type,
             "camera_model": camera_model,
             "max_image_size": resolved_max_image_size,
-            "sequential_loop_detection": str(sequential_loop_detection).lower() == "true",
+            "sequential_loop_detection": loop_detection,
             "vocab_tree": resolved_vocab_tree,
             "repo_url": empty_to_none(repo_url),
             "git_ref": empty_to_none(git_ref),
@@ -419,6 +468,59 @@ def ui_queue_colmap(
             output_uri=f"{resolved_output_uri.rstrip('/')}/current",
         )
     return RedirectResponse(url=f"/ui/projects/{project_id}", status_code=303)
+
+
+@router.post("/projects/{project_id}/matching-strategy")
+def ui_save_matching_strategy(
+    project_id: str,
+    processing_strategy: str = Form(...),
+    single_matching_style: str = Form(default="exhaustive"),
+    hero_matching_style: str = Form(default="exhaustive"),
+    video_bridge_matching_style: str = Form(default="exhaustive"),
+    sequential_loop_detection: Optional[str] = Form(default="true"),
+    matching_connections_json: Optional[str] = Form(default=None),
+) -> RedirectResponse:
+    with connect() as conn:
+        project = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
+        preprocess_runs = rows_to_json(
+            conn.execute(
+                "SELECT * FROM stage_runs WHERE project_id = %s AND stage = 'preprocess' ORDER BY created_at DESC",
+                (project_id,),
+            ).fetchall()
+        )
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if processing_strategy not in {"single", "hybrid"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported processing strategy: {processing_strategy}")
+    raw_summary = raw_source_summary(row_to_json(project))
+    if not all_location_preprocess_runs_approved(raw_summary, preprocess_runs):
+        raise HTTPException(status_code=400, detail="All source locations must have approved preprocess runs before selecting a matching strategy")
+    manifest = approved_colmap_image_manifest(raw_summary, preprocess_runs)
+    connections = parse_matching_connections(matching_connections_json)
+    try:
+        if processing_strategy == "single":
+            if single_matching_style not in {"sequential", "exhaustive", "vocab_tree"}:
+                raise ValueError(f"Unsupported single matching style: {single_matching_style}")
+            plan = build_single_matching_plan(
+                manifest,
+                {"matcher": single_matching_style, "sequential_loop_detection": str(sequential_loop_detection).lower() == "true"},
+            )
+        else:
+            coverage_count = sum(1 for item in build_source_groups(manifest) if item.get("kind") in {"video", "coverage_images"})
+            internal_strategy = "video_plus_heroes" if coverage_count <= 1 else "multiple_videos_plus_heroes"
+            plan = build_hybrid_matching_plan(
+                manifest,
+                {"processing_strategy": internal_strategy, "hero_matching_style": hero_matching_style, "video_bridge_matching_style": video_bridge_matching_style, "sequential_loop_detection": str(sequential_loop_detection).lower() == "true"},
+                connections,
+            )
+        validate_matching_plan(plan)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with tempfile.NamedTemporaryFile("w+", suffix=".json") as handle:
+        handle.write(json.dumps(plan, indent=2) + "\n")
+        handle.flush()
+        copy_file(handle.name, colmap_matching_plan_uri(row_to_json(project)))
+    return RedirectResponse(url=f"/ui/projects/{project_id}#matching", status_code=303)
 
 
 @router.post("/projects/{project_id}/training")
@@ -917,8 +1019,54 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
     colmap_output_base = project.get("colmap_current_uri", "").rsplit("/current", 1)[0] if project.get("colmap_current_uri") else ""
     feature_extractor = normalize_colmap_feature_extractor(input_json.get("feature_extractor") or "SIFT")
     assembled_preprocess_uri = assembled_project_preprocess_uri(project)
+    source_manifest = source_manifest_from_raw_summary(raw_summary)
+    try:
+        saved_plan = load_json_uri(colmap_matching_plan_uri(project))
+    except Exception:
+        saved_plan = {}
+    displayed_plan = saved_plan if saved_plan else {}
+    matching_plan_selected = saved_plan.get("strategy") in SUPPORTED_STRATEGIES
+    plan_connections = [
+        item for item in displayed_plan.get("connections", [])
+        if isinstance(item, dict) and item.get("kind") != "hero_location"
+    ]
+    source_groups = matching_source_group_cards(raw_summary, preprocess_runs)
+    visible_group_ids = {str(group.get("id")): group for group in source_groups}
+    visible_connections = []
+    for connection in plan_connections:
+        source = resolve_group_reference(str(connection.get("from") or ""), visible_group_ids)
+        target = resolve_group_reference(str(connection.get("to") or ""), visible_group_ids)
+        if source and target:
+            visible_connections.append({**connection, "from": source, "to": target})
+    has_heroes = any(group.get("kind") == "hero" for group in source_groups)
+    coverage_group_count = sum(group.get("kind") in {"video", "coverage_images"} for group in source_groups)
+    video_group_count = sum(group.get("kind") == "video" for group in source_groups)
+    ui_strategy = "single" if displayed_plan.get("strategy") == "single" else ("hybrid" if displayed_plan else "single")
+    single_matching_style = displayed_plan.get("single_matching_style") or next(
+        (stage.get("matching_style") for stage in displayed_plan.get("matching_stages", []) if stage.get("id") == "single_matcher"),
+        "exhaustive",
+    )
+    saved_hero_style = displayed_plan.get("hero_matching_style") or next(
+        (
+            stage.get("matching_style")
+            for stage in displayed_plan.get("matching_stages", [])
+            if stage.get("kind") == "bridge" and stage.get("matching_style") in {"exhaustive", "vocab_tree"}
+        ),
+        "exhaustive",
+    )
+    saved_bridge_style = displayed_plan.get("video_bridge_matching_style") or "exhaustive"
     return {
-        "colmap_gate_open": preprocess_gate_open,
+        "matching_gate_open": preprocess_gate_open,
+        "colmap_gate_open": preprocess_gate_open and matching_plan_selected,
+        "matching_plan_selected": matching_plan_selected,
+        "matching_plan_status": (
+            "Saved: " + (
+                "Single + " + str(single_matching_style).replace("_", " ")
+                if saved_plan.get("strategy") == "single"
+                else "Hybrid + hero " + str(saved_hero_style).replace("_", " ") + " / video bridge " + str(saved_bridge_style).replace("_", " ")
+            )
+            if matching_plan_selected else "Not selected"
+        ),
         "latest_colmap_run": latest_run,
         "colmap_form_values": {
             "preprocess_uri": assembled_preprocess_uri,
@@ -927,10 +1075,15 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
             "mode": input_json.get("mode") or "global",
             "feature_extractor": feature_extractor,
             "matcher": input_json.get("matcher") or "exhaustive",
+            "processing_strategy": ui_strategy,
+            "single_matching_style": single_matching_style,
+            "sequential_loop_detection": displayed_plan.get("sequential_loop_detection", input_json.get("sequential_loop_detection", True)),
+            "matching_connections_json": json.dumps(visible_connections or (input_json.get("matching_connections") or []), separators=(",", ":")),
+            "hero_matching_style": saved_hero_style,
+            "video_bridge_matching_style": saved_bridge_style,
             "matching_type": input_json.get("matching_type") or "SIFT_BRUTEFORCE",
             "camera_model": input_json.get("camera_model") or "SIMPLE_RADIAL",
             "max_image_size": input_json.get("max_image_size") or default_colmap_max_image_size(feature_extractor),
-            "sequential_loop_detection": input_json.get("sequential_loop_detection", True),
             "vocab_tree": input_json.get("vocab_tree") or default_colmap_vocab_tree() or "",
             "provider": latest_run.get("provider") if latest_run else default_colmap_provider(),
             "image": latest_run.get("image") if latest_run else "",
@@ -944,9 +1097,109 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
         "colmap_feature_matcher_options": COLMAP_FEATURE_MATCHER_OPTIONS,
         "colmap_camera_model_options": COLMAP_CAMERA_MODEL_OPTIONS,
         "colmap_gpu_options": COLMAP_GPU_OPTIONS,
+        "colmap_source_groups": source_groups,
+        "matching_strategy_options": [
+            {"value": "single", "label": "Single matcher (fallback)", "enabled": True},
+            {"value": "hybrid", "label": "Hybrid source matching", "enabled": video_group_count > 1 or has_heroes},
+        ],
+        "matching_has_heroes": has_heroes,
+        "matching_has_multiple_coverages": video_group_count > 1,
         "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "registered_by_location", "registered_by_group", "point_count", "feature_extractor", "matching_type", "matcher", "sequential_loop_detection", "vocab_tree", "camera_model", "max_image_size", "mode", "container_disk_gb"]),
         "colmap_blacklist": load_colmap_blacklist(project),
     }
+
+
+def parse_matching_connections(raw: Optional[str]) -> list[dict[str, Any]]:
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid matching connections JSON: {exc.msg}") from exc
+    if not isinstance(payload, list):
+        raise HTTPException(status_code=400, detail="Matching connections must be a list")
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def approved_colmap_image_manifest(
+    raw_summary: dict[str, Any],
+    preprocess_runs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Combine approved group manifests for plan editing without creating R2 duplicates."""
+    images: list[dict[str, Any]] = []
+    try:
+        outputs = approved_preprocess_group_outputs(raw_summary, preprocess_runs)
+    except HTTPException:
+        outputs = []
+    for output in outputs:
+        try:
+            manifest = load_json_uri(f"{output['output_uri'].rstrip('/')}/image_manifest.json")
+        except Exception:
+            continue
+        group_images = manifest.get("images") if isinstance(manifest, dict) else []
+        if isinstance(group_images, list):
+            images.extend(item for item in group_images if isinstance(item, dict))
+    return {"schema_version": 1, "images": images}
+
+
+def source_manifest_from_raw_summary(raw_summary: dict[str, Any]) -> dict[str, Any]:
+    """Build lightweight editor groups without downloading R2 manifests on refresh."""
+    images = []
+    for source in raw_summary.get("sources", []) if isinstance(raw_summary, dict) else []:
+        if not isinstance(source, dict):
+            continue
+        role = str(source.get("role") or "coverage_image")
+        images.append(
+            {
+                "source_id": source.get("source_id") or source.get("camera_group") or "unassigned",
+                "camera_group": source.get("camera_group") or "default",
+                "role": "hero" if role == "hero_image" else role,
+                "location": source.get("location"),
+                "image_name": source.get("relative_path") or source.get("source_id"),
+            }
+        )
+    return {"schema_version": 1, "images": images}
+
+
+def matching_source_group_cards(
+    raw_summary: dict[str, Any],
+    preprocess_runs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    groups = build_source_groups(source_manifest_from_raw_summary(raw_summary))
+    hero_counts: Counter[str] = Counter(
+        str(source.get("location") or "unassigned")
+        for source in raw_summary.get("sources", [])
+        if isinstance(source, dict) and source.get("role") == "hero_image"
+    )
+    reports = latest_group_capture_reports(preprocess_runs, raw_summary)
+    for group in groups:
+        locations = [str(location) for location in group.get("locations") or []]
+        location = locations[0] if locations else "unassigned"
+        report = reports.get(f"location:{location}") or {}
+        videos = report.get("videos") if isinstance(report, dict) else []
+        source_id = str(group.get("source_ids", [""])[0])
+        selected_count = next(
+            (
+                int(video.get("selected_frame_count") or 0)
+                for video in videos
+                if isinstance(video, dict) and str(video.get("source_id") or "") == source_id
+            ),
+            0,
+        )
+        group["image_count"] = selected_count or int(group.get("image_count") or 0)
+        group["hero_count"] = hero_counts.get(location, 0)
+        group["locality"] = location
+    return groups
+
+
+def colmap_matching_plan_uri(project: dict[str, Any]) -> str:
+    project_id = str(project.get("id") or "project")
+    current_uri = str(project.get("colmap_current_uri") or "").rstrip("/")
+    if current_uri.endswith("/current"):
+        base_uri = current_uri[: -len("/current")].rstrip("/")
+    else:
+        base_uri = f"r2://{default_r2_bucket()}/projects/{project_id}/colmap"
+    return f"{base_uri}/review/matching_plan.json"
 
 
 def training_review_context(project: dict[str, Any], stage_runs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1115,6 +1368,7 @@ def compact_raw_sources(sources: list[Any], stale_groups: set[str]) -> list[dict
         resolution = f"{width}x{height}" if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0 else ""
         rows.append(
             {
+                "source_id": source.get("source_id"),
                 "relative_path": source.get("relative_path"),
                 "role": source.get("role"),
                 "camera_group": source.get("camera_group"),

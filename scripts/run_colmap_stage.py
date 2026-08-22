@@ -71,6 +71,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=Path,
         help="Local JSON matching plan. It is copied into the temporary COLMAP run before execution.",
     )
+    parser.add_argument(
+        "--matching-plan-uri",
+        help="R2 JSON matching plan. It is downloaded into the temporary COLMAP run before execution.",
+    )
     parser.add_argument("--mode", choices=["incremental", "global"], default="global", help="COLMAP mapper mode.")
     parser.add_argument(
         "--feature-extractor",
@@ -79,6 +83,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="COLMAP FeatureExtraction.type.",
     )
     parser.add_argument("--matcher", choices=["exhaustive", "sequential", "vocab_tree"], default="exhaustive")
+    parser.add_argument(
+        "--processing-strategy",
+        choices=["single", "video_plus_heroes", "multiple_videos", "multiple_videos_plus_heroes"],
+        default="single",
+        help="High-level matching strategy recorded and passed to the COLMAP wrapper.",
+    )
     parser.add_argument(
         "--matching-type",
         choices=["SIFT_BRUTEFORCE", "SIFT_LIGHTGLUE", "ALIKED_BRUTEFORCE", "ALIKED_LIGHTGLUE"],
@@ -189,12 +199,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             apply_blacklist(input_dir, excluded_images)
         prepare_local_run(input_dir, local_run_dir)
+        if args.matching_plan_uri:
+            matching_plan_local = local_run_dir / "reports" / "matching_plan_input.json"
+            matching_plan_local.parent.mkdir(parents=True, exist_ok=True)
+            copy_file(args.matching_plan_uri, matching_plan_local, endpoint_url=args.endpoint_url)
+            args.matching_plan = matching_plan_local
         if args.matching_plan is not None:
-            copy_if_exists(
-                args.matching_plan.expanduser(),
-                local_run_dir / "reports" / "matching_plan_input.json",
-            )
-            if not (local_run_dir / "reports" / "matching_plan_input.json").exists():
+            matching_plan_input = local_run_dir / "reports" / "matching_plan_input.json"
+            if args.matching_plan.expanduser() != matching_plan_input:
+                copy_if_exists(args.matching_plan.expanduser(), matching_plan_input)
+            if not matching_plan_input.exists():
                 raise FileNotFoundError(f"Matching plan does not exist: {args.matching_plan}")
 
         colmap_result = run_colmap(args, local_run_dir, logs_dir)
@@ -377,6 +391,8 @@ def build_colmap_command(args: argparse.Namespace, local_run_dir: Path) -> List[
         args.feature_extractor,
         "--matcher",
         args.matcher,
+        "--processing-strategy",
+        args.processing_strategy,
         "--matching-type",
         args.matching_type,
         "--camera-model",

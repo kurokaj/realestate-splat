@@ -156,6 +156,7 @@ document.addEventListener("DOMContentLoaded", () => {
     setupColmapFormBehavior(form);
     setupProviderDependencyState(form);
   });
+  document.querySelectorAll('form[action$="/matching-strategy"]').forEach(setupMatchingPlanEditor);
   document.querySelectorAll('form[action$="/training"]').forEach(setupProviderDependencyState);
   setupTabs();
   setupAutoRefresh();
@@ -205,6 +206,56 @@ function setupColmapFormBehavior(form) {
   matcherSelect.addEventListener("change", syncLoopDetectionState);
   featureExtractorSelect.addEventListener("change", syncLoopDetectionState);
   syncLoopDetectionState();
+}
+
+function setupMatchingPlanEditor(form) {
+  const strategySelect = form.querySelector("[data-colmap-processing-strategy]");
+  const planEditor = form.querySelector("[data-colmap-plan-editor]");
+  const connectionInput = form.querySelector("[data-colmap-connections-input]");
+  const relationCanvas = form.querySelector("[data-relation-editor]");
+  if (relationCanvas && window.BuildvisionRelationEditor && strategySelect && planEditor && connectionInput) {
+    const entries = (() => {
+      try { return JSON.parse(relationCanvas.dataset.relationEntries || "[]"); } catch (_error) { return []; }
+    })();
+    let relations = [];
+    try { relations = JSON.parse(connectionInput.value || "[]"); } catch (_error) { relations = []; }
+    const relationEditor = window.BuildvisionRelationEditor.createRelationEditor({
+      container: relationCanvas,
+      entries,
+      relations,
+      projectId: relationCanvas.dataset.relationProject || "project",
+      onChange: (updatedRelations) => { connectionInput.value = JSON.stringify(updatedRelations); },
+    });
+    const heroStyleRow = form.querySelector("[data-hero-style-row]");
+    const heroStyleSelect = form.querySelector("[data-hero-matching-style]");
+    const singleStyleRow = form.querySelector("[data-single-style-row]");
+    const singleStyleSelect = form.querySelector("[data-single-matching-style]");
+    const loopDetection = form.querySelector("[data-matching-loop-detection]");
+    const bridgeStyleSelect = form.querySelector("[data-video-bridge-style]");
+    function syncMatchingControls() {
+      const isSingle = strategySelect.value === "single";
+      planEditor.classList.toggle("is-disabled", isSingle);
+      if (heroStyleRow && heroStyleSelect) {
+        heroStyleRow.classList.toggle("is-disabled", isSingle);
+        heroStyleSelect.disabled = isSingle;
+      }
+      if (singleStyleRow && singleStyleSelect) {
+        singleStyleRow.classList.toggle("is-disabled", !isSingle);
+        singleStyleSelect.disabled = !isSingle;
+      }
+      if (loopDetection) loopDetection.disabled = isSingle && singleStyleSelect?.value !== "sequential";
+    }
+    strategySelect.addEventListener("change", syncMatchingControls);
+    singleStyleSelect?.addEventListener("change", syncMatchingControls);
+    form.addEventListener("submit", () => {
+      const bridgeStyle = bridgeStyleSelect?.value || "exhaustive";
+      connectionInput.value = JSON.stringify(
+        relationEditor.getRelations().map((relation) => ({ ...relation, matching_style: bridgeStyle })),
+      );
+    });
+    syncMatchingControls();
+    return;
+  }
 }
 
 function setupTabs() {
