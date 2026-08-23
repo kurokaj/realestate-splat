@@ -269,6 +269,16 @@ button.secondary {
   color: var(--accent-strong);
 }
 
+.button-link {
+  display: inline-block;
+  padding: 7px 11px;
+  text-decoration: none;
+}
+
+.button-link:hover {
+  text-decoration: none;
+}
+
 button.danger {
   background: var(--danger);
   border-color: var(--danger);

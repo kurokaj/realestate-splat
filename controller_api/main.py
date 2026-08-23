@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from psycopg.types.json import Jsonb
@@ -371,15 +371,19 @@ def parse_metadata_json(raw_value: Optional[str]) -> Optional[dict[str, Any]]:
 
 
 @app.get("/stage-runs")
-def list_stage_runs(project_id: Optional[str] = None) -> list[dict[str, Any]]:
+def list_stage_runs(
+    project_id: Optional[str] = None,
+    compact: bool = Query(default=False),
+) -> list[dict[str, Any]]:
     with connect() as conn:
+        select = "id, project_id, stage, status, created_at" if compact else "*"
         if project_id:
             rows = conn.execute(
-                "SELECT * FROM stage_runs WHERE project_id = %s ORDER BY created_at DESC",
+                f"SELECT {select} FROM stage_runs WHERE project_id = %s ORDER BY created_at DESC",
                 (project_id,),
             ).fetchall()
         else:
-            rows = conn.execute("SELECT * FROM stage_runs ORDER BY created_at DESC").fetchall()
+            rows = conn.execute(f"SELECT {select} FROM stage_runs ORDER BY created_at DESC").fetchall()
     return rows_to_json(rows)
 
 

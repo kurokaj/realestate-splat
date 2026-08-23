@@ -412,7 +412,7 @@ function setupAutoRefresh() {
 
   async function poll() {
     try {
-      const response = await fetch(`/stage-runs?project_id=${encodeURIComponent(projectId)}`, {
+      const response = await fetch(`/stage-runs?project_id=${encodeURIComponent(projectId)}&compact=true`, {
         headers: { accept: "application/json" },
       });
       if (!response.ok) return;

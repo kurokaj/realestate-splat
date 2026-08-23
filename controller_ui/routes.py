@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Body, Form, HTTPException, Request
+from fastapi import APIRouter, Body, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -229,7 +229,11 @@ def blacklist_colmap_image(project_id: str, payload: dict[str, Any] = Body(defau
 
 
 @router.get("/projects/{project_id}", response_class=HTMLResponse)
-def project_detail(request: Request, project_id: str) -> HTMLResponse:
+def project_detail(
+    request: Request,
+    project_id: str,
+    run_limit: int = Query(default=5, ge=5, le=100),
+) -> HTMLResponse:
     data = load_project_detail(project_id)
     if data["project"] is None:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -244,6 +248,7 @@ def project_detail(request: Request, project_id: str) -> HTMLResponse:
             **review,
             **colmap_review,
             **training_review,
+            "run_limit": run_limit,
             "default_bucket": default_r2_bucket(),
             "default_raw_uri": f"r2://{default_r2_bucket()}/projects/{project_id}/raw",
             "default_preprocess_uri": f"r2://{default_r2_bucket()}/projects/{project_id}/preprocess",

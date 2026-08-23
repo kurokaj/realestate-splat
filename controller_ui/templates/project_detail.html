@@ -4,6 +4,7 @@
   {% set preprocess_runs = stage_runs|selectattr("stage", "equalto", "preprocess")|list %}
   {% set colmap_runs = stage_runs|selectattr("stage", "equalto", "colmap")|list %}
   {% set training_runs = stage_runs|selectattr("stage", "equalto", "training")|list %}
+  {% set next_run_limit = run_limit + 5 %}
 
   <section class="section-header" data-project-id="{{ project.id }}" data-stage-signature="{{ stage_signature }}">
     <div>
@@ -351,9 +352,12 @@
           <h2>Preprocess Runs</h2>
           <span class="muted">{{ preprocess_runs|length }} total</span>
         </div>
-        {% set stage_table_runs = preprocess_run_rows %}
+        {% set stage_table_runs = preprocess_run_rows[:run_limit] %}
         {% set stage_table_variant = "preprocess" %}
         {% include "stage_run_table.html" with context %}
+        {% if preprocess_run_rows|length > run_limit %}
+          <p><a class="secondary button-link" href="?run_limit={{ next_run_limit }}#preprocess">Show 5 more preprocess runs</a></p>
+        {% endif %}
       </section>
     {% endif %}
   </section>
@@ -628,9 +632,12 @@
           <h2>COLMAP Runs</h2>
           <span class="muted">{{ colmap_runs|length }} total</span>
         </div>
-        {% set stage_table_runs = colmap_runs %}
+        {% set stage_table_runs = colmap_runs[:run_limit] %}
         {% set stage_table_variant = "colmap" %}
         {% include "stage_run_table.html" %}
+        {% if colmap_runs|length > run_limit %}
+          <p><a class="secondary button-link" href="?run_limit={{ next_run_limit }}#colmap">Show 5 more COLMAP runs</a></p>
+        {% endif %}
       </section>
     {% endif %}
   </section>
@@ -778,9 +785,12 @@
           <h2>Training Runs</h2>
           <span class="muted">{{ training_runs|length }} total</span>
         </div>
-        {% set stage_table_runs = training_runs %}
+        {% set stage_table_runs = training_runs[:run_limit] %}
         {% set stage_table_variant = "training" %}
         {% include "stage_run_table.html" %}
+        {% if training_runs|length > run_limit %}
+          <p><a class="secondary button-link" href="?run_limit={{ next_run_limit }}#training">Show 5 more training runs</a></p>
+        {% endif %}
       </section>
       {% else %}
       <section class="panel">
@@ -795,9 +805,12 @@
         <h2>All Stage Runs</h2>
         <span class="muted">{{ stage_runs|length }} total</span>
       </div>
-      {% set stage_table_runs = stage_runs %}
+      {% set stage_table_runs = stage_runs[:run_limit] %}
       {% set stage_table_variant = "activity" %}
       {% include "stage_run_table.html" %}
+      {% if stage_runs|length > run_limit %}
+        <p><a class="secondary button-link" href="?run_limit={{ next_run_limit }}#activity">Show 5 more activity runs</a></p>
+      {% endif %}
     </section>
 
     <section class="panel">
