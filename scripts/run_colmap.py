@@ -1108,15 +1108,9 @@ def effective_matching_cpu_count() -> tuple[int, str]:
 
 
 def hybrid_matching_thread_config() -> tuple[int, str, str, str]:
-    """Choose nested BLAS and outer FAISS/OpenMP limits for hybrid matching."""
+    """Keep BLAS single-threaded while leaving FAISS/OpenMP parallel."""
     cpu_count, cpu_source = effective_matching_cpu_count()
-    if cpu_count <= 9:
-        default_blas_threads = "3"
-    elif cpu_count < 32:
-        default_blas_threads = "2"
-    else:
-        default_blas_threads = "1"
-    blas_threads = os.environ.get("COLMAP_HYBRID_BLAS_THREADS", default_blas_threads)
+    blas_threads = os.environ.get("COLMAP_HYBRID_BLAS_THREADS", "1")
     outer_threads = os.environ.get("COLMAP_HYBRID_OUTER_THREADS", str(min(cpu_count, 32)))
     return cpu_count, cpu_source, blas_threads, outer_threads
 
