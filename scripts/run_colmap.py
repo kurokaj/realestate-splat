@@ -1110,9 +1110,9 @@ def effective_matching_cpu_count() -> tuple[int, str]:
 def hybrid_matching_thread_config() -> tuple[int, str, str, str]:
     """Choose nested BLAS and outer FAISS/OpenMP limits for hybrid matching."""
     cpu_count, cpu_source = effective_matching_cpu_count()
-    if cpu_count < 32:
+    if cpu_count <= 9:
         default_blas_threads = "3"
-    elif cpu_count == 32:
+    elif cpu_count < 32:
         default_blas_threads = "2"
     else:
         default_blas_threads = "1"
