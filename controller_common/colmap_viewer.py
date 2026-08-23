@@ -147,14 +147,17 @@ def load_manifest_by_name(sparse_txt_dir: Path) -> dict[str, dict[str, Any]]:
 
 
 def camera_colors(role: str) -> dict[str, list[int]]:
-    return ROLE_CAMERA_COLORS.get(role, ROLE_CAMERA_COLORS["unknown"])
+    visual_role = "hero" if role in {"hero", "hero_image"} else "coverage" if role in {
+        "coverage", "coverage_video", "coverage_image"
+    } else "unknown"
+    return ROLE_CAMERA_COLORS[visual_role]
 
 
 def viewer_group_key(manifest_entry: Mapping[str, Any] | None, role: str) -> str:
     entry = manifest_entry or {}
     group = str(entry.get("camera_group") or "").strip()
     source_id = str(entry.get("source_id") or "").strip()
-    if role == "coverage":
+    if role in {"coverage", "coverage_video", "coverage_image"}:
         if group in {"", "coverage"} and source_id and source_id != "coverage_images":
             return f"coverage-{source_id}"
         if group.startswith("coverage_"):
@@ -177,7 +180,10 @@ def assign_camera_group_colors(camera_rows: list[dict[str, Any]]) -> dict[str, d
     colors: dict[str, dict[str, list[int]]] = {}
     role_indexes: dict[str, int] = {}
     for group in sorted(grouped):
-        role = grouped[group] if grouped[group] in GROUP_COLOR_PALETTES else "unknown"
+        raw_role = grouped[group]
+        role = "hero" if raw_role in {"hero", "hero_image"} else "coverage" if raw_role in {
+            "coverage", "coverage_video", "coverage_image"
+        } else "unknown"
         palette = GROUP_COLOR_PALETTES[role]
         index = role_indexes.get(role, 0)
         colors[group] = palette[index % len(palette)]

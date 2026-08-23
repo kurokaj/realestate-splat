@@ -1411,11 +1411,12 @@ def image_manifest_entry_for_video(record: FrameRecord, video_info: VideoInfo) -
     return {
         "image_name": output_path.name,
         "path": record.output_file,
-        "role": "coverage",
+        "role": "coverage_video",
+        "source_kind": "video",
         "source_id": record.source_id,
         "location": record.source_id,
         "source_path": record.source_video,
-        "camera_group": "coverage",
+        "camera_group": "coverage_video",
         "width": video_info.width,
         "height": video_info.height,
         "metrics": {
@@ -1435,11 +1436,12 @@ def image_manifest_entry_for_coverage_image(record: FrameRecord) -> Dict[str, An
     return {
         "image_name": output_path.name,
         "path": record.output_file,
-        "role": "coverage",
+        "role": "coverage_image",
+        "source_kind": "image",
         "source_id": record.source_id,
         "location": record.source_id,
         "source_path": record.source_image,
-        "camera_group": "coverage",
+        "camera_group": "coverage_image",
         "width": record.width,
         "height": record.height,
         "metrics": {
@@ -1458,6 +1460,7 @@ def image_manifest_entry_for_hero(record: HeroImageRecord) -> Dict[str, Any]:
         "image_name": output_path.name,
         "path": record.output_file,
         "role": "hero",
+        "source_kind": "hero",
         "source_id": record.source_id,
         "location": record.location,
         "source_path": record.path,

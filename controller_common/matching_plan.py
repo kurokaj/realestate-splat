@@ -60,15 +60,19 @@ def build_source_groups(image_manifest: Mapping[str, Any]) -> list[Dict[str, Any
         source_id = str(entry.get("source_id") or "unassigned")
         camera_group = str(entry.get("camera_group") or "default")
         group_id = f"{source_id}:{camera_group}"
+        role = str(entry.get("role") or "")
+        source_kind = str(entry.get("source_kind") or "")
+        is_hero = role in {"hero", "hero_image"} or source_kind == "hero"
+        is_video = role == "coverage_video" or source_kind == "video"
         group = grouped.setdefault(
             group_id,
             {
                 "id": group_id,
                 "kind": (
                     "hero"
-                    if entry.get("role") == "hero"
+                    if is_hero
                     else "video"
-                    if entry.get("role") == "coverage_video"
+                    if is_video
                     else "coverage_images"
                 ),
                 "source_ids": [source_id],
@@ -82,7 +86,7 @@ def build_source_groups(image_manifest: Mapping[str, Any]) -> list[Dict[str, Any
         location = entry.get("location")
         if location and location not in group["locations"]:
             group["locations"].append(location)
-        if entry.get("role") == "coverage_video":
+        if is_video:
             group["ordered"] = True
     return sorted(grouped.values(), key=lambda group: group["id"])
 

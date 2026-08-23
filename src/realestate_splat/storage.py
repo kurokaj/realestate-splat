@@ -89,11 +89,16 @@ def aws_base_command(uri: StorageUri, endpoint_url: Optional[str]) -> List[str]:
     return command
 
 
-def run_command(command: Sequence[str], dry_run: bool) -> None:
+def run_command(
+    command: Sequence[str],
+    dry_run: bool,
+    *,
+    timeout_seconds: Optional[float] = None,
+) -> None:
     print("$ " + " ".join(command), flush=True)
     if dry_run:
         return
-    subprocess.run(list(command), check=True)
+    subprocess.run(list(command), check=True, timeout=timeout_seconds)
 
 
 def sync_directory(
@@ -134,6 +139,7 @@ def copy_file(
     *,
     endpoint_url: Optional[str] = None,
     dry_run: bool = False,
+    timeout_seconds: Optional[float] = None,
 ) -> None:
     source_uri = parse_storage_uri(source)
     destination_uri = parse_storage_uri(destination)
@@ -145,7 +151,7 @@ def copy_file(
     object_uri = source_uri if source_uri.is_object_storage else destination_uri
     command = aws_base_command(object_uri, endpoint_url)
     command.extend(["s3", "cp", aws_sync_arg(source_uri), aws_sync_arg(destination_uri)])
-    run_command(command, dry_run)
+    run_command(command, dry_run, timeout_seconds=timeout_seconds)
 
 
 def delete_file(

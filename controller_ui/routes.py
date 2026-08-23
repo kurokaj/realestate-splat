@@ -238,7 +238,12 @@ def project_detail(
     if data["project"] is None:
         raise HTTPException(status_code=404, detail="Project not found")
     review = preprocess_review_context(data["project"], data["stage_runs"])
-    colmap_review = colmap_review_context(data["project"], data["stage_runs"], review["raw_source_summary"])
+    colmap_review = colmap_review_context(
+        data["project"],
+        data["stage_runs"],
+        review["raw_source_summary"],
+        review.get("preprocess_group_reports"),
+    )
     training_review = training_review_context(data["project"], data["stage_runs"])
     return templates.TemplateResponse(
         request,
@@ -378,6 +383,10 @@ def ui_queue_colmap(
                 (project_id,),
             ).fetchall()
         )
+        # The remaining validation builds data from R2. Commit before those
+        # network calls so this request does not hold a database transaction
+        # open while object storage responds.
+        conn.commit()
         raw_summary = raw_source_summary(row_to_json(project))
         if not all_location_preprocess_runs_approved(raw_summary, preprocess_runs):
             raise HTTPException(status_code=400, detail="All source locations must have approved preprocess runs before COLMAP can be queued")
@@ -396,9 +405,9 @@ def ui_queue_colmap(
         validate_colmap_feature_matcher(feature_extractor, matching_type)
         resolved_max_image_size = max_image_size if max_image_size > 0 else default_colmap_max_image_size(feature_extractor)
         resolved_vocab_tree = empty_to_none(vocab_tree) or default_colmap_vocab_tree()
-        source_manifest = approved_colmap_image_manifest(raw_summary, preprocess_runs)
         connections = parse_matching_connections(matching_connections_json)
         matching_plan = None
+        matching_plan_needs_upload = False
         try:
             saved_plan = load_json_uri(colmap_matching_plan_uri(project_json))
         except Exception:
@@ -410,12 +419,14 @@ def ui_queue_colmap(
             processing_strategy = str(saved_plan["strategy"])
         elif processing_strategy not in {None, "single"}:
             try:
+                source_manifest = approved_colmap_image_manifest(raw_summary, preprocess_runs)
                 matching_plan = build_hybrid_matching_plan(
                     source_manifest,
                     {"processing_strategy": processing_strategy, "matching_type": matching_type},
                     connections,
                 )
                 validate_matching_plan(matching_plan)
+                matching_plan_needs_upload = True
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         processing_strategy = processing_strategy or "single"
@@ -435,10 +446,11 @@ def ui_queue_colmap(
         matching_plan_uri = None
         if matching_plan is not None:
             matching_plan_uri = colmap_matching_plan_uri(project_json)
-            with tempfile.NamedTemporaryFile("w+", suffix=".json") as handle:
-                handle.write(json.dumps(matching_plan, indent=2) + "\n")
-                handle.flush()
-                copy_file(handle.name, matching_plan_uri, endpoint_url=endpoint_url)
+            if matching_plan_needs_upload:
+                with tempfile.NamedTemporaryFile("w+", suffix=".json") as handle:
+                    handle.write(json.dumps(matching_plan, indent=2) + "\n")
+                    handle.flush()
+                    copy_file(handle.name, matching_plan_uri, endpoint_url=endpoint_url)
         input_uri_json = {
             "preprocess_uri": resolved_preprocess_uri,
             "preprocess_group_outputs": preprocess_group_outputs,
@@ -924,6 +936,7 @@ def preprocess_review_context(project: dict[str, Any], stage_runs: list[dict[str
         "preprocess_video_timeline_blocks": video_timeline_blocks(capture_report, latest_run),
         "preprocess_image_grid": coverage_image_grid(capture_report),
         "preprocess_location_blocks": preprocess_location_blocks(raw_summary, capture_report, group_reports, group_runs),
+        "preprocess_group_reports": group_reports,
         "preprocess_video_rows": compact_video_rows(videos),
         "preprocess_run_rows": preprocess_run_rows(preprocess_runs, raw_summary),
         "raw_source_summary": raw_summary,
@@ -1014,7 +1027,12 @@ def required_preprocess_group_keys(raw_summary: dict[str, Any]) -> list[str]:
     return keys
 
 
-def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, Any]], raw_summary: dict[str, Any]) -> dict[str, Any]:
+def colmap_review_context(
+    project: dict[str, Any],
+    stage_runs: list[dict[str, Any]],
+    raw_summary: dict[str, Any],
+    group_reports: Optional[dict[str, dict[str, Any]]] = None,
+) -> dict[str, Any]:
     preprocess_runs = [run for run in stage_runs if run.get("stage") == "preprocess"]
     preprocess_gate_open = all_location_preprocess_runs_approved(raw_summary, preprocess_runs)
     colmap_runs = [run for run in stage_runs if run.get("stage") == "colmap"]
@@ -1035,7 +1053,7 @@ def colmap_review_context(project: dict[str, Any], stage_runs: list[dict[str, An
         item for item in displayed_plan.get("connections", [])
         if isinstance(item, dict) and item.get("kind") != "hero_location"
     ]
-    source_groups = matching_source_group_cards(raw_summary, preprocess_runs)
+    source_groups = matching_source_group_cards(raw_summary, preprocess_runs, group_reports=group_reports)
     visible_group_ids = {str(group.get("id")): group for group in source_groups}
     visible_connections = []
     for connection in plan_connections:
@@ -1169,6 +1187,8 @@ def source_manifest_from_raw_summary(raw_summary: dict[str, Any]) -> dict[str, A
 def matching_source_group_cards(
     raw_summary: dict[str, Any],
     preprocess_runs: list[dict[str, Any]],
+    *,
+    group_reports: Optional[dict[str, dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
     groups = build_source_groups(source_manifest_from_raw_summary(raw_summary))
     hero_counts: Counter[str] = Counter(
@@ -1176,7 +1196,7 @@ def matching_source_group_cards(
         for source in raw_summary.get("sources", [])
         if isinstance(source, dict) and source.get("role") == "hero_image"
     )
-    reports = latest_group_capture_reports(preprocess_runs, raw_summary)
+    reports = group_reports if group_reports is not None else latest_group_capture_reports(preprocess_runs, raw_summary)
     for group in groups:
         locations = [str(location) for location in group.get("locations") or []]
         location = locations[0] if locations else "unassigned"
@@ -1567,7 +1587,7 @@ def load_json_uri(uri: str) -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     suffix = Path(storage_uri.key).suffix or ".json"
     with tempfile.NamedTemporaryFile("w+", suffix=suffix) as handle:
-        copy_file(uri, handle.name)
+        copy_file(uri, handle.name, timeout_seconds=15)
         payload = Path(handle.name).read_text(encoding="utf-8").strip()
     if not payload:
         return {}
