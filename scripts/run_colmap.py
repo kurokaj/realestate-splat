@@ -1087,9 +1087,29 @@ def colmap_process_env(thread_count: str) -> Dict[str, str]:
     return environment
 
 
-def hybrid_matching_process_env() -> Dict[str, str]:
-    """Keep nested BLAS workers bounded while leaving FAISS parallelism available."""
-    cpu_count = max(1, os.cpu_count() or 1)
+def effective_matching_cpu_count() -> tuple[int, str]:
+    """Resolve the CPU allocation without trusting host CPUs exposed by a pod."""
+    for variable in ("COLMAP_HYBRID_CPU_COUNT", "RUNPOD_CPU_COUNT"):
+        raw_value = os.environ.get(variable, "").strip()
+        if raw_value.isdigit() and int(raw_value) > 0:
+            return int(raw_value), variable
+
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text(encoding="utf-8").split()[:2]
+        if quota != "max" and int(period) > 0:
+            return max(1, (int(quota) + int(period) - 1) // int(period)), "cgroup cpu.max"
+    except (OSError, ValueError):
+        pass
+
+    try:
+        return max(1, len(os.sched_getaffinity(0))), "CPU affinity"
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1), "os.cpu_count"
+
+
+def hybrid_matching_thread_config() -> tuple[int, str, str, str]:
+    """Choose nested BLAS and outer FAISS/OpenMP limits for hybrid matching."""
+    cpu_count, cpu_source = effective_matching_cpu_count()
     if cpu_count < 32:
         default_blas_threads = "3"
     elif cpu_count == 32:
@@ -1097,7 +1117,13 @@ def hybrid_matching_process_env() -> Dict[str, str]:
     else:
         default_blas_threads = "1"
     blas_threads = os.environ.get("COLMAP_HYBRID_BLAS_THREADS", default_blas_threads)
-    outer_threads = os.environ.get("COLMAP_HYBRID_OUTER_THREADS", str(cpu_count))
+    outer_threads = os.environ.get("COLMAP_HYBRID_OUTER_THREADS", str(min(cpu_count, 32)))
+    return cpu_count, cpu_source, blas_threads, outer_threads
+
+
+def hybrid_matching_process_env() -> Dict[str, str]:
+    """Keep nested BLAS workers bounded while leaving FAISS parallelism available."""
+    _cpu_count, _cpu_source, blas_threads, outer_threads = hybrid_matching_thread_config()
     environment = os.environ.copy()
     for variable in (
         "OPENBLAS_NUM_THREADS",
@@ -1799,6 +1825,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
 
         if not is_single_plan:
+            cpu_count, cpu_source, blas_threads, outer_threads = hybrid_matching_thread_config()
+            print(
+                "Hybrid matching thread configuration: "
+                f"cpu_count={cpu_count} source={cpu_source} "
+                f"OPENBLAS_NUM_THREADS={blas_threads} "
+                f"OMP_NUM_THREADS={outer_threads} FAISS_NUM_THREADS={outer_threads}",
+                flush=True,
+            )
             with temporary_process_environment(hybrid_matching_process_env()):
                 matching_results = execute_matching_plan(
                     plan=matching_plan,
