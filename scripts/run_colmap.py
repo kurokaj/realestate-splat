@@ -1110,8 +1110,9 @@ def effective_matching_cpu_count() -> tuple[int, str]:
 def hybrid_matching_thread_config() -> tuple[int, str, str, str]:
     """Keep BLAS single-threaded while leaving FAISS/OpenMP parallel."""
     cpu_count, cpu_source = effective_matching_cpu_count()
+    # Future work: re-evaluate these limits after broader pod-size benchmarking.
     blas_threads = os.environ.get("COLMAP_HYBRID_BLAS_THREADS", "1")
-    outer_threads = os.environ.get("COLMAP_HYBRID_OUTER_THREADS", "2")
+    outer_threads = os.environ.get("COLMAP_HYBRID_OUTER_THREADS", "4")
     return cpu_count, cpu_source, blas_threads, outer_threads
 
 
