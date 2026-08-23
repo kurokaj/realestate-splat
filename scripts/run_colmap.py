@@ -1111,7 +1111,7 @@ def hybrid_matching_thread_config() -> tuple[int, str, str, str]:
     """Keep BLAS single-threaded while leaving FAISS/OpenMP parallel."""
     cpu_count, cpu_source = effective_matching_cpu_count()
     blas_threads = os.environ.get("COLMAP_HYBRID_BLAS_THREADS", "1")
-    outer_threads = os.environ.get("COLMAP_HYBRID_OUTER_THREADS", str(min(cpu_count, 32)))
+    outer_threads = os.environ.get("COLMAP_HYBRID_OUTER_THREADS", "1")
     return cpu_count, cpu_source, blas_threads, outer_threads
 
 
