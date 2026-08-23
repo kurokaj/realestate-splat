@@ -22,6 +22,7 @@ same script can be called manually over SSH now and by orchestration later.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import datetime as dt
 import html
 import json
@@ -1086,6 +1087,46 @@ def colmap_process_env(thread_count: str) -> Dict[str, str]:
     return environment
 
 
+def hybrid_matching_process_env() -> Dict[str, str]:
+    """Keep nested BLAS workers bounded while leaving FAISS parallelism available."""
+    cpu_count = max(1, os.cpu_count() or 1)
+    if cpu_count < 32:
+        default_blas_threads = "3"
+    elif cpu_count == 32:
+        default_blas_threads = "2"
+    else:
+        default_blas_threads = "1"
+    blas_threads = os.environ.get("COLMAP_HYBRID_BLAS_THREADS", default_blas_threads)
+    outer_threads = os.environ.get("COLMAP_HYBRID_OUTER_THREADS", str(cpu_count))
+    environment = os.environ.copy()
+    for variable in (
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "BLIS_NUM_THREADS",
+        "GOTO_NUM_THREADS",
+    ):
+        environment[variable] = blas_threads
+    environment["OMP_NUM_THREADS"] = outer_threads
+    environment["FAISS_NUM_THREADS"] = outer_threads
+    return environment
+
+
+@contextmanager
+def temporary_process_environment(environment: Mapping[str, str]):
+    """Temporarily set library thread controls before importing PyCOLMAP."""
+    keys = set(environment)
+    previous = {key: os.environ.get(key) for key in keys}
+    os.environ.update(environment)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def command_environment(name: str, settings: Mapping[str, Any]) -> Optional[Dict[str, str]]:
     """Apply resource limits only to the COLMAP command that needs them."""
     if name != "sequential_matcher":
@@ -1758,15 +1799,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
 
         if not is_single_plan:
-            matching_results = execute_matching_plan(
-                plan=matching_plan,
-                image_manifest=image_manifest,
-                database_path=paths["database_path"],
-                work_dir=paths["logs_dir"] / "matching_stages",
-                matching_type=str(settings["matching_type"]),
-                use_gpu=bool(settings["use_gpu"]),
-                sequential_overlap=int(settings["sequential_overlap"]),
-            )
+            with temporary_process_environment(hybrid_matching_process_env()):
+                matching_results = execute_matching_plan(
+                    plan=matching_plan,
+                    image_manifest=image_manifest,
+                    database_path=paths["database_path"],
+                    work_dir=paths["logs_dir"] / "matching_stages",
+                    matching_type=str(settings["matching_type"]),
+                    use_gpu=bool(settings["use_gpu"]),
+                    sequential_overlap=int(settings["sequential_overlap"]),
+                )
 
             # Hybrid matching must be complete before view-graph calibration
             # and mapping consume the database.
