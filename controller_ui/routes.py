@@ -585,11 +585,17 @@ def ui_queue_training(
             raw_source_summary(project_json),
             preprocess_runs,
         )
-        resolved_preprocess_uri = empty_to_none(preprocess_uri) or project.get("preprocess_current_uri")
+        # Grouped preprocessing is assembled inside the training pod. The
+        # project-level URI is only a compatibility fallback for legacy runs.
+        resolved_preprocess_uri = (
+            empty_to_none(preprocess_uri)
+            or project.get("preprocess_current_uri")
+            or assembled_project_preprocess_uri(project_json)
+        )
         resolved_colmap_uri = empty_to_none(colmap_uri) or project.get("colmap_current_uri")
         resolved_output_uri = empty_to_none(output_uri) or f"r2://{default_r2_bucket()}/projects/{project_id}/training"
         if not resolved_preprocess_uri:
-            raise HTTPException(status_code=400, detail="Project preprocess_current_uri is required to queue training")
+            raise HTTPException(status_code=400, detail="Approved preprocess output is required to queue training")
         if not resolved_colmap_uri:
             raise HTTPException(status_code=400, detail="Project colmap_current_uri is required to queue training")
         require_r2_uri(resolved_preprocess_uri, "preprocess_uri")
@@ -1202,6 +1208,8 @@ def matching_source_group_cards(
         location = locations[0] if locations else "unassigned"
         report = reports.get(f"location:{location}") or {}
         videos = report.get("videos") if isinstance(report, dict) else []
+        if not isinstance(videos, list):
+            videos = []
         source_id = str(group.get("source_ids", [""])[0])
         selected_count = next(
             (
