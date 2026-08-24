@@ -635,6 +635,16 @@ summary {
   margin-top: 3px;
 }
 
+.source-reference {
+  background: #f4f7f8;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  display: block;
+  min-height: 38px;
+  padding: 9px 10px;
+}
+
 .strong-link {
   display: block;
   font-weight: 700;

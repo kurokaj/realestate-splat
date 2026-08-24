@@ -451,8 +451,11 @@
       <form method="post" action="/ui/projects/{{ project.id }}/colmap" class="stack">
         <div class="grid two tight">
           <label>
-            <span class="label-title">Preprocess URI <span class="info-dot" tabindex="0" data-tip="R2 preprocess/current prefix that contains frames_selected, image_manifest, capture_report, and preprocess_summary.">i</span></span>
-            <input name="preprocess_uri" value="{{ colmap_form_values.preprocess_uri or project.preprocess_current_uri or default_preprocess_uri ~ '/current' }}">
+            <span class="label-title">Preprocess inputs <span class="info-dot" tabindex="0" data-tip="Approved location outputs are downloaded and assembled inside the COLMAP pod.">i</span></span>
+            <span class="source-reference">
+              Approved groups assembled in pod
+              <span class="subline mono">r2://{{ default_bucket }}/projects/{{ project.id }}/preprocess/groups/*location*/current</span>
+            </span>
           </label>
           <label>
             <span class="label-title">Output URI <span class="info-dot" tabindex="0" data-tip="Base R2 prefix for COLMAP output. The wrapper writes current/ and runs/<stage_run_id>/ under this prefix.">i</span></span>
@@ -654,8 +657,11 @@
       <form method="post" action="/ui/projects/{{ project.id }}/training" class="stack">
         <div class="grid three tight">
           <label>
-            <span class="label-title">Preprocess URI <span class="info-dot" tabindex="0" data-tip="Approved preprocess/current input used for Nerfstudio data preparation.">i</span></span>
-            <input name="preprocess_uri" value="{{ training_form_values.preprocess_uri or project.preprocess_current_uri or '' }}">
+            <span class="label-title">Preprocess inputs <span class="info-dot" tabindex="0" data-tip="Approved location outputs are downloaded and assembled inside the training pod.">i</span></span>
+            <span class="source-reference">
+              Approved groups assembled in pod
+              <span class="subline mono">r2://{{ default_bucket }}/projects/{{ project.id }}/preprocess/groups/*location*/current</span>
+            </span>
           </label>
           <label>
             <span class="label-title">COLMAP URI <span class="info-dot" tabindex="0" data-tip="Approved colmap/current input with sparse reconstruction used for training.">i</span></span>
