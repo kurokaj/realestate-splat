@@ -37,6 +37,8 @@
     <tbody>
       {% for run in stage_table_runs %}
         <tr>
+          {% set progress = run.progress_json or {} %}
+          {% set details = progress.get("details") or {} %}
           <td>
             <span class="mono">{{ run.id }}</span>
             <span class="subline">attempt {{ run.attempt }} · {{ run.created_at }}</span>
@@ -45,17 +47,17 @@
           <td><span class="status status-{{ run.status_css or run.status }}">{{ run.status_label or run.status }}</span></td>
           <td>{{ run.provider }}</td>
           <td>
-            <progress max="100" value="{{ run.progress_json.percent or 0 }}"></progress>
-            {% if run.progress_json.phase %}
-              <span class="progress-phase">{{ run.progress_json.phase|replace("_", " ")|title }}</span>
+            <progress max="100" value="{{ progress.get("percent") or 0 }}"></progress>
+            {% if progress.get("phase") %}
+              <span class="progress-phase">{{ progress.get("phase")|replace("_", " ")|title }}</span>
             {% endif %}
-            <span class="subline">{{ run.progress_json.message or "" }}</span>
-            {% if run.progress_json.details.step is defined %}
-              <span class="subline">step {{ run.progress_json.details.step }} / {{ run.progress_json.details.max_steps }}</span>
-            {% elif run.progress_json.details.stage_index is defined %}
-              <span class="subline">matching stage {{ run.progress_json.details.stage_index }} / {{ run.progress_json.details.stage_count }}</span>
-            {% elif run.progress_json.details.processed_images is defined %}
-              <span class="subline">{{ run.progress_json.details.processed_images }} / {{ run.progress_json.details.image_count }} images</span>
+            <span class="subline">{{ progress.get("message") or "" }}</span>
+            {% if details.get("step") is not none %}
+              <span class="subline">step {{ details.get("step") }} / {{ details.get("max_steps") or "?" }}</span>
+            {% elif details.get("stage_index") is not none %}
+              <span class="subline">matching stage {{ details.get("stage_index") }} / {{ details.get("stage_count") or "?" }}</span>
+            {% elif details.get("processed_images") is not none %}
+              <span class="subline">{{ details.get("processed_images") }} / {{ details.get("image_count") or "?" }} images</span>
             {% endif %}
           </td>
           <td>{{ run.duration_minutes_label or "" }}</td>

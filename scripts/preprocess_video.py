@@ -1277,7 +1277,7 @@ def gpu_recommendation(selected_count: int, video_info: VideoInfo, warnings: Seq
             "suggested_gpu": "RTX A6000 48GB or similar",
             "vram_gb_min": 24,
             "vram_gb_preferred": 48 if high_resolution else 40,
-            "reason": "<300 selected images; 24-40GB may work, 48GB is the safer Verda development default.",
+            "reason": "<300 selected images; 24-40GB may work, 48GB is the safer large-GPU development default.",
         }
     elif selected_count <= 800:
         tier = {

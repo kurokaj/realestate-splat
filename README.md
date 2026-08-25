@@ -1,30 +1,28 @@
 # Buildvision3D
 
-Script-first tooling for turning real estate capture videos or image sets into selected frames and reports for later Gaussian splatting.
+Buildvision3D is an internal tool for turning uploaded videos, coverage images,
+and hero images into reviewed COLMAP reconstructions and Gaussian splats.
 
-## Milestone 1: local preprocessing
-
-Put future source videos and optional root-level coverage images in a project folder. Keep high-detail hero photos under `hero/` so they stay separate from normal coverage images:
+## Current Pipeline
 
 ```text
-data/raw/<splat_project_name>/
-  kitchen.mp4
-  living_room.mp4
-  bedroom.mp4
-  coverage_photo_001.jpg
-  coverage_photo_002.jpg
-  hero/
-    kitchen/
-      hero_001.jpg
+upload raw sources to R2
+  -> local CPU preprocessing
+  -> approve every source location
+  -> select single or hybrid matching strategy
+  -> disposable RunPod COLMAP pod
+  -> inspect reconstruction and camera groups
+  -> approve COLMAP
+  -> disposable RunPod Nerfstudio/Splatfacto pod
 ```
 
-Install the local dependencies with conda:
+R2 is the durable store. Postgres stores controller state, compact summaries,
+approvals, progress, and artifact pointers. Large media, logs, reconstructions,
+and training outputs stay in R2 or the disposable stage pod.
 
-```bash
-/opt/homebrew/bin/conda env create -f environment.yml
-```
+## Start Locally
 
-Or with a Python virtual environment:
+Create a virtual environment for command-line checks if needed:
 
 ```bash
 python3 -m venv .venv
@@ -32,338 +30,101 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-Run preprocessing:
+Copy `.env.example` to `.env` and fill in the local R2 credentials. Never commit
+`.env`.
+
+Start the controller stack:
 
 ```bash
-python scripts/preprocess_video.py \
-  --input-dir data/raw/apartment_001 \
-  --profile small_apartment
+docker compose up --build -d
 ```
 
-The script writes:
+Open [http://localhost:8000](http://localhost:8000).
 
-```text
-runs/apartment_001/
-  frames_selected/
-    kitchen_frame_000001.jpg
-    living_room_frame_000001.jpg
-    bedroom_frame_000001.jpg
-  reports/
-    capture_report.json
-    capture_report.html
-    gpu_recommendation.json
-  run_config.json
-```
+The stack contains:
 
-It does not create a raw frame cache. Only final selected frames are written.
-All selected frames from the project videos and selected root-level coverage
-images go into one `frames_selected/` folder for a single downstream COLMAP and
-splatfacto run. The HTML report summarizes each source video, the coverage
-image quality checks, and the combined selected-image count. Use
-`--out runs/custom_name` to override the inferred run directory. Selection
-settings such as `--target-max` apply per source video and to the root coverage
-image set.
+- `postgres`: controller state and compact events
+- `api`: FastAPI API and server-rendered internal UI
+- `worker`: queue worker, local preprocessing runner, and RunPod lifecycle manager
 
-For the current toy parking-garage capture, use:
+## Raw Upload
+
+The UI accepts drag-and-drop uploads. The CLI is useful for large files or
+retries:
 
 ```bash
-/opt/homebrew/bin/conda run -n splat-dev-locat python scripts/preprocess_video.py \
-  --input-dir data/raw/parkkihalli_dome_gap_aware \
-  --out runs/parkkihalli_dome_gap_aware \
-  --profile indoor_room \
-  --candidate-fps 3.0 \
-  --target-min 100 \
-  --target-max 180 \
-  --min-blur 40 \
-  --force-keep-interval 1.0
-```
-
-Gap-aware selection is enabled by default with one frame per two-second window.
-Coverage fallback frames are included in the report separately from normal quality-selected frames.
-Tune this with:
-
-```bash
---coverage-window-seconds 2.0
---min-frames-per-window 1
-```
-
-## Milestone 2: manual Verda pipeline
-
-Upload the selected run directory to the Verda block volume, then SSH into the
-instance and run COLMAP, splatfacto training, and export from the persistent
-workspace:
-
-`scripts/run_colmap.py` calls `/workspace/opt/colmap-install/bin/colmap` by
-absolute path. Nerfstudio is only used through the Pixi checkout at
-`/workspace/opt/nerfstudio` for Splatfacto training and export.
-
-```bash
-cd /workspace/repo/realestate-splat
-source ~/.bashrc
-micromamba activate /workspace/envs/splat-dev
-
-python scripts/run_colmap.py \
-  --run /workspace/runs/parkkihalli_dome_gap_aware \
-  --config configs/training_splatfacto_dev.yaml
-
-python scripts/run_training.py \
-  --run /workspace/runs/parkkihalli_dome_gap_aware \
-  --config configs/training_splatfacto_dev.yaml \
-  --backend splatfacto \
-  --max-steps 5000 \
-  --num-downscales 2
-
-python scripts/export_scene.py \
-  --run /workspace/runs/parkkihalli_dome_gap_aware \
-  --config configs/training_splatfacto_dev.yaml
-```
-
-The scripts write:
-
-```text
-runs/parkkihalli_dome_gap_aware/
-  colmap/
-    database.db
-    database_global.db
-    sparse/
-    sparse_txt/
-    logs/
-  nerfstudio/
-    transforms.json
-    images/
-  gsplat/
-    outputs/
-    exports/
-    logs/
-  reports/
-    reconstruction_report.json
-    training_report.json
-    export_report.json
-  final/
-    scene.ply
-    viewer_config.json
-```
-
-Use `--dry-run` locally to inspect commands without writing outputs.
-For `global_mapper`, the COLMAP script copies `database.db` to
-`database_global.db`, runs `view_graph_calibrator` on the copy, and maps from
-the calibrated database.
-PLY is the first canonical export. A viewer-specific `.splat` or SuperSplat /
-PlayCanvas-compatible file should be added after the browser viewer choice is fixed.
-
-## Milestone 3: local cloud orchestration - complete
-
-Status: complete as of 2026-07-01. The pipeline has successfully run
-preprocess, zip upload, remote COLMAP, remote gsplat training, export, and
-artifact download through the CLI orchestrator.
-
-Once a Verda host is reachable over SSH, run the scripted cloud pipeline from
-the Mac:
-
-```bash
-python scripts/run_cloud_pipeline.py \
-  --run runs/parkkihalli_dome_gap_aware \
-  --host verda-a6000 \
-  --approval-mode approve_warnings
-```
-
-Or preprocess first and then upload/run remotely:
-
-```bash
-python scripts/run_cloud_pipeline.py \
-  --input-dir data/raw/apartment_001 \
-  --out runs/apartment_001 \
-  --profile small_apartment \
-  --host verda-a6000
-```
-
-The pipeline zips `frames_selected/`, local capture reports, and `run_config.json`,
-rsyncs that one bundle to Verda, unpacks it into `/workspace/runs/<run>/`, runs
-remote COLMAP, training, and export over SSH, then zips final artifacts/reports/logs
-remotely and rsyncs one return bundle into:
-
-```text
-runs/<run>/cloud_artifacts/
-```
-
-Transfer zips are scratch artifacts. After successful use, the pipeline removes
-the local upload bundle, the remote upload bundle, the remote final-artifact
-bundle, the downloaded final-artifact bundle, and the COLMAP review bundles
-after they have been unpacked.
-
-Use `--skip-upload` to resume after a successful upload/unpack when the remote
-run inputs are already present.
-
-Preflight policy is intentionally conservative:
-
-- Hopeless captures fail locally before cloud spend starts.
-- All non-fatal captures pause for operator approval after `reports/capture_report.html` is written.
-- Warning-level captures show their review reasons in the prompt.
-- After remote COLMAP finishes, `reconstruction_report.html/json` and `model_analyzer.log` are downloaded locally before training starts.
-- The pipeline pauses again so the operator can review COLMAP metrics and decide whether to start training.
-- Use `--yes-to-prompts` only for an intentionally non-interactive run.
-- Use `--dry-run` to print the planned SSH/rsync commands without connecting.
-
-Remote COLMAP now writes both `reports/reconstruction_report.json` and
-`reports/reconstruction_report.html` so reconstruction quality can be reviewed
-without reading raw logs first. The HTML/JSON include the parsed COLMAP
-`model_analyzer` summary, such as registered images, point count, observation
-count, mean track length, observations per image, and mean reprojection error.
-
-## Milestone 4: storage-backed runtime contracts
-
-The active production-runtime work starts by making run artifacts durable
-outside the local machine or Verda block volume. New production runs should use
-R2 as the durable project store. Local `runs/<project>/` directories remain a
-development cache and legacy compatibility shape.
-
-## Milestone 8A: local controller skeleton
-
-The first controller milestone can run terminal-first or as a local Compose
-stack. Terminal mode is still useful for debugging individual processes:
-
-```bash
-docker compose up postgres
-uvicorn controller_api.main:app --reload --host 0.0.0.0 --port 8000
-python -m controller_worker
-```
-
-For the bundled local stack:
-
-```bash
-docker compose up --build
-```
-
-The skeleton includes project, stage-run, event, and approval tables plus a
-fake local provider so queued stages can be claimed and completed without
-starting GPU pods. See `docs/controller_8a.md` for startup and smoke-test
-commands.
-
-Current controller development is still terminal-first. It now includes
-approval, reject, retry, cancel, richer fake progress events, and a
-`local_preprocess` worker path that shells into `scripts/run_preprocess_stage.py`.
-Compose now bundles Postgres, API, and worker with the same process commands.
-Postgres stores controller state, approvals, compact events, progress, and
-artifact pointers; full stdout/stderr logs should stay in files or R2, not in
-the database.
-Real preprocessing is wired through the controller with R2-only durable inputs
-and outputs: `local_preprocess` requires `r2://` raw and preprocess URIs, then
-loads the compact `preprocess_summary.json` back from R2 for controller state.
-Raw media upload is available at `POST /projects/{project_id}/raw`; it accepts
-multipart files, creates `sources_manifest.json`, uploads to R2, and marks the
-project `raw_uploaded`.
-The upload endpoint also accepts `metadata_json` so a drag-and-drop UI can mark
-loose phone images as `hero_image` with a location, without requiring a
-`hero/<location>/` folder structure.
-
-The first helper can mirror an existing run directory to a local path or
-S3-compatible object storage and writes an `artifact_manifest.json`. This is
-mainly for smoke testing the storage contract and inspecting old test runs; it
-is not a required migration step.
-
-Dry-run a local mirror:
-
-```bash
-python scripts/sync_run_artifacts.py upload \
-  --run runs/parkkihalli_dome_gap_aware \
-  --destination-uri /tmp/buildvision3d/parkkihalli_dome_gap_aware \
-  --dry-run
-```
-
-Mirror to Cloudflare R2 or another S3-compatible store:
-
-```bash
-export R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
-
-python scripts/sync_run_artifacts.py upload \
-  --run runs/parkkihalli_dome_gap_aware \
-  --destination-uri r2://gs-pipeline-preprocessed/projects/parkkihalli_dome_gap_aware/preprocess
-```
-
-Fetch artifacts back to a local run directory:
-
-```bash
-python scripts/sync_run_artifacts.py download \
-  --source-uri r2://gs-pipeline-preprocessed/projects/parkkihalli_dome_gap_aware/preprocess \
-  --run runs/parkkihalli_dome_gap_aware_from_r2
-```
-
-`r2://` uses the AWS CLI under the hood with `R2_ENDPOINT`. Configure AWS-style
-credentials in the normal AWS environment variables or profile before running
-real uploads. Plain local paths work without the AWS CLI.
-
-The next production-oriented helper should upload raw capture media to:
-
-```text
-r2://<bucket>/projects/<project_id>/raw/
-```
-
-and write a `sources_manifest.json` for CPU preprocessing to consume.
-
-Dry-run a raw project upload:
-
-```bash
-python3 scripts/upload_raw_project.py \
+python scripts/upload_raw_project.py \
   --project-id dev-smoke \
-  --input-dir data/raw/car_single \
-  --destination-uri "r2://$R2_BUCKET/projects/dev-smoke/raw" \
-  --endpoint-url "$R2_ENDPOINT" \
-  --dry-run
-```
-
-Run the upload after inspecting the dry-run summary:
-
-```bash
-python3 scripts/upload_raw_project.py \
-  --project-id dev-smoke \
-  --input-dir data/raw/car_single \
+  --input-dir data/raw/dev-smoke \
   --destination-uri "r2://$R2_BUCKET/projects/dev-smoke/raw" \
   --endpoint-url "$R2_ENDPOINT"
 ```
 
-Run CPU preprocessing from raw storage into app-oriented JSON artifacts:
+Uploads are additive. The API updates `sources_manifest.json`, preserves source
+metadata, and marks affected locations for preprocessing.
 
-```bash
-python3 scripts/run_preprocess_stage.py \
-  --project-id dev-smoke \
-  --raw-uri "r2://$R2_BUCKET/projects/dev-smoke/raw" \
-  --output-uri "r2://$R2_BUCKET/projects/dev-smoke/preprocess" \
-  --endpoint-url "$R2_ENDPOINT" \
-  --profile indoor_room \
-  --dry-run
-```
+## Stage Contracts
 
-For local testing with the existing conda environment, pass its Python:
-
-```bash
-python3 scripts/run_preprocess_stage.py \
-  --project-id dev-smoke \
-  --raw-uri "r2://$R2_BUCKET/projects/dev-smoke/raw" \
-  --output-uri "r2://$R2_BUCKET/projects/dev-smoke/preprocess" \
-  --endpoint-url "$R2_ENDPOINT" \
-  --profile indoor_room \
-  --python-bin /opt/homebrew/Caskroom/miniconda/base/envs/splat-dev-locat/bin/python
-```
-
-Remove `--dry-run` to execute it. The stage uploads:
+The active stage wrappers are:
 
 ```text
-projects/<project_id>/preprocess/current/
-  frames_selected/
-  capture_report.json
-  image_manifest.json
-  sources_manifest.json
-  preprocess_summary.json
-  stage_result.json
-
-projects/<project_id>/preprocess/runs/<stage_run_id>/
-  capture_report.json
-  preprocess_summary.json
-  stage_result.json
+scripts/upload_raw_project.py
+scripts/run_preprocess_stage.py
+scripts/run_colmap_stage.py
+scripts/run_training_stage.py
+scripts/preprocess_video.py
+scripts/run_colmap.py
+scripts/prepare_nerfstudio_from_colmap.py
 ```
 
-The new stage does not upload the legacy HTML report. The future app should
-render the same information from JSON. Successful history runs preserve
-`capture_report.json`, `preprocess_summary.json`, and `stage_result.json`; failed runs preserve
-`stage_result.json` in history and write `stage_result.json` plus
-`logs/preprocess.log` to `current/`.
+Each real stage downloads only its approved inputs, writes a compact stage
+summary, uploads durable artifacts to R2, publishes completion markers, and
+returns a nonzero exit code on failure. Stage pods are disposable and must not
+be treated as durable storage.
+
+## Storage Layout
+
+```text
+projects/<project_id>/raw/
+projects/<project_id>/preprocess/groups/<group>/current/
+projects/<project_id>/preprocess/groups/<group>/runs/<stage_run_id>/
+projects/<project_id>/colmap/current/
+projects/<project_id>/colmap/runs/<stage_run_id>/
+projects/<project_id>/training/current/
+projects/<project_id>/training/runs/<stage_run_id>/
+```
+
+Approved preprocess groups are assembled inside the COLMAP and training pods;
+the controller does not create a duplicate project-wide `preprocess/current`
+tree for grouped projects.
+
+## Documentation
+
+- [Controller plan](docs/controller_plan.md)
+- [Controller 8A operations](docs/controller_8a.md)
+- [Production runtime architecture](docs/production_runtime_architecture.md)
+- [Processing strategies](docs/processing_strategies.md)
+- [Processing strategy implementation plan](docs/processing_strategy_plan.md)
+- [Docker images](docs/docker_images.md)
+- [RunPod GPU notes](docs/runpod_gpus.md)
+- [Future LiDAR and publishing plan](docs/future_3dgs_aholo_lidar_plan.md)
+
+## Verification
+
+Run syntax checks without creating repository bytecode:
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/buildvision3d-pycache \
+  python3 -m py_compile \
+  controller_api/main.py controller_worker/main.py \
+  controller_ui/routes.py controller_common/*.py \
+  scripts/preprocess_video.py scripts/run_colmap.py \
+  scripts/run_colmap_stage.py scripts/run_training_stage.py
+```
+
+Check the Compose services:
+
+```bash
+docker compose ps
+docker compose logs --since=5m api worker
+```

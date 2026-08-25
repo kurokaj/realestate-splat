@@ -664,7 +664,7 @@ TCNN_CUDA_ARCHITECTURES="75;86;89"
 ```
 
 Do not include V100 support in the first RunPod-oriented training image unless
-we intentionally make a separate legacy Verda image.
+we intentionally make a separate compatibility image.
 
 ### What to bake
 
@@ -806,7 +806,6 @@ previous stage:
 
 ```text
 training.use_existing_colmap = true
-colmap.use_nerfstudio_colmap = false
 ```
 
 The image should support:

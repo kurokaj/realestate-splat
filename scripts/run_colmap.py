@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Run COLMAP reconstruction for a preprocessed real estate splat run.
+"""Run COLMAP reconstruction for a prepared Buildvision3D input directory.
 
-This script is intended to run on the Verda GPU instance after the selected
-frames have been uploaded to the run directory. It follows the legacy run
-directory contract documented in
-``docs/legacy/realestate_splat_project_plan.md``:
+The disposable COLMAP runtime downloads the prepared input, executes the
+configured reconstruction and writes compact review artifacts:
 
     runs/<scene>/
       frames_selected/
@@ -15,8 +13,8 @@ directory contract documented in
       reports/
         reconstruction_report.json
 
-The implementation uses COLMAP's CLI directly instead of Python bindings so the
-same script can be called manually over SSH now and by orchestration later.
+The implementation uses COLMAP's CLI directly. Hybrid matching stages use the
+PyCOLMAP executor when a matching plan is supplied.
 """
 
 from __future__ import annotations
@@ -55,7 +53,7 @@ from controller_common.matching_executor import execute_matching_plan
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
-DEFAULT_VERDA_COLMAP = Path("/workspace/opt/colmap-install/bin/colmap")
+DEFAULT_COLMAP_BINARY = Path("/opt/colmap-cuda/bin/colmap")
 REPORT_NAME = "reconstruction_report.json"
 REPORT_HTML_NAME = "reconstruction_report.html"
 IMAGE_MANIFEST_NAME = "image_manifest.json"
@@ -63,7 +61,7 @@ MATCHING_PLAN_NAME = "matching_plan.json"
 DEFAULT_SEQUENTIAL_LOOP_BLAS_THREADS = "4"
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
-    "binary": str(DEFAULT_VERDA_COLMAP),
+    "binary": str(DEFAULT_COLMAP_BINARY),
     "mode": "incremental",
     "feature_extractor": "SIFT",
     "processing_strategy": "single",
@@ -156,7 +154,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--colmap-bin",
         type=Path,
-        help=f"Absolute path to the authoritative COLMAP executable. Defaults to {DEFAULT_VERDA_COLMAP}.",
+        help=f"Absolute path to the authoritative COLMAP executable. Defaults to {DEFAULT_COLMAP_BINARY}.",
     )
     parser.add_argument(
         "--image-dir",
@@ -481,8 +479,6 @@ def validate_settings(settings: Mapping[str, Any]) -> None:
     binary = Path(str(settings["binary"])).expanduser()
     if not binary.is_absolute():
         raise SystemExit("colmap.binary / --colmap-bin must be an absolute path; do not rely on PATH.")
-    if settings.get("use_nerfstudio_colmap"):
-        raise SystemExit("colmap.use_nerfstudio_colmap must be false; run_colmap.py owns reconstruction.")
     if settings["mode"] not in {"incremental", "global"}:
         raise SystemExit("--mode must be incremental or global.")
     if settings["feature_extractor"] not in {"SIFT", "ALIKED_N16ROT", "ALIKED_N32"}:
@@ -514,10 +510,7 @@ def resolve_colmap_bin(settings: Mapping[str, Any], dry_run: bool) -> str:
     if binary.exists():
         return str(binary)
 
-    raise SystemExit(
-        f"Could not find the authoritative COLMAP binary at {binary}. "
-        f"On Verda it should be {DEFAULT_VERDA_COLMAP}. Do not rely on PATH or Nerfstudio's COLMAP."
-    )
+    raise SystemExit(f"Could not find the authoritative COLMAP binary at {binary}; do not rely on PATH.")
 
 
 def resolve_under_run(run_dir: Path, value: Any) -> Path:
