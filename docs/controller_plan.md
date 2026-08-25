@@ -47,7 +47,6 @@ scripts/upload_raw_project.py
 scripts/run_preprocess_stage.py
 scripts/run_colmap_stage.py
 scripts/run_training_stage.py
-scripts/sync_run_artifacts.py
 ```
 
 Verified images:
