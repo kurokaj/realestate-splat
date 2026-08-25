@@ -1,5 +1,11 @@
 # Verda Runtime / Block Volume Status
 
+> Legacy status: this document records the working manual/SSH Verda runtime and
+> persistent block-volume setup. Keep it as the reference for capture-style
+> testing and the known-good Milestone 3 flow, but do not treat Verda's mounted
+> volume as the production durability model. New production runtime work now
+> lives in `docs/production_runtime_architecture.md`.
+
 ## Current setup
 
 The Verda GPU instance uses a persistent **block volume** mounted at:

@@ -1,0 +1,168 @@
+"""Raw media discovery and manifest helpers."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
+
+from realestate_splat.cli import utc_now, write_json
+
+
+VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".mkv"}
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".heic", ".heif"}
+IGNORED_NAMES = {".DS_Store", ".gitkeep"}
+
+
+@dataclass
+class SourceMedia:
+    source_id: str
+    role: str
+    relative_path: str
+    uri: str
+    location: Optional[str] = None
+    related_sources: Optional[List[str]] = None
+    camera_group: Optional[str] = None
+    colmap_policy: str = "include"
+    width: Optional[int] = None
+    height: Optional[int] = None
+    duration_seconds: Optional[float] = None
+
+
+def discover_raw_media(input_dir: Path, destination_uri: str) -> List[SourceMedia]:
+    input_dir = input_dir.expanduser()
+    if not input_dir.exists():
+        raise FileNotFoundError(f"Input directory does not exist: {input_dir}")
+    if not input_dir.is_dir():
+        raise NotADirectoryError(f"Input path is not a directory: {input_dir}")
+
+    destination_base = destination_uri.rstrip("/")
+    sources: List[SourceMedia] = []
+
+    for path in sorted(candidate for candidate in input_dir.rglob("*") if candidate.is_file()):
+        if path.name in IGNORED_NAMES:
+            continue
+        suffix = path.suffix.lower()
+        relative_path = path.relative_to(input_dir).as_posix()
+        parts = Path(relative_path).parts
+        grouped_role = None
+        grouped_location = None
+        if len(parts) >= 3 and parts[0] in {"coverage", "hero"}:
+            grouped_role = "hero_image" if parts[0] == "hero" else ("coverage_video" if suffix in VIDEO_SUFFIXES else "coverage_image")
+            grouped_location = safe_source_id(parts[1])
+        if suffix in VIDEO_SUFFIXES:
+            source_id = safe_source_id(path.stem)
+            width, height, duration_seconds = video_metadata(path)
+            sources.append(
+                SourceMedia(
+                    source_id=source_id,
+                    role=grouped_role or "coverage_video",
+                    relative_path=relative_path,
+                    uri=f"{destination_base}/{relative_path}",
+                    location=grouped_location or source_id,
+                    camera_group=(f"hero_{grouped_location}" if grouped_role == "hero_image" else f"video_{source_id}"),
+                    colmap_policy="optional" if grouped_role == "hero_image" else "include",
+                    width=width,
+                    height=height,
+                    duration_seconds=duration_seconds,
+                )
+            )
+        elif suffix in IMAGE_SUFFIXES:
+            source_id = safe_source_id(path.stem)
+            if grouped_role == "hero_image":
+                source_id = f"hero_{grouped_location}_{source_id}"
+            width, height = image_dimensions(path)
+            sources.append(
+                SourceMedia(
+                    source_id=f"coverage_image_{source_id}",
+                    role=grouped_role or "coverage_image",
+                    relative_path=relative_path,
+                    uri=f"{destination_base}/{relative_path}",
+                    location=grouped_location,
+                    camera_group=(f"hero_{grouped_location}" if grouped_role == "hero_image" else "coverage_images"),
+                    colmap_policy="optional" if grouped_role == "hero_image" else "include",
+                    width=width,
+                    height=height,
+                )
+            )
+
+    return sources
+
+
+def related_coverage_sources(sources: Iterable[SourceMedia], location: str) -> List[str]:
+    related = [
+        source.source_id
+        for source in sources
+        if source.role == "coverage_video" and source.location == location
+    ]
+    return related
+
+
+def safe_source_id(value: str) -> str:
+    chars = []
+    for char in value.strip().lower():
+        if char.isalnum():
+            chars.append(char)
+        elif char in {"-", "_", " "}:
+            chars.append("_")
+    normalized = "".join(chars).strip("_")
+    while "__" in normalized:
+        normalized = normalized.replace("__", "_")
+    return normalized or "source"
+
+
+def video_metadata(path: Path) -> tuple[Optional[int], Optional[int], Optional[float]]:
+    try:
+        import cv2  # type: ignore
+    except ImportError:
+        return (None, None, None)
+
+    capture = cv2.VideoCapture(str(path))
+    try:
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) or None
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        duration_seconds: Optional[float] = None
+        if fps > 0.0 and frame_count > 0:
+            duration_seconds = frame_count / fps
+        return (width, height, duration_seconds)
+    finally:
+        capture.release()
+
+
+def image_dimensions(path: Path) -> tuple[Optional[int], Optional[int]]:
+    try:
+        from PIL import Image
+    except ImportError:
+        try:
+            import cv2  # type: ignore
+        except ImportError:
+            return (None, None)
+        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        if image is None:
+            return (None, None)
+        height, width = image.shape[:2]
+        return (int(width), int(height))
+
+    with Image.open(path) as image:
+        width, height = image.size
+        return (int(width), int(height))
+
+
+def build_sources_manifest(project_id: str, input_dir: Path, destination_uri: str) -> Dict[str, Any]:
+    sources = discover_raw_media(input_dir, destination_uri)
+    return {
+        "schema_version": 2,
+        "project_id": project_id,
+        "created_at": utc_now(),
+        "input_dir": str(input_dir),
+        "base_uri": destination_uri.rstrip("/"),
+        "sources": [asdict(source) for source in sources],
+    }
+
+
+def write_sources_manifest(project_id: str, input_dir: Path, destination_uri: str, output_path: Path) -> Dict[str, Any]:
+    manifest = build_sources_manifest(project_id, input_dir, destination_uri)
+    write_json(output_path, manifest)
+    return manifest

@@ -1,0 +1,138 @@
+{% if stage_table_runs is not defined %}
+  {% set stage_table_runs = preprocess_runs %}
+{% endif %}
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Run</th>
+        {% if stage_table_variant == "preprocess" %}
+          <th>Location</th>
+        {% else %}
+          <th>Stage</th>
+        {% endif %}
+        <th>Status</th>
+        <th>Provider</th>
+        <th>Progress</th>
+        <th>Duration</th>
+        {% if stage_table_variant == "preprocess" %}
+          <th>Selected</th>
+          <th>Force kept</th>
+          <th>Gaps</th>
+          <th>Warnings</th>
+        {% elif stage_table_variant == "colmap" %}
+          <th>GPU</th>
+          <th>Pod / Job</th>
+          <th>Artifacts</th>
+        {% elif stage_table_variant == "training" %}
+          <th>GPU</th>
+          <th>Pod / Job</th>
+          <th>Artifacts</th>
+        {% else %}
+          <th>Output</th>
+        {% endif %}
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for run in stage_table_runs %}
+        <tr>
+          <td>
+            <span class="mono">{{ run.id }}</span>
+            <span class="subline">attempt {{ run.attempt }} · {{ run.created_at }}</span>
+          </td>
+          <td>{{ run.preprocess_location if stage_table_variant == "preprocess" else run.stage }}</td>
+          <td><span class="status status-{{ run.status_css or run.status }}">{{ run.status_label or run.status }}</span></td>
+          <td>{{ run.provider }}</td>
+          <td>
+            <progress max="100" value="{{ run.progress_json.percent or 0 }}"></progress>
+            {% if run.progress_json.phase %}
+              <span class="progress-phase">{{ run.progress_json.phase|replace("_", " ")|title }}</span>
+            {% endif %}
+            <span class="subline">{{ run.progress_json.message or "" }}</span>
+            {% if run.progress_json.details.step is defined %}
+              <span class="subline">step {{ run.progress_json.details.step }} / {{ run.progress_json.details.max_steps }}</span>
+            {% elif run.progress_json.details.stage_index is defined %}
+              <span class="subline">matching stage {{ run.progress_json.details.stage_index }} / {{ run.progress_json.details.stage_count }}</span>
+            {% elif run.progress_json.details.processed_images is defined %}
+              <span class="subline">{{ run.progress_json.details.processed_images }} / {{ run.progress_json.details.image_count }} images</span>
+            {% endif %}
+          </td>
+          <td>{{ run.duration_minutes_label or "" }}</td>
+          {% if stage_table_variant == "preprocess" %}
+            <td>{{ run.selected_total }}</td>
+            <td>{{ run.fallback_total }}</td>
+            <td>{{ run.gap_total }}</td>
+            <td>{{ run.warning_summary }}</td>
+          {% elif stage_table_variant in ["colmap", "training"] %}
+            <td>{{ ((run.input_uri_json.gpu_type_ids or [])[0]) if run.input_uri_json else "" }}</td>
+            <td>
+              <span class="mono">{{ run.provider_pod_id or run.provider_job_id or "" }}</span>
+              <span class="subline">{{ run.provider }}</span>
+            </td>
+            <td>
+              {% if stage_table_variant == "colmap" %}
+                {{ run.summary_json.point_count or "" }} pts
+                <span class="subline">{{ run.summary_json.registered_images or "" }} registered</span>
+              {% else %}
+                {{ run.summary_json.checkpoint_count or "" }} checkpoints
+                <span class="subline">{{ run.summary_json.exported_ply or "" }}</span>
+              {% endif %}
+            </td>
+          {% else %}
+            <td class="uri-cell">{{ run.output_uri or "" }}</td>
+          {% endif %}
+          <td>
+            {% if run.is_latest_stage_run and run.status in ["awaiting_preprocess_approval", "awaiting_colmap_approval"] %}
+              <form method="post" action="/ui/stage-runs/{{ run.id }}/approve" class="inline-form">
+                <input name="notes" placeholder="notes">
+                <button type="submit">Approve</button>
+              </form>
+              <form method="post" action="/ui/stage-runs/{{ run.id }}/reject" class="inline-form">
+                <input name="notes" placeholder="notes">
+                <button type="submit" class="secondary">Reject</button>
+              </form>
+            {% endif %}
+            {% if run.is_latest_stage_run and run.status in ["failed", "cancelled", "preprocess_rejected", "colmap_rejected"] %}
+              <form method="post" action="/ui/stage-runs/{{ run.id }}/retry" class="inline-form">
+                <input name="notes" placeholder="notes">
+                <button type="submit" class="secondary">Retry</button>
+              </form>
+            {% endif %}
+            {% if run.is_latest_stage_run and run.status not in ["completed", "approved", "failed", "cancelled", "preprocess_rejected", "colmap_rejected"] %}
+              <form method="post" action="/ui/stage-runs/{{ run.id }}/cancel" class="inline-form">
+                <input name="notes" placeholder="notes">
+                <button type="submit" class="danger">Cancel</button>
+              </form>
+            {% endif %}
+          </td>
+        </tr>
+        <tr class="details-row">
+          <td colspan="{{ 11 if stage_table_variant in ['preprocess', 'colmap', 'training'] else 8 }}">
+            <details>
+              <summary>Inputs, summary, and errors</summary>
+              <div class="grid three">
+                <div>
+                  <h3>Input URIs</h3>
+                  <pre>{{ run.input_uri_json|json_pretty }}</pre>
+                </div>
+                <div>
+                  <h3>Summary JSON</h3>
+                  <pre>{{ run.summary_json|json_pretty }}</pre>
+                </div>
+                <div>
+                  <h3>Error</h3>
+                  <pre>{{ run.error_message or "" }}</pre>
+                </div>
+              </div>
+            </details>
+          </td>
+        </tr>
+      {% else %}
+        <tr>
+          <td colspan="7" class="empty">No stage runs yet.</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

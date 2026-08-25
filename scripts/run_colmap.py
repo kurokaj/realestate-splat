@@ -2,8 +2,9 @@
 """Run COLMAP reconstruction for a preprocessed real estate splat run.
 
 This script is intended to run on the Verda GPU instance after the selected
-frames have been uploaded to the run directory. It follows the run directory
-contract documented in ``docs/realestate_splat_project_plan.md``:
+frames have been uploaded to the run directory. It follows the legacy run
+directory contract documented in
+``docs/legacy/realestate_splat_project_plan.md``:
 
     runs/<scene>/
       frames_selected/
@@ -21,9 +22,11 @@ same script can be called manually over SSH now and by orchestration later.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import datetime as dt
 import html
 import json
+import os
 import platform
 import re
 import shlex
@@ -36,17 +39,36 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+SRC_DIR = ROOT_DIR / "src"
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from controller_common.matching_plan import (
+    build_single_matching_plan,
+    matching_plan_summary,
+    validate_matching_plan,
+)
+from controller_common.matching_executor import execute_matching_plan
+
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 DEFAULT_VERDA_COLMAP = Path("/workspace/opt/colmap-install/bin/colmap")
 REPORT_NAME = "reconstruction_report.json"
 REPORT_HTML_NAME = "reconstruction_report.html"
 IMAGE_MANIFEST_NAME = "image_manifest.json"
+MATCHING_PLAN_NAME = "matching_plan.json"
+DEFAULT_SEQUENTIAL_LOOP_BLAS_THREADS = "4"
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "binary": str(DEFAULT_VERDA_COLMAP),
     "mode": "incremental",
+    "feature_extractor": "SIFT",
+    "processing_strategy": "single",
     "matcher": "exhaustive",
+    "matching_type": "SIFT_BRUTEFORCE",
     "image_dir": "frames_selected",
     "database_name": "database.db",
     "camera_model": "SIMPLE_RADIAL",
@@ -57,6 +79,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "view_graph_calibrator": True,
     "manifest_camera_groups": True,
     "sequential_overlap": 10,
+    "sequential_loop_detection": True,
     "export_text": True,
     "undistort": False,
     "feature_options": {},
@@ -108,7 +131,27 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--matcher",
         choices=["exhaustive", "sequential", "vocab_tree"],
-        help="COLMAP matcher to run before mapping.",
+        help="COLMAP matching style / pair generator to run before mapping.",
+    )
+    parser.add_argument(
+        "--processing-strategy",
+        choices=["single", "video_plus_heroes", "multiple_videos", "multiple_videos_plus_heroes"],
+        help="High-level matching strategy. Hybrid strategies require --matching-plan.",
+    )
+    parser.add_argument(
+        "--matching-plan",
+        type=Path,
+        help="JSON matching plan. Omit for the current single-matcher compatibility path.",
+    )
+    parser.add_argument(
+        "--feature-extractor",
+        choices=["SIFT", "sift", "ALIKED_N16ROT", "ALIKED_N32"],
+        help="COLMAP FeatureExtraction.type.",
+    )
+    parser.add_argument(
+        "--matching-type",
+        choices=["SIFT_BRUTEFORCE", "SIFT_LIGHTGLUE", "ALIKED_BRUTEFORCE", "ALIKED_LIGHTGLUE"],
+        help="COLMAP FeatureMatching.type.",
     )
     parser.add_argument(
         "--colmap-bin",
@@ -163,6 +206,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--sequential-overlap",
         type=int,
         help="Sequential matcher overlap when --matcher sequential is used.",
+    )
+    parser.add_argument(
+        "--sequential-loop-detection",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="SequentialMatching.loop_detection when --matcher sequential is used.",
     )
     parser.add_argument(
         "--vocab-tree",
@@ -359,7 +408,10 @@ def build_settings(args: argparse.Namespace) -> Dict[str, Any]:
     cli_overrides = {
         "binary": str(args.colmap_bin) if args.colmap_bin is not None else None,
         "mode": args.mode,
+        "feature_extractor": args.feature_extractor,
+        "processing_strategy": args.processing_strategy,
         "matcher": args.matcher,
+        "matching_type": args.matching_type,
         "image_dir": str(args.image_dir) if args.image_dir is not None else None,
         "database_name": args.database_name,
         "camera_model": args.camera_model,
@@ -370,6 +422,7 @@ def build_settings(args: argparse.Namespace) -> Dict[str, Any]:
         "view_graph_calibrator": args.view_graph_calibrator,
         "manifest_camera_groups": args.manifest_camera_groups,
         "sequential_overlap": args.sequential_overlap,
+        "sequential_loop_detection": args.sequential_loop_detection,
         "vocab_tree": str(args.vocab_tree) if args.vocab_tree is not None else None,
         "export_text": args.export_text,
         "undistort": args.undistort,
@@ -378,6 +431,7 @@ def build_settings(args: argparse.Namespace) -> Dict[str, Any]:
         if value is not None:
             settings[key] = value
     settings["_single_camera_explicit"] = args.single_camera is not None
+    normalize_colmap_feature_settings(settings)
 
     merge_option_map(settings, "feature_options", parse_option_pairs(args.feature_option, "--feature-option"))
     merge_option_map(settings, "matcher_options", parse_option_pairs(args.matcher_option, "--matcher-option"))
@@ -406,6 +460,14 @@ def normalize_mapper_setting(settings: Dict[str, Any]) -> None:
         raise SystemExit("colmap.mapper must be global_mapper, mapper, incremental_mapper, or incremental.")
 
 
+def normalize_colmap_feature_settings(settings: Dict[str, Any]) -> None:
+    feature_extractor = str(settings.get("feature_extractor") or "SIFT").strip()
+    if feature_extractor.lower() == "sift":
+        feature_extractor = "SIFT"
+    settings["feature_extractor"] = feature_extractor
+    settings["matching_type"] = str(settings.get("matching_type") or "SIFT_BRUTEFORCE").strip()
+
+
 def merge_option_map(settings: Dict[str, Any], key: str, additions: Dict[str, Any]) -> None:
     current = settings.get(key) or {}
     if not isinstance(current, dict):
@@ -423,16 +485,22 @@ def validate_settings(settings: Mapping[str, Any]) -> None:
         raise SystemExit("colmap.use_nerfstudio_colmap must be false; run_colmap.py owns reconstruction.")
     if settings["mode"] not in {"incremental", "global"}:
         raise SystemExit("--mode must be incremental or global.")
+    if settings["feature_extractor"] not in {"SIFT", "ALIKED_N16ROT", "ALIKED_N32"}:
+        raise SystemExit("--feature-extractor must be SIFT, ALIKED_N16ROT, or ALIKED_N32.")
     if settings["matcher"] not in {"exhaustive", "sequential", "vocab_tree"}:
         raise SystemExit("--matcher must be exhaustive, sequential, or vocab_tree.")
+    if settings["matching_type"] not in {"SIFT_BRUTEFORCE", "SIFT_LIGHTGLUE", "ALIKED_BRUTEFORCE", "ALIKED_LIGHTGLUE"}:
+        raise SystemExit("--matching-type must be SIFT_BRUTEFORCE, SIFT_LIGHTGLUE, ALIKED_BRUTEFORCE, or ALIKED_LIGHTGLUE.")
+    if settings["feature_extractor"] == "SIFT" and not str(settings["matching_type"]).startswith("SIFT_"):
+        raise SystemExit("SIFT feature extraction requires SIFT_BRUTEFORCE or SIFT_LIGHTGLUE matching.")
+    if str(settings["feature_extractor"]).startswith("ALIKED") and not str(settings["matching_type"]).startswith("ALIKED_"):
+        raise SystemExit("ALIKED feature extraction requires ALIKED_BRUTEFORCE or ALIKED_LIGHTGLUE matching.")
     if settings["option_namespace"] not in {"auto", "feature", "sift"}:
         raise SystemExit("--option-namespace must be auto, feature, or sift.")
     if int(settings["max_image_size"]) <= 0:
         raise SystemExit("--max-image-size must be greater than zero.")
     if int(settings["sequential_overlap"]) <= 0:
         raise SystemExit("--sequential-overlap must be greater than zero.")
-    if settings["matcher"] == "vocab_tree" and not settings.get("vocab_tree"):
-        raise SystemExit("--vocab-tree is required when --matcher vocab_tree is used.")
 
 
 def should_run_view_graph_calibrator(settings: Mapping[str, Any]) -> bool:
@@ -862,6 +930,8 @@ def build_core_commands(
     settings: Mapping[str, Any],
     paths: Mapping[str, Path],
     option_names: ColmapOptionNames,
+    *,
+    include_matcher: bool = True,
 ) -> List[Tuple[str, List[str]]]:
     database_path = str(paths["database_path"])
     mapper_database_path = str(paths["database_global_path"] if should_run_view_graph_calibrator(settings) else paths["database_path"])
@@ -883,15 +953,15 @@ def build_core_commands(
         bool_as_colmap(settings["use_gpu"]),
         option_names.feature_max_image_size,
         str(int(settings["max_image_size"])),
+        "--FeatureExtraction.type",
+        str(settings["feature_extractor"]),
     ]
     append_options(feature_command, settings.get("feature_options", {}))
 
-    matcher_command = build_matcher_command(colmap_bin, settings, database_path, option_names)
-
-    commands: List[Tuple[str, List[str]]] = [
-        ("feature_extractor", feature_command),
-        (f"{settings['matcher']}_matcher", matcher_command),
-    ]
+    commands: List[Tuple[str, List[str]]] = [("feature_extractor", feature_command)]
+    if include_matcher:
+        matcher_command = build_matcher_command(colmap_bin, settings, database_path, option_names)
+        commands.append((f"{settings['matcher']}_matcher", matcher_command))
 
     if should_run_view_graph_calibrator(settings):
         commands.append(
@@ -944,16 +1014,25 @@ def build_matcher_command(
         database_path,
         option_names.matching_use_gpu,
         bool_as_colmap(settings["use_gpu"]),
+        "--FeatureMatching.type",
+        str(settings["matching_type"]),
     ]
     if matcher == "sequential":
         command.extend(["--SequentialMatching.overlap", str(int(settings["sequential_overlap"]))])
-    if matcher == "vocab_tree":
+        command.extend(["--SequentialMatching.loop_detection", bool_as_colmap(settings["sequential_loop_detection"])])
+    if matcher == "vocab_tree" and settings.get("vocab_tree"):
         command.extend(["--VocabTreeMatching.vocab_tree_path", str(settings["vocab_tree"])])
     append_options(command, settings.get("matcher_options", {}))
     return command
 
 
-def run_command(name: str, command: Sequence[str], logs_dir: Path) -> CommandResult:
+def run_command(
+    name: str,
+    command: Sequence[str],
+    logs_dir: Path,
+    *,
+    env: Optional[Mapping[str, str]] = None,
+) -> CommandResult:
     log_path = logs_dir / f"{name}.log"
     started_at = utc_now()
     start_time = time.monotonic()
@@ -969,6 +1048,7 @@ def run_command(name: str, command: Sequence[str], logs_dir: Path) -> CommandRes
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=dict(env) if env is not None else None,
         )
         assert process.stdout is not None
         for line in process.stdout:
@@ -990,6 +1070,98 @@ def run_command(name: str, command: Sequence[str], logs_dir: Path) -> CommandRes
     if returncode != 0:
         raise RuntimeError(f"COLMAP command failed ({name}) with exit code {returncode}. See {log_path}")
     return result
+
+
+def colmap_process_env(thread_count: str) -> Dict[str, str]:
+    """Limit BLAS/FAISS threads for a COLMAP command that needs it."""
+    environment = os.environ.copy()
+    for variable in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "BLIS_NUM_THREADS",
+        "GOTO_NUM_THREADS",
+        "FAISS_NUM_THREADS",
+    ):
+        environment[variable] = thread_count
+    return environment
+
+
+def effective_matching_cpu_count() -> tuple[int, str]:
+    """Resolve the CPU allocation without trusting host CPUs exposed by a pod."""
+    for variable in ("COLMAP_HYBRID_CPU_COUNT", "RUNPOD_CPU_COUNT"):
+        raw_value = os.environ.get(variable, "").strip()
+        if raw_value.isdigit() and int(raw_value) > 0:
+            return int(raw_value), variable
+
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text(encoding="utf-8").split()[:2]
+        if quota != "max" and int(period) > 0:
+            return max(1, (int(quota) + int(period) - 1) // int(period)), "cgroup cpu.max"
+    except (OSError, ValueError):
+        pass
+
+    try:
+        return max(1, len(os.sched_getaffinity(0))), "CPU affinity"
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1), "os.cpu_count"
+
+
+def hybrid_matching_thread_config() -> tuple[int, str, str, str]:
+    """Keep BLAS single-threaded while leaving FAISS/OpenMP parallel."""
+    cpu_count, cpu_source = effective_matching_cpu_count()
+    # Future work: re-evaluate these limits after broader pod-size benchmarking.
+    blas_threads = os.environ.get("COLMAP_HYBRID_BLAS_THREADS", "1")
+    outer_threads = os.environ.get("COLMAP_HYBRID_OUTER_THREADS", "4")
+    return cpu_count, cpu_source, blas_threads, outer_threads
+
+
+def hybrid_matching_process_env() -> Dict[str, str]:
+    """Keep nested BLAS workers bounded while leaving FAISS parallelism available."""
+    _cpu_count, _cpu_source, blas_threads, outer_threads = hybrid_matching_thread_config()
+    environment = os.environ.copy()
+    for variable in (
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "BLIS_NUM_THREADS",
+        "GOTO_NUM_THREADS",
+    ):
+        environment[variable] = blas_threads
+    environment["OMP_NUM_THREADS"] = outer_threads
+    environment["FAISS_NUM_THREADS"] = outer_threads
+    return environment
+
+
+@contextmanager
+def temporary_process_environment(environment: Mapping[str, str]):
+    """Temporarily set library thread controls before importing PyCOLMAP."""
+    keys = set(environment)
+    previous = {key: os.environ.get(key) for key in keys}
+    os.environ.update(environment)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def command_environment(name: str, settings: Mapping[str, Any]) -> Optional[Dict[str, str]]:
+    """Apply resource limits only to the COLMAP command that needs them."""
+    if name != "sequential_matcher":
+        return None
+    if str(settings.get("matcher")) != "sequential":
+        return None
+    if not bool(settings.get("sequential_loop_detection")):
+        return None
+
+    thread_count = os.environ.get(
+        "COLMAP_SEQUENTIAL_BLAS_THREADS",
+        DEFAULT_SEQUENTIAL_LOOP_BLAS_THREADS,
+    )
+    return colmap_process_env(thread_count)
 
 
 def find_sparse_model(sparse_dir: Path) -> Optional[Path]:
@@ -1125,9 +1297,33 @@ def parse_registered_image_names(sparse_text_dir: Path) -> List[str]:
 def build_manifest_reconstruction_summary(manifest: Mapping[str, Any], sparse_text_dir: Path) -> Dict[str, Any]:
     images = [entry for entry in manifest.get("images") or [] if isinstance(entry, dict)]
     registered_names = set(parse_registered_image_names(sparse_text_dir))
+    def is_registered(entry: Mapping[str, Any]) -> bool:
+        name = str(entry.get("image_name") or "")
+        return name in registered_names or Path(name).name in registered_names
+
     hero_images = [entry for entry in images if entry.get("role") == "hero"]
-    hero_registered = [entry for entry in hero_images if entry.get("image_name") in registered_names]
-    hero_dropped = [entry for entry in hero_images if entry.get("image_name") not in registered_names]
+    hero_registered = [entry for entry in hero_images if is_registered(entry)]
+    hero_dropped = [entry for entry in hero_images if not is_registered(entry)]
+    by_location: Dict[str, Dict[str, int]] = {}
+    by_role: Dict[str, Dict[str, int]] = {}
+    by_group: Dict[str, Dict[str, Any]] = {}
+    for entry in images:
+        role = str(entry.get("role") or "unknown")
+        location = str(entry.get("location") or "unassigned")
+        group = str(entry.get("camera_group") or "unknown")
+        registered = is_registered(entry)
+        for target, key in ((by_location, location), (by_role, role)):
+            counts = target.setdefault(key, {"total": 0, "registered": 0, "dropped": 0})
+            counts["total"] += 1
+            counts["registered"] += int(registered)
+            counts["dropped"] += int(not registered)
+        counts = by_group.setdefault(
+            group,
+            {"camera_group": group, "role": role, "location": location, "total": 0, "registered": 0, "dropped": 0},
+        )
+        counts["total"] += 1
+        counts["registered"] += int(registered)
+        counts["dropped"] += int(not registered)
     return {
         "hero": {
             "total": len(hero_images),
@@ -1137,10 +1333,13 @@ def build_manifest_reconstruction_summary(manifest: Mapping[str, Any], sparse_te
             "dropped_images": [entry.get("image_name") for entry in hero_dropped],
         },
         "registered_image_count_from_text": len(registered_names),
+        "by_location": by_location,
+        "by_role": by_role,
+        "by_group": sorted(by_group.values(), key=lambda item: str(item["camera_group"])),
     }
 
 
-def build_camera_group_summary(manifest: Mapping[str, Any]) -> List[Dict[str, Any]]:
+def build_camera_group_summary(manifest: Mapping[str, Any], registered_names: Optional[set[str]] = None) -> List[Dict[str, Any]]:
     groups: Dict[str, Dict[str, Any]] = {}
     for entry in manifest.get("images") or []:
         if not isinstance(entry, dict):
@@ -1155,11 +1354,19 @@ def build_camera_group_summary(manifest: Mapping[str, Any]) -> List[Dict[str, An
                 "width": entry.get("width"),
                 "height": entry.get("height"),
                 "image_count": 0,
+                "registered_image_count": 0,
+                "dropped_image_count": 0,
                 "hero": entry.get("role") == "hero",
                 "locations": set(),
             },
         )
         group["image_count"] += 1
+        image_name = str(entry.get("image_name") or "")
+        is_registered = registered_names is not None and (
+            image_name in registered_names or Path(image_name).name in registered_names
+        )
+        group["registered_image_count"] += int(is_registered)
+        group["dropped_image_count"] += int(not is_registered)
         if entry.get("role") == "hero":
             group["hero"] = True
         if entry.get("location"):
@@ -1175,6 +1382,8 @@ def build_camera_group_summary(manifest: Mapping[str, Any]) -> List[Dict[str, An
                 "width": group["width"],
                 "height": group["height"],
                 "image_count": group["image_count"],
+                "registered_image_count": group["registered_image_count"],
+                "dropped_image_count": group["dropped_image_count"],
                 "hero": group["hero"],
                 "locations": sorted(group["locations"]),
             }
@@ -1189,6 +1398,8 @@ def build_report(
     paths: Mapping[str, Path],
     image_count: int,
     image_manifest: Mapping[str, Any],
+    matching_plan: Mapping[str, Any],
+    matching_results: Sequence[Mapping[str, Any]],
     colmap_bin: str,
     option_names: Optional[ColmapOptionNames],
     commands: Sequence[CommandResult],
@@ -1201,7 +1412,8 @@ def build_report(
 ) -> Dict[str, Any]:
     reconstruction_metrics = parse_model_analyzer_metrics(paths["logs_dir"] / "model_analyzer.log")
     manifest_summary = build_manifest_reconstruction_summary(image_manifest, paths["sparse_text_dir"])
-    camera_groups = build_camera_group_summary(image_manifest)
+    registered_names = set(parse_registered_image_names(paths["sparse_text_dir"]))
+    camera_groups = build_camera_group_summary(image_manifest, registered_names)
     outputs = {
         "database": relative_to(paths["database_path"], run_dir),
         "database_global": relative_to(paths["database_global_path"], run_dir),
@@ -1225,6 +1437,8 @@ def build_report(
             "image_count": image_count,
         },
         "settings": {key: value for key, value in settings.items() if not str(key).startswith("_")},
+        "matching_plan": matching_plan_summary(matching_plan),
+        "matching_results": list(matching_results),
         "environment": {
             "python": sys.version.split()[0],
             "platform": platform.platform(),
@@ -1458,7 +1672,9 @@ def write_html_report(reports_dir: Path, report: Mapping[str, Any]) -> Path:
         settings_rows=table_rows(
             {
                 "mode": settings.get("mode"),
+                "feature_extractor": settings.get("feature_extractor"),
                 "matcher": settings.get("matcher"),
+                "matching_type": settings.get("matching_type"),
                 "camera_model": settings.get("camera_model"),
                 "single_camera": settings.get("single_camera"),
                 "use_gpu": settings.get("use_gpu"),
@@ -1482,6 +1698,7 @@ def print_dry_run(
     paths: Mapping[str, Path],
     settings: Mapping[str, Any],
     image_manifest: Mapping[str, Any],
+    matching_plan: Mapping[str, Any],
 ) -> None:
     print("Dry run. No files will be created or modified.\n")
     for name, command in commands:
@@ -1507,6 +1724,18 @@ def print_dry_run(
                     )
                 )
 
+    if matching_plan.get("strategy") != "single":
+        print("# PyCOLMAP matching stages:")
+        for stage in matching_plan.get("matching_stages", []):
+            print(
+                "#   {id}: {style} groups={groups} matching_type={matching_type}".format(
+                    id=stage.get("id"),
+                    style=stage.get("matching_style"),
+                    groups=stage.get("groups"),
+                    matching_type=stage.get("matching_type") or settings.get("matching_type"),
+                )
+            )
+
     assumed_model = paths["sparse_dir"] / "0"
     for _name, command in build_followup_commands("colmap", settings, paths, assumed_model):
         shown = list(command)
@@ -1520,28 +1749,62 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     run_dir = args.run.expanduser()
     image_manifest = load_image_manifest(run_dir)
     apply_manifest_camera_policy(settings, image_manifest)
+    if args.matching_plan is not None:
+        try:
+            matching_plan = json.loads(args.matching_plan.expanduser().read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"Could not read matching plan: {args.matching_plan}") from exc
+        if not isinstance(matching_plan, Mapping):
+            raise SystemExit("Matching plan root must be an object.")
+    else:
+        matching_plan = build_single_matching_plan(image_manifest, settings)
+        if str(settings.get("processing_strategy", "single")) != "single":
+            raise SystemExit("A hybrid processing strategy requires --matching-plan.")
+    validate_matching_plan(matching_plan)
     paths = prepare_output_paths(run_dir, settings, args.overwrite, args.dry_run)
+    if not args.dry_run:
+        matching_plan_path = paths["reports_dir"] / MATCHING_PLAN_NAME
+        matching_plan_path.write_text(json.dumps(matching_plan, indent=2) + "\n", encoding="utf-8")
     image_count = count_images(paths["image_dir"])
     if image_count == 0:
         raise SystemExit(f"No supported images found in {paths['image_dir']}")
 
     colmap_bin = resolve_colmap_bin(settings, args.dry_run)
     option_names = resolve_colmap_option_names(colmap_bin, settings, args.dry_run)
-    core_commands = build_core_commands(colmap_bin, settings, paths, option_names)
+    is_single_plan = matching_plan.get("strategy") == "single"
+    core_commands = build_core_commands(
+        colmap_bin,
+        settings,
+        paths,
+        option_names,
+        include_matcher=is_single_plan,
+    )
 
     if args.dry_run:
-        print_dry_run(core_commands, paths, settings, image_manifest)
+        print_dry_run(core_commands, paths, settings, image_manifest, matching_plan)
         return 0
 
     started_at = utc_now()
     command_results: List[CommandResult] = []
+    matching_results: List[Dict[str, Any]] = []
     selected_model: Optional[Path] = None
     status = "success"
     error: Optional[str] = None
 
     try:
+        deferred_commands: List[Tuple[str, List[str]]] = []
         for name, command in core_commands:
-            command_results.append(run_command(name, command, paths["logs_dir"]))
+            if not is_single_plan and name != "feature_extractor":
+                deferred_commands.append((name, command))
+                continue
+            command_results.append(
+                run_command(
+                    name,
+                    command,
+                    paths["logs_dir"],
+                    env=command_environment(name, settings),
+                )
+            )
             if (
                 name == "feature_extractor"
                 and should_use_manifest_camera_groups(image_manifest)
@@ -1555,6 +1818,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         logs_dir=paths["logs_dir"],
                     )
                 )
+
+        if not is_single_plan:
+            cpu_count, cpu_source, blas_threads, outer_threads = hybrid_matching_thread_config()
+            print(
+                "Hybrid matching thread configuration: "
+                f"cpu_count={cpu_count} source={cpu_source} "
+                f"OPENBLAS_NUM_THREADS={blas_threads} "
+                f"OMP_NUM_THREADS={outer_threads} FAISS_NUM_THREADS={outer_threads}",
+                flush=True,
+            )
+            with temporary_process_environment(hybrid_matching_process_env()):
+                matching_results = execute_matching_plan(
+                    plan=matching_plan,
+                    image_manifest=image_manifest,
+                    database_path=paths["database_path"],
+                    work_dir=paths["logs_dir"] / "matching_stages",
+                    matching_type=str(settings["matching_type"]),
+                    use_gpu=bool(settings["use_gpu"]),
+                    sequential_overlap=int(settings["sequential_overlap"]),
+                )
+
+            # Hybrid matching must be complete before view-graph calibration
+            # and mapping consume the database.
+            for name, command in deferred_commands:
+                command_results.append(run_command(name, command, paths["logs_dir"]))
 
         selected_model = find_sparse_model(paths["sparse_dir"])
         if selected_model is None:
@@ -1575,6 +1863,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             paths=paths,
             image_count=image_count,
             image_manifest=image_manifest,
+            matching_plan=matching_plan,
+            matching_results=matching_results,
             colmap_bin=colmap_bin,
             option_names=option_names,
             commands=command_results,
@@ -1596,6 +1886,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         paths=paths,
         image_count=image_count,
         image_manifest=image_manifest,
+        matching_plan=matching_plan,
+        matching_results=matching_results,
         colmap_bin=colmap_bin,
         option_names=option_names,
         commands=command_results,

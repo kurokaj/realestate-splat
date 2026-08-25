@@ -43,9 +43,9 @@ PROFILE_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "min_entropy": 3.2,
         "duplicate_hash_threshold": 4,
         "duplicate_pixel_threshold": 0.018,
-        "force_keep_interval": 3.0,
-        "coverage_window_seconds": 2.0,
-        "min_frames_per_window": 1,
+        "force_keep_interval": 3,
+        "coverage_window_seconds": 0.0,
+        "min_frames_per_window": 0,
         "coverage_hard_min_blur": 20.0,
         "coverage_hard_min_brightness": 20.0,
         "coverage_hard_max_brightness": 245.0,
@@ -63,9 +63,9 @@ PROFILE_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "min_entropy": 3.2,
         "duplicate_hash_threshold": 4,
         "duplicate_pixel_threshold": 0.018,
-        "force_keep_interval": 3.0,
-        "coverage_window_seconds": 2.0,
-        "min_frames_per_window": 1,
+        "force_keep_interval": 3,
+        "coverage_window_seconds": 0.0,
+        "min_frames_per_window": 0,
         "coverage_hard_min_blur": 20.0,
         "coverage_hard_min_brightness": 20.0,
         "coverage_hard_max_brightness": 245.0,
@@ -83,9 +83,9 @@ PROFILE_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "min_entropy": 3.2,
         "duplicate_hash_threshold": 4,
         "duplicate_pixel_threshold": 0.018,
-        "force_keep_interval": 3.0,
-        "coverage_window_seconds": 2.0,
-        "min_frames_per_window": 1,
+        "force_keep_interval": 3,
+        "coverage_window_seconds": 0.0,
+        "min_frames_per_window": 0,
         "coverage_hard_min_blur": 20.0,
         "coverage_hard_min_brightness": 20.0,
         "coverage_hard_max_brightness": 245.0,
@@ -103,9 +103,9 @@ PROFILE_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "min_entropy": 3.0,
         "duplicate_hash_threshold": 4,
         "duplicate_pixel_threshold": 0.016,
-        "force_keep_interval": 3.0,
-        "coverage_window_seconds": 2.0,
-        "min_frames_per_window": 1,
+        "force_keep_interval": 3,
+        "coverage_window_seconds": 0.0,
+        "min_frames_per_window": 0,
         "coverage_hard_min_blur": 20.0,
         "coverage_hard_min_brightness": 20.0,
         "coverage_hard_max_brightness": 245.0,
@@ -164,6 +164,7 @@ class VideoInfo:
 class VideoSource:
     source_id: str
     path: Path
+    sort_index: int
 
 
 @dataclass
@@ -260,8 +261,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--force-keep-interval",
-        type=float,
-        help="Keep a frame at least this often even if it resembles the previous selected frame.",
+        type=int,
+        help="Maximum number of consecutive near-duplicate candidate frames to skip before keeping the current best available frame.",
     )
     parser.add_argument(
         "--coverage-window-seconds",
@@ -395,7 +396,10 @@ def discover_video_sources(args: argparse.Namespace) -> List[VideoSource]:
         for path in args.input_dir.iterdir()
         if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES
     )
-    sources = [VideoSource(source_id=sanitize_source_id(path.stem), path=path) for path in video_paths]
+    sources = [
+        VideoSource(source_id=sanitize_source_id(path.stem), path=path, sort_index=index)
+        for index, path in enumerate(video_paths, start=1)
+    ]
     seen: Dict[str, Path] = {}
     for source in sources:
         previous_path = seen.get(source.source_id)
@@ -623,7 +627,7 @@ def analyze_video(video_path: Path, settings: Dict[str, Any]) -> Tuple[VideoInfo
         selected_initial: List[FrameRecord] = []
         last_selected_hash: Optional[int] = None
         last_selected_signature: Optional[Any] = None
-        last_selected_timestamp: Optional[float] = None
+        near_duplicate_candidates_since_selected = 0
 
         frame_index = start_frame
         next_progress_percent = PROGRESS_PERCENT_STEP
@@ -652,10 +656,16 @@ def analyze_video(video_path: Path, settings: Dict[str, Any]) -> Tuple[VideoInfo
                         hash_distance_value <= int(settings["duplicate_hash_threshold"])
                         and pixel_difference_value <= float(settings["duplicate_pixel_threshold"])
                     )
-                    if is_near_duplicate and last_selected_timestamp is not None:
-                        elapsed_since_selected = timestamp - last_selected_timestamp
-                        if elapsed_since_selected < float(settings["force_keep_interval"]):
+                    if is_near_duplicate:
+                        near_duplicate_candidates_since_selected += 1
+                        if near_duplicate_candidates_since_selected < int(settings["force_keep_interval"]):
                             reject_reason = "duplicate"
+                        else:
+                            # The current candidate is the best available frame
+                            # after the configured number of skipped candidates.
+                            reject_reason = None
+                    else:
+                        near_duplicate_candidates_since_selected = 0
 
                 record = FrameRecord(
                     frame_index=frame_index,
@@ -679,7 +689,7 @@ def analyze_video(video_path: Path, settings: Dict[str, Any]) -> Tuple[VideoInfo
                     selected_initial.append(record)
                     last_selected_hash = ahash_value
                     last_selected_signature = signature
-                    last_selected_timestamp = timestamp
+                    near_duplicate_candidates_since_selected = 0
 
             if settings.get("progress") and total_progress_frames:
                 processed_frames = max(0, frame_index - start_frame + 1)
@@ -764,6 +774,11 @@ def best_quality_frames(records: Sequence[FrameRecord], limit: int) -> List[Fram
     return ranked[:limit]
 
 
+def best_quality_frame(records: Sequence[FrameRecord]) -> Optional[FrameRecord]:
+    best = best_quality_frames(records, 1)
+    return best[0] if best else None
+
+
 def coverage_fallback_allowed(record: FrameRecord, settings: Dict[str, Any]) -> bool:
     if record.blur_score < float(settings["coverage_hard_min_blur"]):
         return False
@@ -804,6 +819,7 @@ def finalize_selection(
     mandatory: List[FrameRecord] = []
     mandatory_ids: set = set()
     coverage_fallback_ids: set = set()
+    force_keep_ids: set = set()
 
     if records and min_frames_per_window > 0 and window_seconds > 0:
         windows = records_by_coverage_window(records, window_seconds)
@@ -826,6 +842,27 @@ def finalize_selection(
                 add_unique_frame(mandatory, mandatory_ids, record)
                 coverage_fallback_ids.add(id(record))
 
+    force_keep_interval = int(settings.get("force_keep_interval") or 0)
+    if records and force_keep_interval > 0:
+        selected_ids_for_gaps = normal_ids | mandatory_ids
+        ordered_records = sorted(records, key=lambda record: (record.timestamp_seconds, record.frame_index))
+        selected_positions = [
+            index for index, record in enumerate(ordered_records)
+            if id(record) in selected_ids_for_gaps
+        ]
+        previous = -1
+        for selected_position in selected_positions + [len(ordered_records)]:
+            gap = ordered_records[previous + 1:selected_position]
+            while len(gap) > force_keep_interval:
+                candidate = best_quality_frame(gap[:force_keep_interval + 1])
+                if candidate is None:
+                    break
+                add_unique_frame(mandatory, mandatory_ids, candidate)
+                force_keep_ids.add(id(candidate))
+                candidate_offset = gap.index(candidate)
+                gap = gap[candidate_offset + 1:]
+            previous = selected_position
+
     pool: List[FrameRecord] = []
     pool_ids: set = set()
     for record in mandatory:
@@ -834,10 +871,7 @@ def finalize_selection(
         add_unique_frame(pool, pool_ids, record)
 
     if len(mandatory) >= target_max:
-        selected_final = pick_evenly(
-            sorted(mandatory, key=lambda record: (record.timestamp_seconds, record.frame_index)),
-            target_max,
-        )
+        selected_final = sorted(mandatory, key=lambda record: (record.timestamp_seconds, record.frame_index))
     else:
         extra_budget = target_max - len(mandatory)
         extra_candidates = [
@@ -855,15 +889,22 @@ def finalize_selection(
     for record in records:
         if id(record) in selected_ids:
             record.selected_final = True
-            record.selected_by = "coverage_fallback" if id(record) in coverage_fallback_ids else "quality"
+            if id(record) in coverage_fallback_ids:
+                record.selected_by = "coverage_fallback"
+            elif id(record) in force_keep_ids:
+                record.selected_by = "force_keep"
+            else:
+                record.selected_by = "quality"
         elif record.selected_initial:
             record.reject_reason = "trimmed_after_target_max"
 
     return selected_final
 
 
-def assign_output_paths(selected_final: Sequence[FrameRecord], source_id: Optional[str] = None) -> None:
-    prefix = f"{source_id}_" if source_id else ""
+def assign_output_paths(selected_final: Sequence[FrameRecord], source: Optional[VideoSource] = None) -> None:
+    prefix = ""
+    if source is not None:
+        prefix = f"seq_{source.sort_index:03d}_{source.source_id}_"
     for sequence, record in enumerate(selected_final, start=1):
         record.output_file = f"frames_selected/{prefix}frame_{sequence:06d}.jpg"
 
@@ -1370,11 +1411,12 @@ def image_manifest_entry_for_video(record: FrameRecord, video_info: VideoInfo) -
     return {
         "image_name": output_path.name,
         "path": record.output_file,
-        "role": "coverage",
+        "role": "coverage_video",
+        "source_kind": "video",
         "source_id": record.source_id,
         "location": record.source_id,
         "source_path": record.source_video,
-        "camera_group": "coverage",
+        "camera_group": "coverage_video",
         "width": video_info.width,
         "height": video_info.height,
         "metrics": {
@@ -1394,11 +1436,12 @@ def image_manifest_entry_for_coverage_image(record: FrameRecord) -> Dict[str, An
     return {
         "image_name": output_path.name,
         "path": record.output_file,
-        "role": "coverage",
+        "role": "coverage_image",
+        "source_kind": "image",
         "source_id": record.source_id,
         "location": record.source_id,
         "source_path": record.source_image,
-        "camera_group": "coverage",
+        "camera_group": "coverage_image",
         "width": record.width,
         "height": record.height,
         "metrics": {
@@ -1417,6 +1460,7 @@ def image_manifest_entry_for_hero(record: HeroImageRecord) -> Dict[str, Any]:
         "image_name": output_path.name,
         "path": record.output_file,
         "role": "hero",
+        "source_kind": "hero",
         "source_id": record.source_id,
         "location": record.location,
         "source_path": record.path,
@@ -1529,6 +1573,7 @@ def build_multi_capture_report(
     return {
         "schema_version": 1,
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "command": " ".join(sys.argv),
         "input": {
             "mode": "project_media",
             "input_dir": str(input_dir),
@@ -1581,8 +1626,8 @@ def build_multi_capture_report(
 
 def frame_record_to_dict(record: FrameRecord) -> Dict[str, Any]:
     data = asdict(record)
-    if record.selected_final and record.selected_by == "coverage_fallback":
-        data["decision"] = "coverage_fallback"
+    if record.selected_final and record.selected_by in {"coverage_fallback", "force_keep"}:
+        data["decision"] = record.selected_by
     elif record.selected_final:
         data["decision"] = "selected"
     elif record.reject_reason == "trimmed_after_target_max":
@@ -1632,7 +1677,7 @@ def metric_table(report: Dict[str, Any]) -> str:
 
 
 def selected_frame_rows(report: Dict[str, Any], limit: int = 100) -> str:
-    selected = [frame for frame in report["frames"] if frame["decision"] in {"selected", "coverage_fallback"}]
+    selected = [frame for frame in report["frames"] if frame["decision"] in {"selected", "coverage_fallback", "force_keep"}]
     rows = []
     for frame in selected[:limit]:
         rows.append(
@@ -1677,6 +1722,9 @@ def timeline_segments(frames: Sequence[Dict[str, Any]], duration_seconds: Option
         timestamp = float(frame.get("timestamp_seconds") or 0.0)
         left = max(0.0, min(100.0, (timestamp / max_time) * 100.0))
         decision = str(frame.get("decision") or "rejected")
+        selected_by = str(frame.get("selected_by") or "")
+        if selected_by in {"coverage_fallback", "force_keep"}:
+            decision = selected_by
         title = (
             "{time}s | {decision} | blur {blur} | brightness {brightness} | {file}".format(
                 time=frame.get("timestamp_seconds"),
@@ -1754,7 +1802,7 @@ def video_timeline_blocks(report: Dict[str, Any]) -> str:
         summary = {
             "selected": video.get("selected_frame_count"),
             "quality": selected_by.get("quality", 0),
-            "coverage_fallback": video.get("coverage_fallback_frame_count"),
+            "force_keep": selected_by.get("force_keep", 0),
             "largest_gap_seconds": largest_gap if largest_gap is not None else "n/a",
             "coverage_gaps": coverage.get("windows_below_minimum_count", 0),
         }
@@ -1774,7 +1822,7 @@ def video_timeline_blocks(report: Dict[str, Any]) -> str:
 """.format(
                 source=html.escape(source_id),
                 meta=html.escape(
-                    "selected {selected} | quality {quality} | fallback {coverage_fallback} | coverage gaps {coverage_gaps} | largest gap {largest_gap_seconds}s".format(
+                    "selected {selected} | quality {quality} | force keep {force_keep} | coverage gaps {coverage_gaps} | largest gap {largest_gap_seconds}s".format(
                         **summary
                     )
                 ),
@@ -1791,7 +1839,7 @@ def video_summary_rows(report: Dict[str, Any]) -> str:
     for video in report.get("videos", []):
         coverage = video.get("coverage", {})
         rows.append(
-            "<tr><td>{source}</td><td>{path}</td><td>{duration}</td><td>{resolution}</td><td>{candidates}</td><td>{selected}</td><td>{fallback}</td><td>{gap}</td><td>{warnings}</td></tr>".format(
+            "<tr><td>{source}</td><td>{path}</td><td>{duration}</td><td>{resolution}</td><td>{candidates}</td><td>{selected}</td><td>{force_keep}</td><td>{gap}</td><td>{warnings}</td></tr>".format(
                 source=html.escape(str(video.get("source_id"))),
                 path=html.escape(str(video.get("path"))),
                 duration=html.escape(str(video.get("video", {}).get("duration_seconds"))),
@@ -1803,7 +1851,7 @@ def video_summary_rows(report: Dict[str, Any]) -> str:
                 ),
                 candidates=html.escape(str(video.get("candidate_frame_count"))),
                 selected=html.escape(str(video.get("selected_frame_count"))),
-                fallback=html.escape(str(video.get("coverage_fallback_frame_count"))),
+                force_keep=html.escape(str((video.get("selected_by") or {}).get("force_keep", 0))),
                 gap=html.escape(str(coverage.get("largest_selected_gap_seconds"))),
                 warnings=html.escape(", ".join(video.get("warnings") or [])),
             )
@@ -2023,6 +2071,10 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
       background: #13a36f;
       z-index: 3;
     }}
+    .tick-force_keep {{
+      background: #13a36f;
+      z-index: 3;
+    }}
     .tick-rejected {{
       background: rgba(101, 112, 128, 0.32);
       height: 24px;
@@ -2086,11 +2138,11 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
 
   <h2>Summary</h2>
   <table>{summary_rows}</table>
-  <p class="note">Selected frames from all videos are written to <code>frames_selected/</code> with source-prefixed filenames.</p>
+  <p class="note">Selected frames from all videos are written to <code>frames_selected/</code> with deterministic sequence-first filenames so sequential matching sees a stable lexicographic order.</p>
 
   <h2>Videos</h2>
   <table>
-    <tr><th>Source</th><th>Path</th><th>Duration (s)</th><th>Resolution</th><th>Candidates</th><th>Selected</th><th>Fallback</th><th>Largest Gap (s)</th><th>Warnings</th></tr>
+    <tr><th>Source</th><th>Path</th><th>Duration (s)</th><th>Resolution</th><th>Candidates</th><th>Selected</th><th>Force kept</th><th>Largest Gap (s)</th><th>Warnings</th></tr>
     {video_rows}
   </table>
 
@@ -2129,7 +2181,7 @@ def write_html_report(report: Dict[str, Any], gpu_report: Dict[str, Any], report
   <p class="note">Each tick is a scored candidate frame. Red background bands mark coverage windows that still have no selected frame.</p>
   <div class="legend">
     <span style="--legend-color:#2267c7;">quality selected</span>
-    <span style="--legend-color:#13a36f;">coverage fallback</span>
+    <span style="--legend-color:#13a36f;">force keep</span>
     <span style="--legend-color:rgba(101,112,128,0.45);">rejected</span>
     <span style="--legend-color:#b7791f;">trimmed</span>
     <span style="--legend-color:rgba(201,60,60,0.25);">coverage gap</span>
@@ -2165,7 +2217,7 @@ def process_video_source(
         record.source_id = source.source_id
         record.source_video = str(source.path)
     selected_final = finalize_selection(records, selected_initial, settings)
-    assign_output_paths(selected_final, source.source_id)
+    assign_output_paths(selected_final, source)
     saved_count = save_selected_frames(source.path, selected_final, out_dir, settings)
     warnings = warning_flags(records, selected_final, settings)
     return VideoRunResult(
@@ -2299,11 +2351,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sources = discover_video_sources(args)
     coverage_image_inputs = discover_coverage_images(args.input_dir)
     hero_inputs = discover_hero_images(args.input_dir)
-    if not sources and not coverage_image_inputs:
+    if not sources and not coverage_image_inputs and not hero_inputs:
         video_suffixes = ", ".join(sorted(VIDEO_SUFFIXES))
         image_suffixes = ", ".join(sorted(IMAGE_SUFFIXES))
         raise SystemExit(
-            f"No coverage videos or root-level coverage images found in {args.input_dir}. "
+            f"No coverage videos, coverage images, or hero images found in {args.input_dir}. "
             f"Expected videos ({video_suffixes}) or images ({image_suffixes})."
         )
 

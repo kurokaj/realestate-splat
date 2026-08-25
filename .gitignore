@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.env
+.env.example
 
 # Keep local captures and generated runs out of source control.
 data/raw/*

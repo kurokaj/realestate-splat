@@ -209,3 +209,161 @@ Remote COLMAP now writes both `reports/reconstruction_report.json` and
 without reading raw logs first. The HTML/JSON include the parsed COLMAP
 `model_analyzer` summary, such as registered images, point count, observation
 count, mean track length, observations per image, and mean reprojection error.
+
+## Milestone 4: storage-backed runtime contracts
+
+The active production-runtime work starts by making run artifacts durable
+outside the local machine or Verda block volume. New production runs should use
+R2 as the durable project store. Local `runs/<project>/` directories remain a
+development cache and legacy compatibility shape.
+
+## Milestone 8A: local controller skeleton
+
+The first controller milestone can run terminal-first or as a local Compose
+stack. Terminal mode is still useful for debugging individual processes:
+
+```bash
+docker compose up postgres
+uvicorn controller_api.main:app --reload --host 0.0.0.0 --port 8000
+python -m controller_worker
+```
+
+For the bundled local stack:
+
+```bash
+docker compose up --build
+```
+
+The skeleton includes project, stage-run, event, and approval tables plus a
+fake local provider so queued stages can be claimed and completed without
+starting GPU pods. See `docs/controller_8a.md` for startup and smoke-test
+commands.
+
+Current controller development is still terminal-first. It now includes
+approval, reject, retry, cancel, richer fake progress events, and a
+`local_preprocess` worker path that shells into `scripts/run_preprocess_stage.py`.
+Compose now bundles Postgres, API, and worker with the same process commands.
+Postgres stores controller state, approvals, compact events, progress, and
+artifact pointers; full stdout/stderr logs should stay in files or R2, not in
+the database.
+Real preprocessing is wired through the controller with R2-only durable inputs
+and outputs: `local_preprocess` requires `r2://` raw and preprocess URIs, then
+loads the compact `preprocess_summary.json` back from R2 for controller state.
+Raw media upload is available at `POST /projects/{project_id}/raw`; it accepts
+multipart files, creates `sources_manifest.json`, uploads to R2, and marks the
+project `raw_uploaded`.
+The upload endpoint also accepts `metadata_json` so a drag-and-drop UI can mark
+loose phone images as `hero_image` with a location, without requiring a
+`hero/<location>/` folder structure.
+
+The first helper can mirror an existing run directory to a local path or
+S3-compatible object storage and writes an `artifact_manifest.json`. This is
+mainly for smoke testing the storage contract and inspecting old test runs; it
+is not a required migration step.
+
+Dry-run a local mirror:
+
+```bash
+python scripts/sync_run_artifacts.py upload \
+  --run runs/parkkihalli_dome_gap_aware \
+  --destination-uri /tmp/buildvision3d/parkkihalli_dome_gap_aware \
+  --dry-run
+```
+
+Mirror to Cloudflare R2 or another S3-compatible store:
+
+```bash
+export R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
+
+python scripts/sync_run_artifacts.py upload \
+  --run runs/parkkihalli_dome_gap_aware \
+  --destination-uri r2://gs-pipeline-preprocessed/projects/parkkihalli_dome_gap_aware/preprocess
+```
+
+Fetch artifacts back to a local run directory:
+
+```bash
+python scripts/sync_run_artifacts.py download \
+  --source-uri r2://gs-pipeline-preprocessed/projects/parkkihalli_dome_gap_aware/preprocess \
+  --run runs/parkkihalli_dome_gap_aware_from_r2
+```
+
+`r2://` uses the AWS CLI under the hood with `R2_ENDPOINT`. Configure AWS-style
+credentials in the normal AWS environment variables or profile before running
+real uploads. Plain local paths work without the AWS CLI.
+
+The next production-oriented helper should upload raw capture media to:
+
+```text
+r2://<bucket>/projects/<project_id>/raw/
+```
+
+and write a `sources_manifest.json` for CPU preprocessing to consume.
+
+Dry-run a raw project upload:
+
+```bash
+python3 scripts/upload_raw_project.py \
+  --project-id dev-smoke \
+  --input-dir data/raw/car_single \
+  --destination-uri "r2://$R2_BUCKET/projects/dev-smoke/raw" \
+  --endpoint-url "$R2_ENDPOINT" \
+  --dry-run
+```
+
+Run the upload after inspecting the dry-run summary:
+
+```bash
+python3 scripts/upload_raw_project.py \
+  --project-id dev-smoke \
+  --input-dir data/raw/car_single \
+  --destination-uri "r2://$R2_BUCKET/projects/dev-smoke/raw" \
+  --endpoint-url "$R2_ENDPOINT"
+```
+
+Run CPU preprocessing from raw storage into app-oriented JSON artifacts:
+
+```bash
+python3 scripts/run_preprocess_stage.py \
+  --project-id dev-smoke \
+  --raw-uri "r2://$R2_BUCKET/projects/dev-smoke/raw" \
+  --output-uri "r2://$R2_BUCKET/projects/dev-smoke/preprocess" \
+  --endpoint-url "$R2_ENDPOINT" \
+  --profile indoor_room \
+  --dry-run
+```
+
+For local testing with the existing conda environment, pass its Python:
+
+```bash
+python3 scripts/run_preprocess_stage.py \
+  --project-id dev-smoke \
+  --raw-uri "r2://$R2_BUCKET/projects/dev-smoke/raw" \
+  --output-uri "r2://$R2_BUCKET/projects/dev-smoke/preprocess" \
+  --endpoint-url "$R2_ENDPOINT" \
+  --profile indoor_room \
+  --python-bin /opt/homebrew/Caskroom/miniconda/base/envs/splat-dev-locat/bin/python
+```
+
+Remove `--dry-run` to execute it. The stage uploads:
+
+```text
+projects/<project_id>/preprocess/current/
+  frames_selected/
+  capture_report.json
+  image_manifest.json
+  sources_manifest.json
+  preprocess_summary.json
+  stage_result.json
+
+projects/<project_id>/preprocess/runs/<stage_run_id>/
+  capture_report.json
+  preprocess_summary.json
+  stage_result.json
+```
+
+The new stage does not upload the legacy HTML report. The future app should
+render the same information from JSON. Successful history runs preserve
+`capture_report.json`, `preprocess_summary.json`, and `stage_result.json`; failed runs preserve
+`stage_result.json` in history and write `stage_result.json` plus
+`logs/preprocess.log` to `current/`.

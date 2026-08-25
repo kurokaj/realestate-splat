@@ -1,5 +1,12 @@
 # Real Estate Gaussian Splatting Pipeline Plan
 
+> Legacy status: this document describes the Verda-era script-first pipeline
+> that reached Milestone 3 on 2026-07-01. It remains useful for understanding
+> the proven local preprocessing, SSH orchestration, run directory contract,
+> capture reports, COLMAP reports, and hero-image manifest behavior. New
+> production runtime work now lives in
+> `docs/production_runtime_architecture.md`.
+
 ## 1. Product Goal
 
 Build a repeatable pipeline for creating browser-hosted Gaussian splatting scenes for real estate walkthroughs.

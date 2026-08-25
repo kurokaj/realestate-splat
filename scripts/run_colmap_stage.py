@@ -1,0 +1,698 @@
+#!/usr/bin/env python3
+"""Run the COLMAP GPU stage from preprocess artifacts in object storage."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import sys
+import tempfile
+from collections import Counter
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+SRC_DIR = ROOT_DIR / "src"
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from realestate_splat.cli import CommandResult, run_logged_command, utc_now, write_json  # noqa: E402
+from realestate_splat.stage_contract import StageResult, write_stage_result  # noqa: E402
+from realestate_splat.storage import copy_file, sync_directory  # noqa: E402
+from controller_common.progress import LineProgressParser, R2ProgressReporter  # noqa: E402
+from controller_common.colmap_viewer import write_sparse_viewer_payload  # noqa: E402
+from controller_common.preprocess_assembly import assemble_preprocess_groups_local, parse_group_output_specs  # noqa: E402
+
+
+DEFAULT_COLMAP_BIN = Path("/opt/colmap-cuda/bin/colmap")
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Download preprocess artifacts, run COLMAP, and upload current/history stage artifacts.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--project-id", required=True, help="Stable project id.")
+    parser.add_argument(
+        "--input-uri",
+        required=True,
+        help="Preprocess current URI, e.g. r2://bucket/projects/id/preprocess/current.",
+    )
+    parser.add_argument("--raw-uri", help="Optional raw project URI used only to copy sources_manifest.json into the local COLMAP input.")
+    parser.add_argument(
+        "--blacklist-uri",
+        help="Optional R2 JSON artifact listing image_name values to exclude from this COLMAP run.",
+    )
+    parser.add_argument(
+        "--preprocess-group-output",
+        action="append",
+        default=[],
+        metavar="JSON",
+        help=(
+            "Approved grouped preprocess output as JSON with group_key and output_uri. "
+            "When provided, groups are downloaded and assembled locally instead of syncing --input-uri."
+        ),
+    )
+    parser.add_argument("--output-uri", required=True, help="COLMAP output URI, e.g. r2://bucket/projects/id/colmap.")
+    parser.add_argument("--endpoint-url", help="S3-compatible endpoint URL. For r2://, R2_ENDPOINT is used by default.")
+    parser.add_argument("--stage-run-id", help="Stable COLMAP run id. Defaults to a UTC timestamp.")
+    parser.add_argument("--pipeline-run-id", help="Optional parent pipeline run id for stage_result.json.")
+    parser.add_argument("--python-bin", default=sys.executable, help="Python executable used to run scripts/run_colmap.py.")
+    parser.add_argument(
+        "--colmap-bin",
+        default=str(DEFAULT_COLMAP_BIN),
+        help="Absolute COLMAP binary path inside the GPU runtime.",
+    )
+    parser.add_argument("--config", type=Path, help="Optional JSON/YAML config passed to scripts/run_colmap.py.")
+    parser.add_argument(
+        "--matching-plan",
+        type=Path,
+        help="Local JSON matching plan. It is copied into the temporary COLMAP run before execution.",
+    )
+    parser.add_argument(
+        "--matching-plan-uri",
+        help="R2 JSON matching plan. It is downloaded into the temporary COLMAP run before execution.",
+    )
+    parser.add_argument("--mode", choices=["incremental", "global"], default="global", help="COLMAP mapper mode.")
+    parser.add_argument(
+        "--feature-extractor",
+        choices=["SIFT", "sift", "ALIKED_N16ROT", "ALIKED_N32"],
+        default="SIFT",
+        help="COLMAP FeatureExtraction.type.",
+    )
+    parser.add_argument("--matcher", choices=["exhaustive", "sequential", "vocab_tree"], default="exhaustive")
+    parser.add_argument(
+        "--processing-strategy",
+        choices=["single", "video_plus_heroes", "multiple_videos", "multiple_videos_plus_heroes"],
+        default="single",
+        help="High-level matching strategy recorded and passed to the COLMAP wrapper.",
+    )
+    parser.add_argument(
+        "--matching-type",
+        choices=["SIFT_BRUTEFORCE", "SIFT_LIGHTGLUE", "ALIKED_BRUTEFORCE", "ALIKED_LIGHTGLUE"],
+        default="SIFT_BRUTEFORCE",
+        help="COLMAP FeatureMatching.type.",
+    )
+    parser.add_argument("--camera-model", default="SIMPLE_RADIAL", help="COLMAP ImageReader camera model.")
+    parser.add_argument("--single-camera", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--use-gpu", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--max-image-size", type=int, default=3200)
+    parser.add_argument(
+        "--sequential-loop-detection",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="SequentialMatching.loop_detection when --matcher sequential is used.",
+    )
+    parser.add_argument("--vocab-tree", type=Path, help="Vocabulary tree path when --matcher vocab_tree is used.")
+    parser.add_argument("--option-namespace", choices=["auto", "feature", "sift"], default="auto")
+    parser.add_argument("--view-graph-calibrator", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--manifest-camera-groups", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--feature-option",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Additional COLMAP feature_extractor option. Repeat for multiple options.",
+    )
+    parser.add_argument(
+        "--matcher-option",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Additional COLMAP matcher option. Repeat for multiple options.",
+    )
+    parser.add_argument(
+        "--view-graph-calibrator-option",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Additional COLMAP view_graph_calibrator option. Repeat for multiple options.",
+    )
+    parser.add_argument(
+        "--mapper-option",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Additional COLMAP mapper/global_mapper option. Repeat for multiple options.",
+    )
+    parser.add_argument(
+        "--colmap-arg",
+        action="append",
+        default=[],
+        metavar="ARG",
+        help="Extra raw argument passed to scripts/run_colmap.py. Repeat for multiple args.",
+    )
+    parser.add_argument("--work-dir", type=Path, help="Scratch directory. Defaults to a temporary directory.")
+    parser.add_argument("--keep-work-dir", action="store_true", help="Keep temporary scratch files after completion.")
+    parser.add_argument("--dry-run", action="store_true", help="Print planned storage and COLMAP commands without running them.")
+    return parser.parse_args(argv)
+
+
+def stage_run_id() -> str:
+    timestamp = utc_now().split(".", 1)[0]
+    return timestamp.replace("+00:00", "Z").replace(":", "").replace("-", "")
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_args(argv)
+    run_id = args.stage_run_id or f"colmap_{stage_run_id()}"
+
+    if args.work_dir is not None:
+        work_dir = args.work_dir.expanduser()
+        temp_dir = None
+    else:
+        temp_dir = tempfile.TemporaryDirectory(prefix=f"buildvision3d-{args.project_id}-{run_id}-")
+        work_dir = Path(temp_dir.name)
+
+    input_dir = work_dir / "preprocess_current"
+    local_run_dir = work_dir / "colmap_run"
+    logs_dir = work_dir / "logs"
+    current_dir = work_dir / "upload_current"
+    history_dir = work_dir / "upload_history"
+    started_at = utc_now()
+
+    try:
+        if args.dry_run:
+            print_plan(args, run_id, input_dir, local_run_dir, current_dir, history_dir)
+            return 0
+
+        input_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        progress = R2ProgressReporter(
+            stage="colmap",
+            stage_run_id=run_id,
+            output_uri=args.output_uri,
+            endpoint_url=args.endpoint_url,
+        )
+        progress.update(2, "downloading", "Downloading approved preprocess groups", force=True)
+        group_outputs = parse_group_output_specs(args.preprocess_group_output)
+        if group_outputs:
+            assemble_preprocess_groups_local(
+                group_outputs=group_outputs,
+                destination_dir=input_dir,
+                endpoint_url=args.endpoint_url,
+                project_id=args.project_id,
+                raw_uri=args.raw_uri or "",
+            )
+        else:
+            sync_directory(args.input_uri, input_dir, endpoint_url=args.endpoint_url)
+        progress.update(8, "preparing", "Preparing local COLMAP input", details={"image_count": len(list((input_dir / "frames_selected").glob("*")))}, force=True)
+        if args.blacklist_uri:
+            excluded_images = load_blacklist(args.blacklist_uri, args.endpoint_url)
+            print(
+                f"COLMAP blacklist loaded: {len(excluded_images)} image(s) from {args.blacklist_uri}",
+                flush=True,
+            )
+            apply_blacklist(input_dir, excluded_images)
+            progress.update(10, "preparing", "Applied COLMAP blacklist", details={"blacklisted_images": len(excluded_images)}, force=True)
+        prepare_local_run(input_dir, local_run_dir)
+        if args.matching_plan_uri:
+            matching_plan_local = local_run_dir / "reports" / "matching_plan_input.json"
+            matching_plan_local.parent.mkdir(parents=True, exist_ok=True)
+            copy_file(args.matching_plan_uri, matching_plan_local, endpoint_url=args.endpoint_url)
+            args.matching_plan = matching_plan_local
+        if args.matching_plan is not None:
+            matching_plan_input = local_run_dir / "reports" / "matching_plan_input.json"
+            if args.matching_plan.expanduser() != matching_plan_input:
+                copy_if_exists(args.matching_plan.expanduser(), matching_plan_input)
+            if not matching_plan_input.exists():
+                raise FileNotFoundError(f"Matching plan does not exist: {args.matching_plan}")
+
+        progress.update(12, "feature_extraction", "Starting COLMAP feature extraction", force=True)
+        colmap_result = run_colmap(args, local_run_dir, logs_dir, progress)
+        progress.update(90, "artifacts", "Preparing reconstruction artifacts", force=True)
+        prepare_upload_payloads(
+            project_id=args.project_id,
+            pipeline_run_id=args.pipeline_run_id,
+            stage_run_id=run_id,
+            input_uri=args.input_uri,
+            output_uri=args.output_uri,
+            local_run_dir=local_run_dir,
+            logs_dir=logs_dir,
+            current_dir=current_dir,
+            history_dir=history_dir,
+            started_at=started_at,
+            colmap_result=colmap_result,
+        )
+
+        progress.update(96, "uploading", "Uploading COLMAP artifacts to R2", force=True)
+        upload_payloads(args, run_id, current_dir, history_dir)
+        print(f"COLMAP stage complete: {run_id}")
+        print(f"Current output: {args.output_uri.rstrip('/')}/current/")
+        print(f"History output: {args.output_uri.rstrip('/')}/runs/{run_id}/")
+        return 0
+    except Exception as exc:
+        if not args.dry_run:
+            try:
+                prepare_failed_payloads(
+                    project_id=args.project_id,
+                    pipeline_run_id=args.pipeline_run_id,
+                    stage_run_id=run_id,
+                    input_uri=args.input_uri,
+                    output_uri=args.output_uri,
+                    local_run_dir=local_run_dir,
+                    logs_dir=logs_dir,
+                    current_dir=current_dir,
+                    history_dir=history_dir,
+                    started_at=started_at,
+                    error=exc,
+                )
+                upload_payloads(args, run_id, current_dir, history_dir)
+            except Exception as upload_error:
+                print(f"Could not upload failed stage metadata: {upload_error}", file=sys.stderr)
+        print(f"COLMAP stage failed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if temp_dir is not None and not args.keep_work_dir:
+            temp_dir.cleanup()
+        elif args.keep_work_dir:
+            print(f"Kept work directory: {work_dir}")
+
+
+def print_plan(
+    args: argparse.Namespace,
+    run_id: str,
+    input_dir: Path,
+    local_run_dir: Path,
+    current_dir: Path,
+    history_dir: Path,
+) -> None:
+    print(f"Stage run id: {run_id}")
+    if args.preprocess_group_output:
+        print(f"$ assemble {len(args.preprocess_group_output)} preprocess group outputs -> {input_dir}")
+    else:
+        print(f"$ sync {args.input_uri} -> {input_dir}")
+    print(f"$ prepare local COLMAP run -> {local_run_dir}")
+    print("$ " + " ".join(build_colmap_command(args, local_run_dir)))
+    print(f"$ prepare current payload -> {current_dir}")
+    print(f"$ prepare history payload -> {history_dir}")
+    print(f"$ sync {current_dir} -> {args.output_uri.rstrip('/')}/current")
+    print(f"$ sync {history_dir} -> {args.output_uri.rstrip('/')}/runs/{run_id}")
+
+
+def prepare_local_run(input_dir: Path, local_run_dir: Path) -> None:
+    frames_dir = input_dir / "frames_selected"
+    if not frames_dir.exists():
+        raise FileNotFoundError(f"Preprocess input is missing frames_selected/: {frames_dir}")
+    if not any(path.is_file() for path in frames_dir.iterdir()):
+        raise RuntimeError(f"Preprocess input has no selected frame files: {frames_dir}")
+
+    manifest_path = input_dir / "image_manifest.json"
+    if manifest_path.is_file():
+        manifest = read_json(manifest_path)
+        entries = manifest.get("images") if isinstance(manifest, dict) else None
+        if not isinstance(entries, list):
+            raise RuntimeError("Preprocess image_manifest.json has no images list")
+        frame_names = sorted(path.name for path in frames_dir.iterdir() if path.is_file())
+        manifest_names = [Path(str(item.get("image_name") or "")).name for item in entries if isinstance(item, dict)]
+        duplicate_manifest_names = sorted(name for name, count in Counter(manifest_names).items() if name and count > 1)
+        if duplicate_manifest_names:
+            raise RuntimeError(
+                "Preprocess image manifest contains duplicate image names: "
+                + ", ".join(duplicate_manifest_names[:10])
+            )
+        if len(frame_names) != len(manifest_names) or set(frame_names) != set(manifest_names):
+            missing_from_manifest = sorted(set(frame_names) - set(manifest_names))
+            missing_from_frames = sorted(set(manifest_names) - set(frame_names))
+            raise RuntimeError(
+                "Preprocess input mismatch before COLMAP: "
+                f"frames_selected={len(frame_names)}, manifest_images={len(manifest_names)}; "
+                f"missing_from_manifest={missing_from_manifest[:5]}, "
+                f"missing_from_frames={missing_from_frames[:5]}"
+            )
+
+    copy_tree(frames_dir, local_run_dir / "frames_selected")
+    reports_dir = local_run_dir / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    copy_if_exists(input_dir / "image_manifest.json", reports_dir / "image_manifest.json")
+    copy_if_exists(input_dir / "capture_report.json", reports_dir / "capture_report.json")
+    copy_if_exists(input_dir / "preprocess_summary.json", reports_dir / "preprocess_summary.json")
+
+
+def load_blacklist(uri: str, endpoint_url: Optional[str]) -> set[str]:
+    # Download into a closed path before parsing. The S3 CLI overwrites the
+    # destination, so reading through an already-open NamedTemporaryFile can
+    # observe stale buffered state on some runtimes.
+    with tempfile.TemporaryDirectory(prefix="buildvision3d-colmap-blacklist-") as temp_dir:
+        path = Path(temp_dir) / "colmap_blacklist.json"
+        try:
+            copy_file(uri, path, endpoint_url=endpoint_url)
+        except Exception:
+            return set()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"COLMAP blacklist is not valid JSON: {uri}") from exc
+    entries = payload.get("excluded_images") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return set()
+    excluded: set[str] = set()
+    for entry in entries:
+        value = entry.get("image_name") if isinstance(entry, dict) else entry
+        if value:
+            excluded.add(Path(str(value)).name)
+    return excluded
+
+
+def apply_blacklist(input_dir: Path, excluded_images: set[str]) -> None:
+    if not excluded_images:
+        print("COLMAP blacklist contains no image entries.", flush=True)
+        return
+    frames_dir = input_dir / "frames_selected"
+    removed = {path.name for path in frames_dir.iterdir() if path.is_file() and path.name in excluded_images}
+    for name in removed:
+        (frames_dir / name).unlink()
+
+    manifest_path = input_dir / "image_manifest.json"
+    if manifest_path.exists():
+        manifest = read_json(manifest_path)
+        images = manifest.get("images") if isinstance(manifest, dict) else None
+        if isinstance(images, list):
+            manifest["images"] = [
+                item
+                for item in images
+                if not isinstance(item, dict) or Path(str(item.get("image_name") or "")).name not in removed
+            ]
+            manifest["blacklisted_images"] = sorted(removed)
+            write_json(manifest_path, manifest)
+    if not removed:
+        print(
+            f"COLMAP blacklist matched no local frames ({len(excluded_images)} requested).",
+            flush=True,
+        )
+    else:
+        print(
+            f"COLMAP blacklist removed {len(removed)}/{len(excluded_images)} image(s) before feature extraction.",
+            flush=True,
+        )
+
+
+def build_colmap_command(args: argparse.Namespace, local_run_dir: Path) -> List[str]:
+    command = [
+        args.python_bin,
+        "scripts/run_colmap.py",
+        "--run",
+        str(local_run_dir),
+        "--colmap-bin",
+        str(args.colmap_bin),
+        "--mode",
+        args.mode,
+        "--feature-extractor",
+        args.feature_extractor,
+        "--matcher",
+        args.matcher,
+        "--processing-strategy",
+        args.processing_strategy,
+        "--matching-type",
+        args.matching_type,
+        "--camera-model",
+        args.camera_model,
+        "--use-gpu" if args.use_gpu else "--no-use-gpu",
+        "--max-image-size",
+        str(args.max_image_size),
+        "--sequential-loop-detection" if args.sequential_loop_detection else "--no-sequential-loop-detection",
+        *([] if args.vocab_tree is None else ["--vocab-tree", str(args.vocab_tree)]),
+        "--option-namespace",
+        args.option_namespace,
+        "--view-graph-calibrator" if args.view_graph_calibrator else "--no-view-graph-calibrator",
+        "--manifest-camera-groups" if args.manifest_camera_groups else "--no-manifest-camera-groups",
+        "--overwrite",
+    ]
+    if args.matching_plan is not None:
+        command.extend(["--matching-plan", str(local_run_dir / "reports" / "matching_plan_input.json")])
+    if args.config is not None:
+        command.extend(["--config", str(args.config)])
+    if args.single_camera is not None:
+        command.append("--single-camera" if args.single_camera else "--no-single-camera")
+    for option in args.feature_option:
+        command.extend(["--feature-option", option])
+    for option in args.matcher_option:
+        command.extend(["--matcher-option", option])
+    for option in args.view_graph_calibrator_option:
+        command.extend(["--view-graph-calibrator-option", option])
+    for option in args.mapper_option:
+        command.extend(["--mapper-option", option])
+    command.extend(args.colmap_arg)
+    return command
+
+
+def run_colmap(
+    args: argparse.Namespace,
+    local_run_dir: Path,
+    logs_dir: Path,
+    progress: R2ProgressReporter,
+) -> CommandResult:
+    command = build_colmap_command(args, local_run_dir)
+    parser = LineProgressParser(progress.update)
+    return run_logged_command(
+        "run_colmap_stage",
+        command,
+        logs_dir,
+        Path.cwd(),
+        on_output_line=parser.feed,
+    )
+
+
+def prepare_upload_payloads(
+    *,
+    project_id: str,
+    pipeline_run_id: Optional[str],
+    stage_run_id: str,
+    input_uri: str,
+    output_uri: str,
+    local_run_dir: Path,
+    logs_dir: Path,
+    current_dir: Path,
+    history_dir: Path,
+    started_at: str,
+    colmap_result: CommandResult,
+) -> None:
+    current_dir.mkdir(parents=True, exist_ok=True)
+    history_dir.mkdir(parents=True, exist_ok=True)
+
+    copy_colmap_outputs(local_run_dir, current_dir)
+    copy_if_exists(local_run_dir / "reports" / "image_manifest.json", current_dir / "image_manifest.json")
+    copy_if_exists(local_run_dir / "reports" / "image_manifest.json", history_dir / "image_manifest.json")
+    report_path = local_run_dir / "reports" / "reconstruction_report.json"
+    if not report_path.exists():
+        raise FileNotFoundError(f"COLMAP finished without reconstruction_report.json: {report_path}")
+    report = read_json(report_path)
+    write_json(current_dir / "reconstruction_report.json", report)
+    write_json(history_dir / "reconstruction_report.json", report)
+    copy_if_exists(local_run_dir / "reports" / "matching_plan.json", current_dir / "matching_plan.json")
+    copy_if_exists(local_run_dir / "reports" / "matching_plan.json", history_dir / "matching_plan.json")
+    copy_if_exists(
+        local_run_dir / "colmap" / "logs" / "matching_stages" / "matching_results.json",
+        current_dir / "matching_results.json",
+    )
+    copy_if_exists(
+        local_run_dir / "colmap" / "logs" / "matching_stages" / "matching_results.json",
+        history_dir / "matching_results.json",
+    )
+    generate_viewer_payloads(current_dir=current_dir, history_dir=history_dir)
+
+    finished_at = utc_now()
+    result = StageResult(
+        schema_version=1,
+        project_id=project_id,
+        pipeline_run_id=pipeline_run_id,
+        stage_run_id=stage_run_id,
+        stage="colmap",
+        status="completed",
+        started_at=started_at,
+        finished_at=finished_at,
+        input_uris=[input_uri.rstrip("/")],
+        output_uris=[
+            f"{output_uri.rstrip('/')}/current",
+            f"{output_uri.rstrip('/')}/runs/{stage_run_id}",
+        ],
+        artifact_manifest_uri=None,
+        logs_uri=None,
+        metrics_uri=f"{output_uri.rstrip('/')}/current/reconstruction_report.json",
+        metadata={
+            "colmap_command": colmap_result.command,
+            "colmap_duration_seconds": colmap_result.duration_seconds,
+            "summary": colmap_stage_summary(report),
+        },
+    )
+    write_stage_result(current_dir / "stage_result.json", result)
+    write_stage_result(history_dir / "stage_result.json", result)
+
+
+def copy_colmap_outputs(local_run_dir: Path, current_dir: Path) -> None:
+    colmap_dir = local_run_dir / "colmap"
+    if not colmap_dir.exists():
+        raise FileNotFoundError(f"COLMAP run did not create output directory: {colmap_dir}")
+
+    copy_if_exists(colmap_dir / "database.db", current_dir / "database.db")
+    copy_if_exists(colmap_dir / "database_global.db", current_dir / "database_global.db")
+    copy_tree(colmap_dir / "sparse", current_dir / "sparse")
+    copy_tree(colmap_dir / "sparse_txt", current_dir / "sparse_txt")
+
+
+def generate_viewer_payloads(*, current_dir: Path, history_dir: Path) -> None:
+    sparse_txt_dir = current_dir / "sparse_txt"
+    if not sparse_txt_dir.exists():
+        return
+    viewer_path = write_sparse_viewer_payload(sparse_txt_dir, current_dir / "viewer" / "sparse_scene.json")
+    copy_if_exists(viewer_path, history_dir / "viewer" / "sparse_scene.json")
+
+
+def prepare_failed_payloads(
+    *,
+    project_id: str,
+    pipeline_run_id: Optional[str],
+    stage_run_id: str,
+    input_uri: str,
+    output_uri: str,
+    local_run_dir: Path,
+    logs_dir: Path,
+    current_dir: Path,
+    history_dir: Path,
+    started_at: str,
+    error: Exception,
+) -> None:
+    current_dir.mkdir(parents=True, exist_ok=True)
+    history_dir.mkdir(parents=True, exist_ok=True)
+    copy_tree(logs_dir, current_dir / "logs")
+    copy_tree(local_run_dir / "colmap" / "logs", current_dir / "logs" / "colmap")
+    copy_if_exists(local_run_dir / "reports" / "reconstruction_report.json", current_dir / "reconstruction_report.json")
+    copy_if_exists(local_run_dir / "reports" / "matching_plan.json", current_dir / "matching_plan.json")
+    copy_if_exists(local_run_dir / "reports" / "matching_plan.json", history_dir / "matching_plan.json")
+
+    finished_at = utc_now()
+    result = StageResult(
+        schema_version=1,
+        project_id=project_id,
+        pipeline_run_id=pipeline_run_id,
+        stage_run_id=stage_run_id,
+        stage="colmap",
+        status="failed",
+        started_at=started_at,
+        finished_at=finished_at,
+        input_uris=[input_uri.rstrip("/")],
+        output_uris=[f"{output_uri.rstrip('/')}/current"],
+        logs_uri=f"{output_uri.rstrip('/')}/current/logs",
+        metrics_uri=f"{output_uri.rstrip('/')}/current/reconstruction_report.json",
+        error_message=str(error),
+        metadata={},
+    )
+    write_stage_result(current_dir / "stage_result.json", result)
+    write_stage_result(history_dir / "stage_result.json", result)
+
+
+def colmap_stage_summary(report: Dict[str, Any]) -> Dict[str, Any]:
+    if not report:
+        return {}
+    return {
+        "status": report.get("status"),
+        "mode": (report.get("settings") or {}).get("mode") if isinstance(report.get("settings"), dict) else None,
+        "feature_extractor": (report.get("settings") or {}).get("feature_extractor") if isinstance(report.get("settings"), dict) else None,
+        "matcher": (report.get("settings") or {}).get("matcher") if isinstance(report.get("settings"), dict) else None,
+        "matching_type": (report.get("settings") or {}).get("matching_type") if isinstance(report.get("settings"), dict) else None,
+        "camera_model": (report.get("settings") or {}).get("camera_model") if isinstance(report.get("settings"), dict) else None,
+        "image_count": (report.get("input") or {}).get("image_count") if isinstance(report.get("input"), dict) else None,
+        "selected_sparse_model": report.get("selected_sparse_model"),
+        "reconstruction_metrics": report.get("reconstruction_metrics", {}),
+        "manifest_reconstruction": report.get("manifest_reconstruction", {}),
+        "camera_groups": report.get("camera_groups", []),
+    }
+
+
+def upload_payloads(args: argparse.Namespace, stage_run_id: str, current_dir: Path, history_dir: Path) -> None:
+    output = args.output_uri.rstrip("/")
+    validate_complete_payload(current_dir)
+    sync_directory(
+        current_dir,
+        f"{output}/current",
+        endpoint_url=args.endpoint_url,
+        delete=True,
+        exclude=["reconstruction_report.html"],
+    )
+    sync_directory(
+        history_dir,
+        f"{output}/runs/{stage_run_id}",
+        endpoint_url=args.endpoint_url,
+        delete=True,
+        exclude=["reconstruction_report.html"],
+    )
+    write_upload_complete_markers(args, stage_run_id, current_dir, history_dir)
+
+
+def write_upload_complete_markers(args: argparse.Namespace, stage_run_id: str, current_dir: Path, history_dir: Path) -> None:
+    marker_payload = {
+        "stage": "colmap",
+        "stage_run_id": stage_run_id,
+        "uploaded_at": utc_now(),
+        "uploaded_objects": uploaded_objects(current_dir),
+    }
+    current_marker = current_dir / "upload_complete.json"
+    history_marker = history_dir / "upload_complete.json"
+    write_json(current_marker, marker_payload)
+    write_json(history_marker, marker_payload)
+    output = args.output_uri.rstrip("/")
+    copy_file(current_marker, f"{output}/current/upload_complete.json", endpoint_url=args.endpoint_url)
+    copy_file(history_marker, f"{output}/runs/{stage_run_id}/upload_complete.json", endpoint_url=args.endpoint_url)
+
+
+def validate_complete_payload(current_dir: Path) -> None:
+    stage_result_path = current_dir / "stage_result.json"
+    if not stage_result_path.is_file():
+        raise FileNotFoundError("COLMAP stage payload is incomplete; missing: stage_result.json")
+    stage_result = json.loads(stage_result_path.read_text(encoding="utf-8"))
+    if stage_result.get("status") != "completed":
+        return
+    required = [
+        "stage_result.json",
+        "image_manifest.json",
+        "reconstruction_report.json",
+        "matching_plan.json",
+        "viewer/sparse_scene.json",
+        "sparse_txt/cameras.txt",
+        "sparse_txt/images.txt",
+        "sparse_txt/points3D.txt",
+    ]
+    missing = [relative_path for relative_path in required if not (current_dir / relative_path).is_file()]
+    if missing:
+        raise FileNotFoundError(f"COLMAP stage payload is incomplete; missing: {', '.join(missing)}")
+
+
+def uploaded_objects(current_dir: Path) -> list[str]:
+    expected = [
+        "stage_result.json",
+        "image_manifest.json",
+        "reconstruction_report.json",
+        "matching_plan.json",
+        "matching_results.json",
+        "viewer/sparse_scene.json",
+        "sparse_txt/cameras.txt",
+        "sparse_txt/images.txt",
+        "sparse_txt/points3D.txt",
+    ]
+    return [relative_path for relative_path in expected if (current_dir / relative_path).is_file()]
+
+
+def copy_if_exists(source: Path, destination: Path) -> None:
+    if not source.exists():
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+
+
+def copy_tree(source: Path, destination: Path) -> None:
+    if not source.exists():
+        return
+    shutil.copytree(source, destination, dirs_exist_ok=True)
+
+
+def read_json(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
