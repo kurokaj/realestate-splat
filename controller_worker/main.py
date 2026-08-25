@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -197,6 +198,7 @@ def run_local_preprocess(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str
     )
     output_line_count = 0
     output_tail: list[str] = []
+    progress_state = {"last_key": None, "last_at": 0.0}
     assert process.stdout is not None
     for line in process.stdout:
         clean_line = line.rstrip()
@@ -205,6 +207,7 @@ def run_local_preprocess(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str
             output_tail.append(clean_line)
             if len(output_tail) > 40:
                 output_tail.pop(0)
+            report_local_preprocess_line(stage_run_id, clean_line, progress_state)
     return_code = process.wait()
     if return_code != 0:
         tail = "\n".join(output_tail)
@@ -728,11 +731,28 @@ def wait_for_runpod_stage_result(
     last_pod_status = None
     stale_result_run_id = None
     stale_upload_run_id = None
+    last_remote_progress_key = None
     running_status = f"{stage}_running"
     stage_label = stage.upper()
     while True:
         if stage_was_cancelled(stage_run_id):
             raise RuntimeError(f"Stage was cancelled while RunPod {stage_label} was running")
+        remote_progress = load_optional_json_from_r2(
+            f"{output_base_uri.rstrip('/')}/current/progress.json"
+        )
+        if remote_progress and remote_progress.get("stage_run_id") in {None, stage_run_id}:
+            progress_key = remote_progress.get("updated_at") or json.dumps(remote_progress, sort_keys=True)
+            if progress_key != last_remote_progress_key:
+                last_remote_progress_key = progress_key
+                record_progress(
+                    stage_run_id,
+                    int(remote_progress.get("percent") or 0),
+                    str(remote_progress.get("message") or f"{stage_label} stage running"),
+                    kind=f"runpod_{stage}_progress",
+                    phase=remote_progress.get("phase"),
+                    phase_percent=remote_progress.get("phase_percent"),
+                    details=remote_progress.get("details") if isinstance(remote_progress.get("details"), dict) else None,
+                )
         stage_result = load_optional_json_from_r2(result_uri)
         if stage_result:
             result_stage_run_id = stage_result.get("stage_run_id")
@@ -1186,14 +1206,30 @@ def compact_training_diagnostics(training_summary: dict[str, Any]) -> dict[str, 
     }
 
 
-def record_progress(stage_run_id: str, percent: int, message: str, *, kind: str) -> None:
+def record_progress(
+    stage_run_id: str,
+    percent: int,
+    message: str,
+    *,
+    kind: str,
+    phase: Optional[str] = None,
+    phase_percent: Optional[int] = None,
+    details: Optional[dict[str, Any]] = None,
+) -> None:
+    progress_payload = {
+        "percent": percent,
+        "message": message,
+        "phase": phase,
+        "phase_percent": phase_percent,
+        "details": details or {},
+    }
     with connect() as conn:
         create_event(
             conn,
             stage_run_id=stage_run_id,
             kind=kind,
             message=message,
-            payload={"percent": percent},
+            payload=progress_payload,
         )
         conn.execute(
             """
@@ -1202,8 +1238,82 @@ def record_progress(stage_run_id: str, percent: int, message: str, *, kind: str)
                 updated_at = now()
             WHERE id = %s
             """,
-            (Jsonb({"percent": percent, "message": message}), stage_run_id),
+            (Jsonb(progress_payload), stage_run_id),
         )
+
+
+def report_local_preprocess_line(
+    stage_run_id: str,
+    line: str,
+    state: dict[str, Any],
+) -> None:
+    """Expose the useful progress already printed by preprocess_video.py."""
+    now = time.monotonic()
+    match = re.search(
+        r"(?P<name>\S+)\s+\[[#-]+\]\s+(?P<percent>\d+)%.*?candidates\s+(?P<candidates>\d+)\s+selected\s+(?P<selected>\d+)",
+        line,
+    )
+    if match:
+        percent = int(match.group("percent"))
+        details = {
+            "source": match.group("name"),
+            "candidates": int(match.group("candidates")),
+            "selected": int(match.group("selected")),
+        }
+        message = f"Processing {match.group('name')} ({percent}%)"
+        phase = "video_frames"
+        overall = 10 + round(percent * 0.72)
+        phase_percent = percent
+    elif "coverage images checked" in line.lower():
+        details = {}
+        message = line
+        phase = "coverage_images"
+        overall = 84
+        phase_percent = 100
+    elif "hero images copied" in line.lower():
+        details = {}
+        message = line
+        phase = "hero_images"
+        overall = 87
+        phase_percent = 100
+    else:
+        return
+
+    key = (overall, phase, phase_percent, message, json.dumps(details, sort_keys=True))
+    if key == state.get("last_key"):
+        return
+    if now - float(state.get("last_at") or 0.0) < 3.0 and phase_percent != 100:
+        return
+    with connect() as conn:
+        create_event(
+            conn,
+            stage_run_id=stage_run_id,
+            kind="local_preprocess_progress",
+            message=message,
+            payload={"percent": overall, "phase": phase, "phase_percent": phase_percent, "details": details},
+        )
+        conn.execute(
+            """
+            UPDATE stage_runs
+            SET progress_json = %s,
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (
+                Jsonb(
+                    {
+                        "percent": overall,
+                        "phase": phase,
+                        "phase_percent": phase_percent,
+                        "message": message,
+                        "details": details,
+                    }
+                ),
+                stage_run_id,
+            ),
+        )
+    state["last_key"] = key
+    state["last_at"] = now
 
 
 def load_preprocess_summary(output_base_uri: str) -> dict[str, Any]:

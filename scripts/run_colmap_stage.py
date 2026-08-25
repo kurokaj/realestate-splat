@@ -22,6 +22,7 @@ if str(SRC_DIR) not in sys.path:
 from realestate_splat.cli import CommandResult, run_logged_command, utc_now, write_json  # noqa: E402
 from realestate_splat.stage_contract import StageResult, write_stage_result  # noqa: E402
 from realestate_splat.storage import copy_file, sync_directory  # noqa: E402
+from controller_common.progress import LineProgressParser, R2ProgressReporter  # noqa: E402
 from controller_common.colmap_viewer import write_sparse_viewer_payload  # noqa: E402
 from controller_common.preprocess_assembly import assemble_preprocess_groups_local, parse_group_output_specs  # noqa: E402
 
@@ -180,6 +181,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         input_dir.mkdir(parents=True, exist_ok=True)
         logs_dir.mkdir(parents=True, exist_ok=True)
+        progress = R2ProgressReporter(
+            stage="colmap",
+            stage_run_id=run_id,
+            output_uri=args.output_uri,
+            endpoint_url=args.endpoint_url,
+        )
+        progress.update(2, "downloading", "Downloading approved preprocess groups", force=True)
         group_outputs = parse_group_output_specs(args.preprocess_group_output)
         if group_outputs:
             assemble_preprocess_groups_local(
@@ -191,6 +199,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         else:
             sync_directory(args.input_uri, input_dir, endpoint_url=args.endpoint_url)
+        progress.update(8, "preparing", "Preparing local COLMAP input", details={"image_count": len(list((input_dir / "frames_selected").glob("*")))}, force=True)
         if args.blacklist_uri:
             excluded_images = load_blacklist(args.blacklist_uri, args.endpoint_url)
             print(
@@ -198,6 +207,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 flush=True,
             )
             apply_blacklist(input_dir, excluded_images)
+            progress.update(10, "preparing", "Applied COLMAP blacklist", details={"blacklisted_images": len(excluded_images)}, force=True)
         prepare_local_run(input_dir, local_run_dir)
         if args.matching_plan_uri:
             matching_plan_local = local_run_dir / "reports" / "matching_plan_input.json"
@@ -211,7 +221,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if not matching_plan_input.exists():
                 raise FileNotFoundError(f"Matching plan does not exist: {args.matching_plan}")
 
-        colmap_result = run_colmap(args, local_run_dir, logs_dir)
+        progress.update(12, "feature_extraction", "Starting COLMAP feature extraction", force=True)
+        colmap_result = run_colmap(args, local_run_dir, logs_dir, progress)
+        progress.update(90, "artifacts", "Preparing reconstruction artifacts", force=True)
         prepare_upload_payloads(
             project_id=args.project_id,
             pipeline_run_id=args.pipeline_run_id,
@@ -226,6 +238,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             colmap_result=colmap_result,
         )
 
+        progress.update(96, "uploading", "Uploading COLMAP artifacts to R2", force=True)
         upload_payloads(args, run_id, current_dir, history_dir)
         print(f"COLMAP stage complete: {run_id}")
         print(f"Current output: {args.output_uri.rstrip('/')}/current/")
@@ -426,9 +439,21 @@ def build_colmap_command(args: argparse.Namespace, local_run_dir: Path) -> List[
     return command
 
 
-def run_colmap(args: argparse.Namespace, local_run_dir: Path, logs_dir: Path) -> CommandResult:
+def run_colmap(
+    args: argparse.Namespace,
+    local_run_dir: Path,
+    logs_dir: Path,
+    progress: R2ProgressReporter,
+) -> CommandResult:
     command = build_colmap_command(args, local_run_dir)
-    return run_logged_command("run_colmap_stage", command, logs_dir, Path.cwd())
+    parser = LineProgressParser(progress.update)
+    return run_logged_command(
+        "run_colmap_stage",
+        command,
+        logs_dir,
+        Path.cwd(),
+        on_output_line=parser.feed,
+    )
 
 
 def prepare_upload_payloads(

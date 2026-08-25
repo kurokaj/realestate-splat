@@ -46,7 +46,17 @@
           <td>{{ run.provider }}</td>
           <td>
             <progress max="100" value="{{ run.progress_json.percent or 0 }}"></progress>
+            {% if run.progress_json.phase %}
+              <span class="progress-phase">{{ run.progress_json.phase|replace("_", " ")|title }}</span>
+            {% endif %}
             <span class="subline">{{ run.progress_json.message or "" }}</span>
+            {% if run.progress_json.details.step is defined %}
+              <span class="subline">step {{ run.progress_json.details.step }} / {{ run.progress_json.details.max_steps }}</span>
+            {% elif run.progress_json.details.stage_index is defined %}
+              <span class="subline">matching stage {{ run.progress_json.details.stage_index }} / {{ run.progress_json.details.stage_count }}</span>
+            {% elif run.progress_json.details.processed_images is defined %}
+              <span class="subline">{{ run.progress_json.details.processed_images }} / {{ run.progress_json.details.image_count }} images</span>
+            {% endif %}
           </td>
           <td>{{ run.duration_minutes_label or "" }}</td>
           {% if stage_table_variant == "preprocess" %}

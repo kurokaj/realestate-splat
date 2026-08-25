@@ -46,6 +46,11 @@ def execute_matching_plan(
             raise ValueError("Matching plan stages must be objects")
         stage_id = str(stage.get("id") or f"stage_{index:03d}")
         style = str(stage.get("matching_style") or "exhaustive")
+        print(
+            f"Matching stage [{index}/{len(plan.get('matching_stages', []))}]: "
+            f"{stage_id} ({style})",
+            flush=True,
+        )
         stage_matching_type = str(stage.get("matching_type") or matching_type)
         stage_matcher_type = getattr(pycolmap.FeatureMatcherType, stage_matching_type)
         matching_options = pycolmap.FeatureMatchingOptions(type=stage_matcher_type)
@@ -74,6 +79,7 @@ def execute_matching_plan(
                     "matching_type": stage_matching_type,
                 }
             )
+            print(f"Matching stage complete: {stage_id}", flush=True)
             continue
 
         pairs = build_pairs(style, stage_groups, names_by_group, sequential_overlap)
@@ -95,6 +101,7 @@ def execute_matching_plan(
                 "matching_type": stage_matching_type,
             }
         )
+        print(f"Matching stage complete: {stage_id}", flush=True)
 
     (work_dir / "matching_results.json").write_text(
         json.dumps(results, indent=2) + "\n", encoding="utf-8"

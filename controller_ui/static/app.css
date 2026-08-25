@@ -765,6 +765,15 @@ progress {
   width: 140px;
 }
 
+.progress-phase {
+  color: var(--accent-strong);
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  margin-top: 4px;
+  text-transform: capitalize;
+}
+
 pre {
   background: var(--code-bg);
   border-radius: 6px;

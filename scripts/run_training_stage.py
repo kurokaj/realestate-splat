@@ -27,6 +27,7 @@ from realestate_splat.cli import CommandResult, run_logged_command, utc_now, wri
 from realestate_splat.stage_contract import StageResult, write_stage_result  # noqa: E402
 from realestate_splat.storage import copy_file, sync_directory  # noqa: E402
 from controller_common.preprocess_assembly import assemble_preprocess_groups_local, parse_group_output_specs  # noqa: E402
+from controller_common.progress import R2ProgressReporter  # noqa: E402
 
 
 DEFAULT_PIXI_BIN = Path("/opt/buildvision/pixi/bin/pixi")
@@ -138,6 +139,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         preprocess_dir.mkdir(parents=True, exist_ok=True)
         colmap_dir.mkdir(parents=True, exist_ok=True)
         logs_dir.mkdir(parents=True, exist_ok=True)
+        progress = R2ProgressReporter(
+            stage="training",
+            stage_run_id=run_id,
+            output_uri=args.output_uri,
+            endpoint_url=args.endpoint_url,
+        )
+        progress.update(2, "downloading", "Downloading approved preprocess and COLMAP inputs", force=True)
         group_outputs = parse_group_output_specs(args.preprocess_group_output)
         if group_outputs:
             assemble_preprocess_groups_local(
@@ -149,9 +157,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             sync_directory(args.preprocess_uri, preprocess_dir, endpoint_url=args.endpoint_url)
         sync_directory(args.colmap_uri, colmap_dir, endpoint_url=args.endpoint_url)
+        progress.update(15, "preparing", "Preparing Nerfstudio input data", force=True)
         prepare_local_run(preprocess_dir, colmap_dir, local_run_dir)
 
-        command_results = run_training(args, local_run_dir, logs_dir)
+        command_results = run_training(args, local_run_dir, logs_dir, progress=progress)
+        progress.update(90, "artifacts", "Preparing training outputs", force=True)
         prepare_upload_payloads(
             project_id=args.project_id,
             pipeline_run_id=args.pipeline_run_id,
@@ -168,6 +178,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             command_results=command_results,
         )
 
+        progress.update(96, "uploading", "Uploading training outputs to R2", force=True)
         upload_payloads(args, run_id, current_dir, history_dir)
         print(f"Training stage complete: {run_id}")
         print(f"Current output: {args.output_uri.rstrip('/')}/current/")
@@ -364,15 +375,43 @@ def build_export_command(args: argparse.Namespace, local_run_dir: Path, load_con
     ]
 
 
-def run_training(args: argparse.Namespace, local_run_dir: Path, logs_dir: Path) -> List[CommandResult]:
+def run_training(
+    args: argparse.Namespace,
+    local_run_dir: Path,
+    logs_dir: Path,
+    *,
+    progress: Optional[R2ProgressReporter] = None,
+) -> List[CommandResult]:
     gsplat_dir = local_run_dir / "gsplat"
     gsplat_dir.mkdir(parents=True, exist_ok=True)
     results = []
     prepare_command, train_command = build_training_commands(args, local_run_dir)
-    results.append(run_logged_command("prepare_nerfstudio_data", prepare_command, logs_dir, Path.cwd()))
+    if progress is not None:
+        progress.update(20, "preparing", "Converting COLMAP data for Nerfstudio", force=True)
+    results.append(
+        run_logged_command(
+            "prepare_nerfstudio_data",
+            prepare_command,
+            logs_dir,
+            Path.cwd(),
+            on_output_line=(lambda line: report_training_line(progress, line, args.max_steps)) if progress else None,
+        )
+    )
     validate_nerfstudio_colmap_initialization(local_run_dir)
-    results.append(run_logged_command("train_splatfacto", train_command, logs_dir, gsplat_dir))
+    if progress is not None:
+        progress.update(38, "training", "Starting Splatfacto training", force=True)
+    results.append(
+        run_logged_command(
+            "train_splatfacto",
+            train_command,
+            logs_dir,
+            gsplat_dir,
+            on_output_line=(lambda line: report_training_line(progress, line, args.max_steps)) if progress else None,
+        )
+    )
     if args.export:
+        if progress is not None:
+            progress.update(88, "exporting", "Exporting the trained Gaussian splat", force=True)
         config_path = latest_file(local_run_dir / "gsplat" / "outputs", "config.yml")
         if config_path is None:
             raise RuntimeError("Training finished but no config.yml was found for export.")
@@ -385,6 +424,31 @@ def run_training(args: argparse.Namespace, local_run_dir: Path, logs_dir: Path) 
         export_output.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_ply, export_output)
     return results
+
+
+def report_training_line(
+    progress: Optional[R2ProgressReporter],
+    line: str,
+    max_steps: int,
+) -> None:
+    if progress is None:
+        return
+    text = line.strip()
+    lowered = text.lower()
+    step_match = re.search(r"(?:step|iteration)\s*[^0-9]*(\d+)(?:\s*/\s*(\d+))?", lowered)
+    if step_match:
+        current = int(step_match.group(1))
+        total = int(step_match.group(2) or max_steps)
+        phase_percent = round(current / max(1, total) * 100)
+        progress.update(
+            40 + round(45 * current / max(1, total)),
+            "training",
+            f"Training step {current}/{total}",
+            phase_percent=phase_percent,
+            details={"step": current, "max_steps": total},
+        )
+    elif "eval" in lowered:
+        progress.update(72, "evaluation", "Running evaluation", details={"message": text})
 
 
 def validate_nerfstudio_colmap_initialization(local_run_dir: Path) -> None:

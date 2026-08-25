@@ -12,7 +12,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 
 @dataclass
@@ -114,6 +114,7 @@ def run_logged_command(
     command: Sequence[str],
     logs_dir: Path,
     cwd: Optional[Path] = None,
+    on_output_line: Optional[Callable[[str], None]] = None,
 ) -> CommandResult:
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_path = logs_dir / f"{name}.log"
@@ -143,6 +144,8 @@ def run_logged_command(
         for line in process.stdout:
             print(line, end="")
             log_file.write(line)
+            if on_output_line is not None:
+                on_output_line(line)
         returncode = process.wait()
 
     finished_at = utc_now()
@@ -184,4 +187,3 @@ def latest_existing_file(candidates: Iterable[Path]) -> Optional[Path]:
     if not existing:
         return None
     return max(existing, key=lambda path: path.stat().st_mtime)
-
