@@ -1,0 +1,40 @@
+<section class="panel">
+  <div class="panel-heading">
+    <h2>All Stage Runs</h2>
+    <span class="muted">{{ stage_runs|length }} total</span>
+  </div>
+  {% set stage_table_runs = display_activity_runs %}
+  {% set stage_table_variant = "activity" %}
+  {% include "stage_run_table.html" %}
+  {% if history_has_more %}
+    {% if show_history %}
+      <p><a class="secondary button-link" href="/ui/projects/{{ project_id }}/activity?show_history=true&history_page={{ history_page + 1 }}">Show 3 more history runs</a></p>
+    {% else %}
+      <p><a class="secondary button-link" href="/ui/projects/{{ project_id }}/activity?show_history=true&history_page=0">Show history</a></p>
+    {% endif %}
+  {% endif %}
+</section>
+
+<section class="panel">
+  <div class="panel-heading">
+    <h2>Events</h2>
+    <span class="muted">Compact controller events only</span>
+  </div>
+  <div class="table-wrap">
+    <table class="compact">
+      <thead>
+        <tr><th>Time</th><th>Stage</th><th>Level</th><th>Kind</th><th>Message</th></tr>
+      </thead>
+      <tbody>
+        {% for event in events %}
+          <tr>
+            <td>{{ event.created_at }}</td><td>{{ event.stage }}</td><td>{{ event.level }}</td>
+            <td>{{ event.kind }}</td><td>{{ event.message }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5" class="empty">No events yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>

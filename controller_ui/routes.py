@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import tempfile
+from contextvars import ContextVar
 from collections import Counter
 from datetime import datetime, timezone
+from functools import wraps
+from time import monotonic, perf_counter
 from pathlib import Path
 from typing import Any, Optional
 
@@ -48,6 +51,16 @@ from controller_common.matching_plan import SUPPORTED_STRATEGIES
 
 router = APIRouter(include_in_schema=False)
 templates = Jinja2Templates(directory=str(Path(__file__).with_name("templates")))
+HISTORY_PAGE_SIZE = 3
+_REQUEST_JSON_CACHE: ContextVar[Optional[dict[str, dict[str, Any]]]] = ContextVar(
+    "controller_ui_request_json_cache", default=None
+)
+_REQUEST_PROFILE: ContextVar[Optional[dict[str, int]]] = ContextVar(
+    "controller_ui_request_profile", default=None
+)
+_REMOTE_JSON_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_REMOTE_JSON_CACHE_TTL_SECONDS = 10.0
+_REMOTE_JSON_CACHE_MAX_ENTRIES = 128
 
 COLMAP_FEATURE_EXTRACTOR_OPTIONS = [
     {"value": "SIFT", "label": "SIFT"},
@@ -89,6 +102,22 @@ def json_pretty(value: Any) -> str:
 templates.env.filters["json_pretty"] = json_pretty
 
 
+def with_request_json_cache(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        cache_token = _REQUEST_JSON_CACHE.set({})
+        profile_token = _REQUEST_PROFILE.set(
+            {"json_cache_hits": 0, "process_cache_hits": 0, "json_r2_reads": 0}
+        )
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _REQUEST_JSON_CACHE.reset(cache_token)
+            _REQUEST_PROFILE.reset(profile_token)
+
+    return wrapped
+
+
 def validate_colmap_feature_matcher(feature_extractor: str, matching_type: str) -> None:
     if feature_extractor == "SIFT" and not matching_type.startswith("SIFT_"):
         raise HTTPException(status_code=400, detail="SIFT features require a SIFT matching type")
@@ -111,7 +140,7 @@ def projects_index(request: Request) -> HTMLResponse:
         projects = rows_to_json(
             conn.execute(
                 """
-                SELECT project.*,
+                SELECT project.id, project.name, project.status, project.raw_uri, project.updated_at,
                     count(stage_run.id) AS stage_run_count,
                     max(stage_run.created_at) AS latest_stage_run_at
                 FROM projects AS project
@@ -229,36 +258,123 @@ def blacklist_colmap_image(project_id: str, payload: dict[str, Any] = Body(defau
 
 
 @router.get("/projects/{project_id}", response_class=HTMLResponse)
+@with_request_json_cache
 def project_detail(
     request: Request,
     project_id: str,
-    run_limit: int = Query(default=5, ge=5, le=100),
+    show_history: bool = Query(default=False),
+    history_page: int = Query(default=0, ge=0, le=1000),
+    tab: str = Query(default="preprocess"),
 ) -> HTMLResponse:
-    data = load_project_detail(project_id)
+    started_at = perf_counter()
+    timing: dict[str, float] = {}
+    mark = perf_counter()
+    data = load_project_detail(project_id, show_history=show_history, history_page=history_page)
+    timing["project_load"] = elapsed_ms(mark)
     if data["project"] is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    review = preprocess_review_context(data["project"], data["stage_runs"])
-    colmap_review = colmap_review_context(
-        data["project"],
-        data["stage_runs"],
-        review["raw_source_summary"],
-        review.get("preprocess_group_reports"),
-    )
-    training_review = training_review_context(data["project"], data["stage_runs"])
-    return templates.TemplateResponse(
+    active_tab = tab if tab in {"preprocess", "matching", "colmap", "training", "activity"} else "preprocess"
+    mark = perf_counter()
+    gate_state = lightweight_gate_state(data["project"], data["stage_runs"])
+    timing["gate_state"] = elapsed_ms(mark)
+    review: dict[str, Any] = {}
+    colmap_review: dict[str, Any] = {}
+    training_review: dict[str, Any] = {}
+    if active_tab in {"preprocess", "matching"}:
+        mark = perf_counter()
+        review = preprocess_review_context(data["project"], data["stage_runs"])
+        timing["preprocess_context"] = elapsed_ms(mark)
+    elif active_tab == "colmap":
+        mark = perf_counter()
+        review = {"raw_source_summary": raw_source_summary(data["project"]), "preprocess_group_reports": {}}
+        timing["raw_summary"] = elapsed_ms(mark)
+    if active_tab in {"matching", "colmap"}:
+        mark = perf_counter()
+        colmap_review = colmap_review_context(
+            data["project"],
+            data["stage_runs"],
+            review["raw_source_summary"],
+            review.get("preprocess_group_reports") if active_tab == "matching" else {},
+        )
+        timing["colmap_context"] = elapsed_ms(mark)
+    if active_tab == "training":
+        mark = perf_counter()
+        training_review = training_review_context(data["project"], data["stage_runs"])
+        timing["training_context"] = elapsed_ms(mark)
+    stage_runs = data["stage_runs"]
+    preprocess_runs = [run for run in stage_runs if run.get("stage") == "preprocess"]
+    colmap_runs = [run for run in stage_runs if run.get("stage") == "colmap"]
+    training_runs = [run for run in stage_runs if run.get("stage") == "training"]
+    response = templates.TemplateResponse(
         request,
         "project_detail.html",
         {
             **data,
+            **gate_state,
             **review,
             **colmap_review,
             **training_review,
-            "run_limit": run_limit,
+            "show_history": show_history,
+            "history_page": history_page,
+            "active_tab": active_tab,
+            "history_page_size": HISTORY_PAGE_SIZE,
+            "display_preprocess_runs": visible_stage_runs(preprocess_runs, show_history, history_page),
+            "display_colmap_runs": visible_stage_runs(colmap_runs, show_history, history_page),
+            "display_training_runs": visible_stage_runs(training_runs, show_history, history_page),
+            "display_activity_runs": visible_stage_runs(stage_runs, show_history, history_page),
+            "preprocess_history_has_more": history_has_more(preprocess_runs, show_history, history_page),
+            "colmap_history_has_more": history_has_more(colmap_runs, show_history, history_page),
+            "training_history_has_more": history_has_more(training_runs, show_history, history_page),
+            "activity_history_has_more": history_has_more(stage_runs, show_history, history_page),
             "default_bucket": default_r2_bucket(),
             "default_raw_uri": f"r2://{default_r2_bucket()}/projects/{project_id}/raw",
             "default_preprocess_uri": f"r2://{default_r2_bucket()}/projects/{project_id}/preprocess",
         },
     )
+    add_request_profile_headers(response, started_at, timing)
+    return response
+
+
+def lightweight_gate_state(project: dict[str, Any], stage_runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return gate data that is available from Postgres without remote review reads.
+
+    Matching and COLMAP gates remain neutral until their tab context is loaded. This
+    keeps inactive tab titles honest without downloading R2 review documents merely
+    to render navigation.
+    """
+    colmap_runs = [run for run in stage_runs if run.get("stage") == "colmap"]
+    latest_colmap = colmap_runs[0] if colmap_runs else None
+    return {
+        "matching_gate_open": None,
+        "colmap_gate_open": None,
+        "training_gate_open": bool(latest_colmap and latest_colmap.get("status") == "approved"),
+        "matching_plan_selected": None,
+    }
+
+
+def visible_stage_runs(
+    runs: list[dict[str, Any]], show_history: bool, history_page: int
+) -> list[dict[str, Any]]:
+    if not show_history:
+        latest: list[dict[str, Any]] = []
+        seen_scopes: set[str] = set()
+        for run in runs:
+            scope = stage_run_history_scope(run)
+            if scope in seen_scopes:
+                continue
+            seen_scopes.add(scope)
+            latest.append(run)
+        return latest
+    end = (history_page + 1) * HISTORY_PAGE_SIZE
+    return runs[:end]
+
+
+def history_has_more(
+    runs: list[dict[str, Any]], show_history: bool, history_page: int
+) -> bool:
+    if not show_history:
+        return len(runs) > 1
+    return len(runs) > (history_page + 1) * HISTORY_PAGE_SIZE
 
 
 @router.post("/projects/{project_id}/preprocess")
@@ -696,28 +812,23 @@ def run_stage_action(stage_run_id: str, notes: Optional[str], action: str) -> Re
     return RedirectResponse(url=f"/ui/projects/{project_id}", status_code=303)
 
 
-def load_project_detail(project_id: str) -> dict[str, Any]:
+def load_project_detail(
+    project_id: str, *, show_history: bool = False, history_page: int = 0
+) -> dict[str, Any]:
     with connect() as conn:
         project = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
         if project is None:
             return {"project": None, "stage_runs": [], "events": [], "approvals": []}
-        stage_runs = conn.execute(
+        metadata_rows = conn.execute(
             """
-            SELECT *
+            SELECT id, project_id, stage, status, attempt, image, provider,
+                   provider_job_id, provider_pod_id, output_uri,
+                   input_uri_json, '{}'::jsonb AS summary_json, progress_json,
+                   error_message, claimed_by, claimed_at, started_at, finished_at,
+                   created_at, updated_at
             FROM stage_runs
             WHERE project_id = %s
             ORDER BY created_at DESC
-            """,
-            (project_id,),
-        ).fetchall()
-        events = conn.execute(
-            """
-            SELECT event.*, stage_run.stage, stage_run.status AS stage_status
-            FROM events AS event
-            JOIN stage_runs AS stage_run ON stage_run.id = event.stage_run_id
-            WHERE stage_run.project_id = %s
-            ORDER BY event.created_at DESC
-            LIMIT 80
             """,
             (project_id,),
         ).fetchall()
@@ -730,7 +841,19 @@ def load_project_detail(project_id: str) -> dict[str, Any]:
             """,
             (project_id,),
         ).fetchall()
-    stage_run_json = rows_to_json(stage_runs)
+    stage_run_json = rows_to_json(metadata_rows)
+    detailed_ids = required_project_detail_run_ids(stage_run_json, show_history, history_page)
+    if detailed_ids:
+        with connect() as conn:
+            detailed_rows = conn.execute(
+                "SELECT * FROM stage_runs WHERE project_id = %s AND id = ANY(%s)",
+                (project_id, detailed_ids),
+            ).fetchall()
+        details_by_id = {str(row["id"]): row_to_json(row) for row in detailed_rows}
+        for run in stage_run_json:
+            detail = details_by_id.get(str(run.get("id")))
+            if detail:
+                run.update(detail)
     approval_json = rows_to_json(approvals)
     raw_stage_signature = stage_signature(stage_run_json)
     apply_historical_approval_status(stage_run_json, approval_json)
@@ -738,13 +861,124 @@ def load_project_detail(project_id: str) -> dict[str, Any]:
     apply_stage_durations(stage_run_json)
     project_json = row_to_json(project)
     project_json["display_status"] = derive_project_display_status(project_json, stage_run_json)
+    live_stage_status = latest_live_stage_status(stage_run_json)
     return {
         "project": project_json,
         "stage_runs": stage_run_json,
         "stage_signature": raw_stage_signature,
-        "events": rows_to_json(events),
+        "events": [],
         "approvals": approval_json,
+        "live_stage_status": live_stage_status,
     }
+
+
+def latest_live_stage_status(stage_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for run in stage_runs:
+        stage = str(run.get("stage") or "")
+        if stage and stage not in latest:
+            progress = run.get("progress_json") if isinstance(run.get("progress_json"), dict) else {}
+            latest[stage] = {
+                "stage": stage,
+                "status": str(run.get("status") or "unknown"),
+                "provider": run.get("provider") or "",
+                "provider_job_id": run.get("provider_job_id") or "",
+                "provider_pod_id": run.get("provider_pod_id") or "",
+                "progress": progress,
+            }
+    return [latest[stage] for stage in ("preprocess", "colmap", "training") if stage in latest]
+
+
+def required_project_detail_run_ids(
+    stage_runs: list[dict[str, Any]], show_history: bool, history_page: int
+) -> list[str]:
+    by_stage = {
+        stage: [run for run in stage_runs if run.get("stage") == stage]
+        for stage in ("preprocess", "colmap", "training")
+    }
+    selected: list[str] = []
+    for runs in by_stage.values():
+        selected.extend(str(run["id"]) for run in visible_stage_runs(runs, show_history, history_page) if run.get("id"))
+    # Preprocess review may need the newest run for each approved group, even
+    # when that run is outside the small visible history window.
+    selected.extend(
+        str(run["id"])
+        for run in latest_preprocess_runs_by_group(by_stage["preprocess"]).values()
+        if run.get("id")
+    )
+    return list(dict.fromkeys(selected))
+
+
+@router.get("/projects/{project_id}/activity", response_class=HTMLResponse)
+@with_request_json_cache
+def project_activity(
+    request: Request,
+    project_id: str,
+    show_history: bool = Query(default=False),
+    history_page: int = Query(default=0, ge=0, le=1000),
+) -> HTMLResponse:
+    started_at = perf_counter()
+    timing: dict[str, float] = {}
+    mark = perf_counter()
+    with connect() as conn:
+        project = conn.execute("SELECT id FROM projects WHERE id = %s", (project_id,)).fetchone()
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        stage_runs = rows_to_json(
+            conn.execute(
+                "SELECT * FROM stage_runs WHERE project_id = %s ORDER BY created_at DESC",
+                (project_id,),
+            ).fetchall()
+        )
+        events = rows_to_json(
+            conn.execute(
+                """
+                SELECT event.*, stage_run.stage, stage_run.status AS stage_status
+                FROM events AS event
+                JOIN stage_runs AS stage_run ON stage_run.id = event.stage_run_id
+                WHERE stage_run.project_id = %s
+                ORDER BY event.created_at DESC
+                LIMIT 80
+                """,
+                (project_id,),
+            ).fetchall()
+        )
+    apply_stage_history_labels(stage_runs)
+    apply_stage_durations(stage_runs)
+    timing["activity_query"] = elapsed_ms(mark)
+    response = templates.TemplateResponse(
+        request,
+        "activity_panel.html",
+        {
+            "project_id": project_id,
+            "stage_runs": stage_runs,
+            "events": events,
+            "display_activity_runs": visible_stage_runs(stage_runs, show_history, history_page),
+            "history_has_more": history_has_more(stage_runs, show_history, history_page),
+            "show_history": show_history,
+            "history_page": history_page,
+        },
+    )
+    add_request_profile_headers(response, started_at, timing)
+    return response
+
+
+def elapsed_ms(started_at: float) -> float:
+    return round((perf_counter() - started_at) * 1000, 1)
+
+
+def add_request_profile_headers(
+    response: HTMLResponse, started_at: float, timing: Optional[dict[str, float]] = None
+) -> None:
+    profile = _REQUEST_PROFILE.get() or {}
+    response.headers["X-Controller-R2-JSON-Reads"] = str(profile.get("json_r2_reads", 0))
+    response.headers["X-Controller-JSON-Cache-Hits"] = str(profile.get("json_cache_hits", 0))
+    response.headers["X-Controller-Process-Cache-Hits"] = str(profile.get("process_cache_hits", 0))
+    response.headers["X-Controller-Request-Ms"] = f"{(perf_counter() - started_at) * 1000:.1f}"
+    if timing:
+        response.headers["Server-Timing"] = ", ".join(
+            f"{name};dur={duration:.1f}" for name, duration in timing.items()
+        )
 
 
 def latest_stage_run(conn: Any, project_id: str, stage: str) -> Optional[dict[str, Any]]:
@@ -923,14 +1157,18 @@ def preprocess_review_context(project: dict[str, Any], stage_runs: list[dict[str
     preprocess_runs = [run for run in stage_runs if run.get("stage") == "preprocess"]
     latest_run = preprocess_runs[0] if preprocess_runs else None
     capture_report = load_capture_report(latest_run) if latest_run else {}
+    raw_summary = raw_source_summary(project)
     summary = capture_report.get("summary", {}) if isinstance(capture_report, dict) else {}
     videos = capture_report.get("videos", []) if isinstance(capture_report, dict) else []
     if not capture_report and latest_run:
         compact_summary = latest_run.get("summary_json") or {}
         summary = compact_summary
         videos = compact_summary.get("videos", []) if isinstance(compact_summary, dict) else []
-    raw_summary = raw_source_summary(project)
-    group_reports = latest_group_capture_reports(preprocess_runs, raw_summary)
+    cached_group_reports = {
+        group_key: capture_report
+        for group_key in preprocess_run_group_keys(latest_run) if latest_run and capture_report
+    }
+    group_reports = latest_group_capture_reports(preprocess_runs, raw_summary, cached_group_reports)
     group_runs = latest_preprocess_runs_by_group(preprocess_runs)
     return {
         "latest_preprocess_run": latest_run,
@@ -950,7 +1188,11 @@ def preprocess_review_context(project: dict[str, Any], stage_runs: list[dict[str
     }
 
 
-def latest_group_capture_reports(preprocess_runs: list[dict[str, Any]], raw_summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def latest_group_capture_reports(
+    preprocess_runs: list[dict[str, Any]],
+    raw_summary: dict[str, Any],
+    cached_reports: Optional[dict[str, dict[str, Any]]] = None,
+) -> dict[str, dict[str, Any]]:
     reports: dict[str, dict[str, Any]] = {}
     current_group_keys = set(required_preprocess_group_keys(raw_summary))
     seen_groups: set[str] = set()
@@ -969,7 +1211,12 @@ def latest_group_capture_reports(preprocess_runs: list[dict[str, Any]], raw_summ
         seen_groups.update(new_group_keys)
         if preprocess_run_is_active(run):
             continue
-        report = load_capture_report(run)
+        report = next(
+            ((cached_reports or {}).get(group_key) for group_key in new_group_keys if (cached_reports or {}).get(group_key)),
+            None,
+        )
+        if report is None:
+            report = load_capture_report(run)
         if not report:
             continue
         for group_key in new_group_keys:
@@ -1587,19 +1834,47 @@ def preprocess_run_is_active(run: dict[str, Any]) -> bool:
 
 
 def load_json_uri(uri: str) -> dict[str, Any]:
+    cache = _REQUEST_JSON_CACHE.get()
+    if cache is not None and uri in cache:
+        profile = _REQUEST_PROFILE.get()
+        if profile is not None:
+            profile["json_cache_hits"] += 1
+        return cache[uri]
     storage_uri = parse_storage_uri(uri)
     if storage_uri.is_local:
         path = storage_uri.as_local_path()
         if not path.exists():
             return {}
-        return json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if cache is not None:
+            cache[uri] = payload
+        return payload
+    now = monotonic()
+    cached = _REMOTE_JSON_CACHE.get(uri)
+    if cached is not None:
+        expires_at, payload = cached
+        if expires_at > now:
+            profile = _REQUEST_PROFILE.get()
+            if profile is not None:
+                profile["process_cache_hits"] += 1
+            return payload
+        _REMOTE_JSON_CACHE.pop(uri, None)
     suffix = Path(storage_uri.key).suffix or ".json"
+    profile = _REQUEST_PROFILE.get()
+    if profile is not None:
+        profile["json_r2_reads"] += 1
     with tempfile.NamedTemporaryFile("w+", suffix=suffix) as handle:
         copy_file(uri, handle.name, timeout_seconds=15)
         payload = Path(handle.name).read_text(encoding="utf-8").strip()
     if not payload:
         return {}
-    return json.loads(payload)
+    result = json.loads(payload)
+    if len(_REMOTE_JSON_CACHE) >= _REMOTE_JSON_CACHE_MAX_ENTRIES:
+        _REMOTE_JSON_CACHE.pop(next(iter(_REMOTE_JSON_CACHE)))
+    _REMOTE_JSON_CACHE[uri] = (now + _REMOTE_JSON_CACHE_TTL_SECONDS, result)
+    if cache is not None:
+        cache[uri] = result
+    return result
 
 
 def colmap_blacklist_uri(project: dict[str, Any]) -> str:
