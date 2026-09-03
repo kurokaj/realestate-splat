@@ -4,7 +4,6 @@
   {% set preprocess_runs = stage_runs|selectattr("stage", "equalto", "preprocess")|list %}
   {% set colmap_runs = stage_runs|selectattr("stage", "equalto", "colmap")|list %}
   {% set training_runs = stage_runs|selectattr("stage", "equalto", "training")|list %}
-  {% set next_run_limit = run_limit + 5 %}
 
   <section class="section-header" data-project-id="{{ project.id }}" data-stage-signature="{{ stage_signature }}">
     <div>
@@ -15,24 +14,33 @@
     <span class="status status-{{ project.display_status }}">{{ project.display_status }}</span>
   </section>
 
-  <section class="panel compact-panel">
-    <dl class="kv four">
-      <dt>Raw</dt><dd>{{ project.raw_uri or "" }}</dd>
-      <dt>Preprocess</dt><dd class="mono">r2://{{ default_bucket }}/projects/{{ project.id }}/preprocess/groups/*group_name*/current</dd>
-      <dt>COLMAP</dt><dd>{{ project.colmap_current_uri or "" }}</dd>
-      <dt>Training</dt><dd>{{ project.training_current_uri or "" }}</dd>
-    </dl>
+  <section class="live-status-rail" data-live-status-rail aria-label="Live pipeline status">
+    {% for item in live_stage_status %}
+      {% set progress = item.progress or {} %}
+      <div class="live-status-item" data-live-stage="{{ item.stage }}">
+        <span class="live-status-stage">{{ item.stage|title }}</span>
+        <span data-live-status class="status status-{{ item.status }}">{{ item.status|replace("_", " ") }}</span>
+        <span data-live-percent class="mono live-status-percent">{{ progress.get("percent", 0) }}%</span>
+        <span data-live-phase class="live-status-phase">{{ progress.get("phase", "")|replace("_", " ")|title }}</span>
+        <span data-live-message class="muted">{{ progress.get("message", "") }}</span>
+        <span data-live-provider class="mono muted">{{ item.provider }}</span>
+        <span data-live-job class="mono muted">{{ item.provider_pod_id or item.provider_job_id }}</span>
+      </div>
+    {% else %}
+      <div class="live-status-item" data-live-empty><span class="muted">No stage runs yet</span></div>
+    {% endfor %}
   </section>
 
   <nav class="tabs" aria-label="Workflow tabs">
-    <button type="button" class="tab-button is-active" data-tab-target="preprocess">Preprocess</button>
-    <button type="button" class="tab-button" data-tab-target="matching">Matching Strategy{% if not matching_gate_open %} (Locked){% endif %}</button>
-    <button type="button" class="tab-button" data-tab-target="colmap">COLMAP{% if not colmap_gate_open %} (Locked){% endif %}</button>
-    <button type="button" class="tab-button" data-tab-target="training">Training{% if not training_gate_open %} (Locked){% endif %}</button>
-    <button type="button" class="tab-button" data-tab-target="activity">Activity</button>
+    <button type="button" class="tab-button{% if active_tab == 'preprocess' %} is-active{% endif %}" data-tab-target="preprocess">Preprocess</button>
+    <button type="button" class="tab-button{% if active_tab == 'matching' %} is-active{% endif %}" data-tab-target="matching">Matching Strategy{% if matching_gate_open is sameas false %} (Locked){% endif %}</button>
+    <button type="button" class="tab-button{% if active_tab == 'colmap' %} is-active{% endif %}" data-tab-target="colmap">COLMAP{% if colmap_gate_open is sameas false %} (Locked){% endif %}</button>
+    <button type="button" class="tab-button{% if active_tab == 'training' %} is-active{% endif %}" data-tab-target="training">Training{% if not training_gate_open %} (Locked){% endif %}</button>
+    <button type="button" class="tab-button{% if active_tab == 'activity' %} is-active{% endif %}" data-tab-target="activity">Activity</button>
   </nav>
 
-  <section class="tab-panel is-active" data-tab-panel="preprocess">
+  <section class="tab-panel{% if active_tab == 'preprocess' %} is-active{% endif %}" data-tab-panel="preprocess">
+    {% if active_tab == 'preprocess' %}
     <div class="grid two">
       <div class="panel">
         <div class="panel-heading">
@@ -352,17 +360,25 @@
           <h2>Preprocess Runs</h2>
           <span class="muted">{{ preprocess_runs|length }} total</span>
         </div>
-        {% set stage_table_runs = preprocess_run_rows[:run_limit] %}
+        {% set stage_table_runs = display_preprocess_runs %}
         {% set stage_table_variant = "preprocess" %}
         {% include "stage_run_table.html" with context %}
-        {% if preprocess_run_rows|length > run_limit %}
-          <p><a class="secondary button-link" href="?run_limit={{ next_run_limit }}#preprocess">Show 5 more preprocess runs</a></p>
+        {% if preprocess_history_has_more %}
+          {% if show_history %}
+            <p><a class="secondary button-link" href="?show_history=true&history_page={{ history_page + 1 }}#preprocess">Show 3 more history runs</a></p>
+          {% else %}
+            <p><a class="secondary button-link" href="?show_history=true&history_page=0#preprocess">Show history</a></p>
+          {% endif %}
         {% endif %}
       </section>
     {% endif %}
+    {% else %}
+      <section class="panel deferred-tab-panel" data-deferred-tab="preprocess"><p class="empty">Preprocess review loads when this tab is opened.</p></section>
+    {% endif %}
   </section>
 
-  <section class="tab-panel" data-tab-panel="matching">
+  <section class="tab-panel{% if active_tab == 'matching' %} is-active{% endif %}" data-tab-panel="matching">
+    {% if active_tab == 'matching' %}
     <section class="panel">
       <div class="panel-heading">
         <h2>Matching Strategy</h2>
@@ -439,9 +455,13 @@
         <p class="empty">Approve all location preprocess runs first to unlock matching strategy selection.</p>
       {% endif %}
     </section>
+    {% else %}
+      <section class="panel deferred-tab-panel" data-deferred-tab="matching"><p class="empty">Matching strategy loads when this tab is opened.</p></section>
+    {% endif %}
   </section>
 
-  <section class="tab-panel" data-tab-panel="colmap">
+  <section class="tab-panel{% if active_tab == 'colmap' %} is-active{% endif %}" data-tab-panel="colmap">
+    {% if active_tab == 'colmap' %}
     <section class="panel">
       <div class="panel-heading">
         <h2>Queue COLMAP</h2>
@@ -628,17 +648,25 @@
           <h2>COLMAP Runs</h2>
           <span class="muted">{{ colmap_runs|length }} total</span>
         </div>
-        {% set stage_table_runs = colmap_runs[:run_limit] %}
+        {% set stage_table_runs = display_colmap_runs %}
         {% set stage_table_variant = "colmap" %}
         {% include "stage_run_table.html" %}
-        {% if colmap_runs|length > run_limit %}
-          <p><a class="secondary button-link" href="?run_limit={{ next_run_limit }}#colmap">Show 5 more COLMAP runs</a></p>
+        {% if colmap_history_has_more %}
+          {% if show_history %}
+            <p><a class="secondary button-link" href="?show_history=true&history_page={{ history_page + 1 }}#colmap">Show 3 more history runs</a></p>
+          {% else %}
+            <p><a class="secondary button-link" href="?show_history=true&history_page=0#colmap">Show history</a></p>
+          {% endif %}
         {% endif %}
       </section>
     {% endif %}
+    {% else %}
+      <section class="panel deferred-tab-panel" data-deferred-tab="colmap"><p class="empty">COLMAP review loads when this tab is opened.</p></section>
+    {% endif %}
   </section>
 
-  <section class="tab-panel" data-tab-panel="training">
+  <section class="tab-panel{% if active_tab == 'training' %} is-active{% endif %}" data-tab-panel="training">
+    {% if active_tab == 'training' %}
     <section class="panel">
       <div class="panel-heading">
         <h2>Queue Training</h2>
@@ -777,11 +805,15 @@
           <h2>Training Runs</h2>
           <span class="muted">{{ training_runs|length }} total</span>
         </div>
-        {% set stage_table_runs = training_runs[:run_limit] %}
+        {% set stage_table_runs = display_training_runs %}
         {% set stage_table_variant = "training" %}
         {% include "stage_run_table.html" %}
-        {% if training_runs|length > run_limit %}
-          <p><a class="secondary button-link" href="?run_limit={{ next_run_limit }}#training">Show 5 more training runs</a></p>
+        {% if training_history_has_more %}
+          {% if show_history %}
+            <p><a class="secondary button-link" href="?show_history=true&history_page={{ history_page + 1 }}#training">Show 3 more history runs</a></p>
+          {% else %}
+            <p><a class="secondary button-link" href="?show_history=true&history_page=0#training">Show history</a></p>
+          {% endif %}
         {% endif %}
       </section>
       {% else %}
@@ -789,55 +821,14 @@
         <p class="empty">No training run yet.</p>
       </section>
       {% endif %}
+    {% else %}
+      <section class="panel deferred-tab-panel" data-deferred-tab="training"><p class="empty">Training review loads when this tab is opened.</p></section>
+    {% endif %}
   </section>
 
   <section class="tab-panel" data-tab-panel="activity">
-    <section class="panel">
-      <div class="panel-heading">
-        <h2>All Stage Runs</h2>
-        <span class="muted">{{ stage_runs|length }} total</span>
-      </div>
-      {% set stage_table_runs = stage_runs[:run_limit] %}
-      {% set stage_table_variant = "activity" %}
-      {% include "stage_run_table.html" %}
-      {% if stage_runs|length > run_limit %}
-        <p><a class="secondary button-link" href="?run_limit={{ next_run_limit }}#activity">Show 5 more activity runs</a></p>
-      {% endif %}
-    </section>
-
-    <section class="panel">
-      <div class="panel-heading">
-        <h2>Events</h2>
-        <span class="muted">Compact controller events only</span>
-      </div>
-      <div class="table-wrap">
-        <table class="compact">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Stage</th>
-              <th>Level</th>
-              <th>Kind</th>
-              <th>Message</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for event in events %}
-              <tr>
-                <td>{{ event.created_at }}</td>
-                <td>{{ event.stage }}</td>
-                <td>{{ event.level }}</td>
-                <td>{{ event.kind }}</td>
-                <td>{{ event.message }}</td>
-              </tr>
-            {% else %}
-              <tr>
-                <td colspan="5" class="empty">No events yet.</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
+    <section class="panel" data-activity-panel data-activity-url="/ui/projects/{{ project.id }}/activity">
+      <p class="empty">Open Activity to load run history and controller events.</p>
     </section>
   </section>
 {% endblock %}

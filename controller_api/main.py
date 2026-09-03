@@ -146,7 +146,9 @@ def health() -> dict[str, str]:
 @app.get("/projects")
 def list_projects() -> list[dict[str, Any]]:
     with connect() as conn:
-        rows = conn.execute("SELECT * FROM projects ORDER BY created_at DESC").fetchall()
+        rows = conn.execute(
+            "SELECT id, name, status, raw_uri, updated_at, created_at FROM projects ORDER BY created_at DESC"
+        ).fetchall()
     return rows_to_json(rows)
 
 
@@ -376,7 +378,12 @@ def list_stage_runs(
     compact: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
     with connect() as conn:
-        select = "id, project_id, stage, status, created_at" if compact else "*"
+        select = (
+            "id, project_id, stage, status, created_at, progress_json, provider, "
+            "provider_job_id, provider_pod_id, image"
+            if compact
+            else "*"
+        )
         if project_id:
             rows = conn.execute(
                 f"SELECT {select} FROM stage_runs WHERE project_id = %s ORDER BY created_at DESC",

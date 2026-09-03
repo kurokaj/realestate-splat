@@ -26,6 +26,28 @@ function markFormEdited() {
   lastFormEditAt = Date.now();
 }
 
+function setupPreprocessQueueSubmission(form) {
+  form.addEventListener("submit", () => {
+    const hidden = form.querySelector('input[name="group_settings_json"]');
+    if (!hidden) return;
+    const fields = ["candidate_fps", "target_min", "target_max", "min_blur", "min_brightness", "max_brightness", "min_contrast", "min_entropy", "force_keep_interval"];
+    const groups = Array.from(form.querySelectorAll("[data-preprocess-group]")).map((card) => {
+      const item = { group_key: card.dataset.preprocessGroup, preprocess_args: [] };
+      const values = {};
+      fields.forEach((field) => {
+        const input = card.querySelector(`[data-group-field="${field}"]`);
+        if (!input || input.value === "") return;
+        values[field] = input.type === "number" ? Number(input.value) : input.value;
+      });
+      const flags = { candidate_fps: "--candidate-fps", target_min: "--target-min", target_max: "--target-max", min_blur: "--min-blur", min_brightness: "--min-brightness", max_brightness: "--max-brightness", min_contrast: "--min-contrast", min_entropy: "--min-entropy", force_keep_interval: "--force-keep-interval" };
+      Object.entries(values).forEach(([key, value]) => { item.preprocess_args.push(flags[key], String(value)); });
+      return item;
+    });
+    hidden.value = JSON.stringify(groups);
+    clearPreprocessDraft(form);
+  });
+}
+
 function setupRawUploadForm(form) {
   const fileInput = form.querySelector('input[type="file"]');
   const tableWrap = form.querySelector(".upload-table-wrap");
@@ -132,25 +154,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll(".preprocess-queue-form").forEach((form) => {
     setupPreprocessDependencyState(form);
     setupPreprocessDraftPersistence(form);
-    form.addEventListener("submit", () => {
-      const hidden = form.querySelector('input[name="group_settings_json"]');
-      if (!hidden) return;
-      const fields = ["candidate_fps", "target_min", "target_max", "min_blur", "min_brightness", "max_brightness", "min_contrast", "min_entropy", "force_keep_interval"];
-      const groups = Array.from(form.querySelectorAll("[data-preprocess-group]")).map((card) => {
-        const item = { group_key: card.dataset.preprocessGroup, preprocess_args: [] };
-        const values = {};
-        fields.forEach((field) => {
-          const input = card.querySelector(`[data-group-field="${field}"]`);
-          if (!input || input.value === "") return;
-          values[field] = input.type === "number" ? Number(input.value) : input.value;
-        });
-        const flags = { candidate_fps: "--candidate-fps", target_min: "--target-min", target_max: "--target-max", min_blur: "--min-blur", min_brightness: "--min-brightness", max_brightness: "--max-brightness", min_contrast: "--min-contrast", min_entropy: "--min-entropy", force_keep_interval: "--force-keep-interval" };
-        Object.entries(values).forEach(([key, value]) => { item.preprocess_args.push(flags[key], String(value)); });
-        return item;
-      });
-      hidden.value = JSON.stringify(groups);
-      clearPreprocessDraft(form);
-    });
+    setupPreprocessQueueSubmission(form);
   });
   document.querySelectorAll('form[action$="/colmap"]').forEach((form) => {
     setupColmapFormBehavior(form);
@@ -260,16 +264,43 @@ function setupMatchingPlanEditor(form) {
 
 function setupTabs() {
   const buttons = document.querySelectorAll("[data-tab-target]");
-  const panels = document.querySelectorAll("[data-tab-panel]");
   const projectRoot = document.querySelector("[data-project-id]");
   const storageKey = projectRoot ? `buildvision3d:${projectRoot.dataset.projectId}:active-tab` : "";
 
   function activate(target) {
     buttons.forEach((item) => item.classList.toggle("is-active", item.dataset.tabTarget === target));
-    panels.forEach((panel) => panel.classList.toggle("is-active", panel.dataset.tabPanel === target));
+    document.querySelectorAll("[data-tab-panel]").forEach((panel) => panel.classList.toggle("is-active", panel.dataset.tabPanel === target));
     if (storageKey) sessionStorage.setItem(storageKey, target);
+    if (target === "activity") {
+      setupActivityPanel();
+    }
     if (target === "colmap") {
       setupVisibleColmapViewers();
+    }
+  }
+
+  async function loadTabPanel(target) {
+    const panel = document.querySelector(`[data-tab-panel="${CSS.escape(target)}"]`);
+    if (!panel || !panel.querySelector(`[data-deferred-tab="${CSS.escape(target)}"]`)) return;
+    if (panel.dataset.loading === "true") return;
+    panel.dataset.loading = "true";
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", target);
+    url.hash = target;
+    try {
+      const response = await fetch(url.toString(), { headers: { accept: "text/html" } });
+      if (!response.ok) throw new Error(`Tab request failed (${response.status})`);
+      const documentText = await response.text();
+      const parsed = new DOMParser().parseFromString(documentText, "text/html");
+      const replacement = parsed.querySelector(`[data-tab-panel="${CSS.escape(target)}"]`);
+      if (!replacement) throw new Error("Tab response did not contain the requested panel");
+      panel.replaceWith(replacement);
+      history.pushState({}, "", url);
+      initializeTabPanel(replacement);
+      activate(target);
+    } catch (error) {
+      panel.innerHTML = `<section class="panel"><p class="empty">Could not load this tab: ${error}</p></section>`;
+      panel.dataset.loading = "false";
     }
   }
 
@@ -278,16 +309,61 @@ function setupTabs() {
   const initial = requested || stored;
   if (initial && document.querySelector(`[data-tab-panel="${CSS.escape(initial)}"]`)) {
     activate(initial);
+    loadTabPanel(initial);
   }
 
   buttons.forEach((button) => {
     button.addEventListener("click", () => {
-      activate(button.dataset.tabTarget);
+      const target = button.dataset.tabTarget;
+      activate(target);
+      loadTabPanel(target);
     });
   });
 
   if (document.querySelector('[data-tab-panel="colmap"].is-active')) {
     setupVisibleColmapViewers();
+  }
+}
+
+function initializeTabPanel(panel) {
+  if (!panel) return;
+  if (panel.dataset.tabPanel === "activity") {
+    setupActivityPanel();
+  }
+  if (panel.dataset.tabPanel === "preprocess") {
+    panel.querySelectorAll("#raw-upload-form").forEach(setupRawUploadForm);
+    panel.querySelectorAll(".preprocess-queue-form").forEach((form) => {
+      setupPreprocessDependencyState(form);
+      setupPreprocessDraftPersistence(form);
+      setupPreprocessQueueSubmission(form);
+    });
+  }
+  if (panel.dataset.tabPanel === "matching") {
+    panel.querySelectorAll('form[action$="/matching-strategy"]').forEach(setupMatchingPlanEditor);
+  }
+  if (panel.dataset.tabPanel === "colmap") {
+    panel.querySelectorAll('form[action$="/colmap"]').forEach((form) => {
+      setupColmapFormBehavior(form);
+      setupProviderDependencyState(form);
+    });
+    setupVisibleColmapViewers();
+  }
+  if (panel.dataset.tabPanel === "training") {
+    panel.querySelectorAll('form[action$="/training"]').forEach(setupProviderDependencyState);
+  }
+}
+
+async function setupActivityPanel() {
+  const panel = document.querySelector("[data-activity-panel]");
+  if (!panel || panel.dataset.loaded === "true" || panel.dataset.loading === "true") return;
+  panel.dataset.loading = "true";
+  try {
+    const response = await fetch(panel.dataset.activityUrl, { headers: { accept: "text/html" } });
+    if (!response.ok) throw new Error(`Activity request failed (${response.status})`);
+    panel.outerHTML = await response.text();
+  } catch (error) {
+    panel.innerHTML = `<p class="empty">Activity could not be loaded: ${error}</p>`;
+    panel.dataset.loading = "false";
   }
 }
 
@@ -401,6 +477,15 @@ function setupAutoRefresh() {
     "training_pod_starting",
     "training_running",
   ]);
+  const reloadStatuses = new Set([
+    "awaiting_preprocess_approval",
+    "awaiting_colmap_approval",
+    "preprocess_rejected",
+    "colmap_rejected",
+    "failed",
+    "cancelled",
+    "completed",
+  ]);
   currentSignature = compactStageSignature(currentSignature);
 
   function userIsEditing() {
@@ -420,10 +505,24 @@ function setupAutoRefresh() {
       const nextSignature = runs.map(stageRunSignature).join("|");
       const hasActiveRun = runs.some((run) => activeStatuses.has(run.status));
       if (nextSignature && nextSignature !== currentSignature) {
-        if (userIsEditing()) return;
-        window.location.reload();
-        return;
+        const knownIds = new Set(
+          currentSignature
+            .split("|")
+            .filter(Boolean)
+            .map((part) => part.split(":")[0]),
+        );
+        const hasNewRun = runs.some((run) => run.id && !knownIds.has(String(run.id)));
+        const statusChangedToReloadState = runs.some((run) => {
+          const previous = currentSignature.split("|").find((part) => part.startsWith(`${run.id}:`));
+          return previous && previous.split(":")[1] !== run.status && reloadStatuses.has(run.status);
+        });
+        if ((hasNewRun || statusChangedToReloadState) && !userIsEditing()) {
+          window.location.reload();
+          return;
+        }
       }
+      updateVisibleProgress(runs);
+      updateLiveStatus(runs);
       if (!hasActiveRun) {
         window.clearInterval(timer);
       }
@@ -434,6 +533,65 @@ function setupAutoRefresh() {
   }
 
   const timer = window.setInterval(poll, 5000);
+}
+
+function updateLiveStatus(runs) {
+  const rail = document.querySelector("[data-live-status-rail]");
+  if (!rail) return;
+  const latest = new Map();
+  runs.forEach((run) => {
+    if (run.stage && !latest.has(run.stage)) latest.set(run.stage, run);
+  });
+  rail.querySelector("[data-live-empty]")?.remove();
+  latest.forEach((run, stage) => {
+    let item = rail.querySelector(`[data-live-stage="${CSS.escape(String(stage))}"]`);
+    if (!item) {
+      item = document.createElement("div");
+      item.className = "live-status-item";
+      item.dataset.liveStage = stage;
+      item.innerHTML = `<span class="live-status-stage"></span><span data-live-status class="status"></span><span data-live-percent class="mono live-status-percent"></span><span data-live-phase class="live-status-phase"></span><span data-live-message class="muted"></span><span data-live-provider class="mono muted"></span><span data-live-job class="mono muted"></span>`;
+      rail.appendChild(item);
+    }
+    const progress = run.progress_json || {};
+    const status = item.querySelector("[data-live-status]");
+    if (status) {
+      status.textContent = String(run.status || "unknown").replaceAll("_", " ");
+      status.className = `status status-${run.status || "unknown"}`;
+    }
+    const stageLabel = item.querySelector(".live-status-stage");
+    if (stageLabel) stageLabel.textContent = String(stage).replace(/\b\w/g, (letter) => letter.toUpperCase());
+    const phase = item.querySelector("[data-live-phase]");
+    if (phase) phase.textContent = progress.phase ? String(progress.phase).replaceAll("_", " ") : "";
+    const percent = item.querySelector("[data-live-percent]");
+    if (percent) percent.textContent = `${Number(progress.percent || 0)}%`;
+    const message = item.querySelector("[data-live-message]");
+    if (message) message.textContent = progress.message || "";
+    const provider = item.querySelector("[data-live-provider]");
+    if (provider) provider.textContent = run.provider || "";
+    const job = item.querySelector("[data-live-job]");
+    if (job) job.textContent = run.provider_pod_id || run.provider_job_id || "";
+  });
+}
+
+function updateVisibleProgress(runs) {
+  runs.forEach((run) => {
+    const row = document.querySelector(`[data-stage-run-id="${CSS.escape(String(run.id || ""))}"]`);
+    if (!row) return;
+    const progress = run.progress_json || {};
+    const progressBar = row.querySelector("[data-run-progress]");
+    if (progressBar) progressBar.value = Number(progress.percent || 0);
+    const phase = row.querySelector("[data-run-phase]");
+    if (phase) {
+      phase.textContent = progress.phase ? String(progress.phase).replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) : "";
+    }
+    const message = row.querySelector("[data-run-message]");
+    if (message) message.textContent = progress.message || "";
+    const status = row.querySelector("[data-run-status]");
+    if (status && run.status) {
+      status.textContent = run.status.replaceAll("_", " ");
+      status.className = `status status-${run.status}`;
+    }
+  });
 }
 
 function stageRunSignature(run) {

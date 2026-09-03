@@ -926,6 +926,35 @@ pre {
   width: 10px;
 }
 
+.live-status-rail {
+  border: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0;
+  padding: 10px;
+}
+
+.live-status-item {
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 9px;
+}
+
+.live-status-stage {
+  font-weight: 600;
+}
+
+.live-status-phase {
+  color: var(--ink);
+  font-size: 13px;
+}
+
 @media (max-width: 900px) {
   .grid.two,
   .grid.three,

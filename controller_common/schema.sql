@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS stage_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_stage_runs_project_id ON stage_runs(project_id);
+CREATE INDEX IF NOT EXISTS idx_stage_runs_project_created_at ON stage_runs(project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stage_runs_status_created_at ON stage_runs(status, created_at);
 
 CREATE TABLE IF NOT EXISTS events (
@@ -65,3 +66,4 @@ CREATE TABLE IF NOT EXISTS approvals (
 );
 
 CREATE INDEX IF NOT EXISTS idx_approvals_project_stage ON approvals(project_id, stage);
+CREATE INDEX IF NOT EXISTS idx_approvals_project_created_at ON approvals(project_id, created_at DESC);

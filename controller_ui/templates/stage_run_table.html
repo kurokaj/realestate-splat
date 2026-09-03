@@ -36,6 +36,7 @@
     </thead>
     <tbody>
       {% for run in stage_table_runs %}
+        <tr data-stage-run-id="{{ run.id }}">
         <tr>
           {% set progress = run.progress_json or {} %}
           {% set details = progress.get("details") or {} %}
@@ -44,9 +45,16 @@
             <span class="subline">attempt {{ run.attempt }} · {{ run.created_at }}</span>
           </td>
           <td>{{ run.preprocess_location if stage_table_variant == "preprocess" else run.stage }}</td>
-          <td><span class="status status-{{ run.status_css or run.status }}">{{ run.status_label or run.status }}</span></td>
+          <td><span data-run-status class="status status-{{ run.status_css or run.status }}">{{ run.status_label or run.status }}</span></td>
           <td>{{ run.provider }}</td>
           <td>
+            <progress data-run-progress max="100" value="{{ progress.get("percent") or 0 }}"></progress>
+            {% if progress.get("phase") %}
+              <span data-run-phase class="progress-phase">{{ progress.get("phase")|replace("_", " ")|title }}</span>
+            {% else %}
+              <span data-run-phase class="progress-phase"></span>
+            {% endif %}
+            <span data-run-message class="subline">{{ progress.get("message") or "" }}</span>
             <progress max="100" value="{{ progress.get("percent") or 0 }}"></progress>
             {% if progress.get("phase") %}
               <span class="progress-phase">{{ progress.get("phase")|replace("_", " ")|title }}</span>
