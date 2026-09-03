@@ -1995,7 +1995,10 @@ def preprocess_run_rows(stage_runs: list[dict[str, Any]], raw_summary: Optional[
     return rows
 
 
-def preprocess_run_group_keys(run: dict[str, Any]) -> list[str]:
+def preprocess_run_group_keys(run: Optional[dict[str, Any]]) -> list[str]:
+    """Return configured group keys, tolerating projects without a preprocess run."""
+    if not run:
+        return []
     input_json = run.get("input_uri_json") if isinstance(run.get("input_uri_json"), dict) else {}
     group_configs = input_json.get("group_configs") if isinstance(input_json.get("group_configs"), list) else []
     keys = []
