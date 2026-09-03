@@ -25,28 +25,19 @@ Avoid Azure for now because cost pressure is high.
 
 ## Current status
 
-The legacy Verda pipeline has already proven the core processing path:
+The current controller pipeline has proven the core processing path:
 
 ```text
-local preprocessing
-  -> capture report and human approval
-  -> zipped upload to Verda over SSH
-  -> COLMAP reconstruction and review report
-  -> Nerfstudio / splatfacto training
-  -> export and artifact download
+raw upload to R2
+  -> grouped local preprocessing and human approval
+  -> RunPod COLMAP reconstruction and review report
+  -> RunPod Nerfstudio / splatfacto training
+  -> export and artifact download from R2
 ```
 
-That path remains valuable for capture-style testing. The new work should not
-break it, but it should no longer make Verda's block volume the durability
-model. Production durability moves to object storage, explicit stage manifests,
-containerized execution, and provider adapters.
-
-Legacy reference docs:
-
-```text
-docs/legacy/realestate_splat_project_plan.md
-docs/legacy/verda_tool_status.md
-```
+Production durability is provided by object storage, explicit stage manifests,
+containerized execution, and provider adapters. Local fake providers remain
+available for controller tests.
 
 Active production runtime work should happen in this document and in the new
 runtime/container/orchestration code it describes.
@@ -741,7 +732,7 @@ Implement:
 ```text
 providers/vast.py
 providers/runpod.py
-providers/verda.py
+providers/runpod.py
 providers/local.py
 ```
 
@@ -981,12 +972,12 @@ smoke-test work.
 Recommended command shape:
 
 ```bash
-python scripts/run_stage.py \
+python scripts/run_training_stage.py \
   --project-id PROJECT_ID \
-  --stage train \
-  --input-uri r2://... \
-  --output-uri r2://... \
-  --config-uri r2://...
+  --stage-run-id TRAINING_RUN_ID \
+  --preprocess-uri r2://... \
+  --colmap-uri r2://... \
+  --output-uri r2://...
 ```
 
 ---
@@ -1057,29 +1048,9 @@ Initial Milestone 4 helpers live in:
 src/realestate_splat/storage.py
 src/realestate_splat/stage_contract.py
 src/realestate_splat/media_manifest.py
-scripts/sync_run_artifacts.py
 scripts/upload_raw_project.py
 scripts/run_preprocess_stage.py
 ```
-
-The first supported operation is mirroring an existing local run directory to
-local/S3-compatible storage and fetching it back:
-
-```bash
-python scripts/sync_run_artifacts.py upload \
-  --run runs/<project_id> \
-  --destination-uri r2://gs-pipeline-preprocessed/projects/<project_id>/preprocess
-
-python scripts/sync_run_artifacts.py download \
-  --source-uri r2://gs-pipeline-preprocessed/projects/<project_id>/preprocess \
-  --run runs/<project_id>_from_storage
-```
-
-The upload command writes `artifact_manifest.json` into the local run before
-syncing. Use `--sha256` when content hashes are worth the extra time.
-
-For `r2://` URIs, the helper uses the AWS CLI with `R2_ENDPOINT` as the
-S3-compatible endpoint. Plain local paths are supported without AWS tooling.
 
 For new production-style projects, upload raw capture media instead of old run
 artifacts:
@@ -1122,12 +1093,11 @@ projects/<project_id>/preprocess/runs/<stage_run_id>/
   stage_result.json             # status receipt for completed/failed attempts
 ```
 
-The legacy `capture_report.html` remains useful for the old local workflow, but
-the production stage does not upload it. The app should render preprocessing
-history from JSON. The latest selected frames and metadata live under
-`current/`; older frame selections can be recreated by rerunning the stage with
-the same inputs and settings if needed. Successful preprocessing logs are not
-uploaded by default; failed runs write `logs/preprocess.log` and
+The production stage does not upload the legacy HTML report. The app renders
+preprocessing history from JSON. The latest selected frames and metadata live
+under `current/`; older frame selections can be recreated by rerunning the
+stage with the same inputs and settings if needed. Successful preprocessing
+logs are not uploaded by default; failed runs write `logs/preprocess.log` and
 `stage_result.json` under `current/` and keep `stage_result.json` in history.
 
 ---
@@ -1140,13 +1110,10 @@ good run:
 1. Create Cloudflare R2 buckets or equivalent S3-compatible buckets for raw,
    preprocessed, COLMAP, training, results, and logs.
 2. Configure AWS-style credentials locally and set `R2_ENDPOINT`.
-3. Run `scripts/sync_run_artifacts.py upload --dry-run` against one existing
-   `runs/<project_id>/` directory.
-4. Run the real upload for that same run.
-5. Download it into a fresh local run directory and compare the expected
-   reports, `frames_selected/`, `reports/image_manifest.json`, and `final/`
-   artifacts.
-6. Decide whether each stage should use separate buckets or one bucket with
+3. Verify one raw upload and its `sources_manifest.json`.
+4. Run preprocessing for that project and inspect the grouped `current/`
+   output.
+5. Decide whether each stage should use separate buckets or one bucket with
    stage prefixes before the container images are built.
 
 ---
@@ -1431,9 +1398,7 @@ R2_SECRET_ACCESS_KEY=
 R2_BUCKET=
 R2_ENDPOINT=
 
-VAST_API_KEY=
 RUNPOD_API_KEY=
-VERDA_API_KEY=
 
 DATABASE_URL=
 ```
@@ -1468,17 +1433,15 @@ canonical R2/S3 artifact layout
 sources/media manifest contract
 stage_result.json contract
 local-path and r2:// path support where practical
-upload/download commands for run artifacts
-documentation for mapping existing runs/ layout to object storage
+stage wrappers and artifact helpers for the canonical object-storage layout
 ```
 
 Success criteria:
 
 ```text
-An existing local run can be mirrored to object storage.
 Preprocess, COLMAP, training, and export artifacts have stable URIs.
 Hero images remain represented in image_manifest.json.
-The legacy Verda pipeline still works from local paths.
+The controller can run the pipeline through disposable RunPod jobs.
 ```
 
 ### Milestone 5: Containerized CPU Preprocessing
@@ -1704,7 +1667,7 @@ full polished customer UI
 
 ## First implementation task
 
-Build the foundation for Milestone 4 without disturbing the legacy Verda flow:
+Build the foundation for the next runtime milestone without disturbing the active RunPod flow:
 
 ```text
 Create storage-backed stage contracts and artifact helpers.
@@ -1712,14 +1675,14 @@ Create storage-backed stage contracts and artifact helpers.
 Include:
 - docs for the canonical object-storage artifact layout
 - a small storage abstraction that can support local paths and S3/R2 URIs
-- commands to mirror an existing runs/<project>/ directory to object storage
-- commands to fetch stage artifacts back to a local run directory
+- stage wrappers that read and write the canonical object-storage layout
+- commands to inspect or fetch stage artifacts when local inspection is needed
 - stage_result.json schema/helpers
 - manifest handling notes for raw media, selected frames, and hero images
 
 Do not implement the full UI yet.
 Do not implement all provider APIs yet.
-Do not remove the existing Verda SSH pipeline.
+Keep provider-specific orchestration outside the stage wrappers.
 Focus on making artifacts durable and stages rerunnable.
 ```
 

@@ -37,6 +37,7 @@
     <tbody>
       {% for run in stage_table_runs %}
         <tr data-stage-run-id="{{ run.id }}">
+        <tr>
           {% set progress = run.progress_json or {} %}
           {% set details = progress.get("details") or {} %}
           <td>
@@ -54,6 +55,11 @@
               <span data-run-phase class="progress-phase"></span>
             {% endif %}
             <span data-run-message class="subline">{{ progress.get("message") or "" }}</span>
+            <progress max="100" value="{{ progress.get("percent") or 0 }}"></progress>
+            {% if progress.get("phase") %}
+              <span class="progress-phase">{{ progress.get("phase")|replace("_", " ")|title }}</span>
+            {% endif %}
+            <span class="subline">{{ progress.get("message") or "" }}</span>
             {% if details.get("step") is not none %}
               <span class="subline">step {{ details.get("step") }} / {{ details.get("max_steps") or "?" }}</span>
             {% elif details.get("stage_index") is not none %}

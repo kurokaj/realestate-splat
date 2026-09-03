@@ -31,7 +31,7 @@ This covers:
 Do not target RTX 5090 with the first CUDA 12.4 image. Treat it as a separate
 future image if Blackwell support becomes useful.
 
-If a legacy Verda V100 image is needed later:
+If a V100-compatible image is needed later:
 
 ```text
 CUDA_ARCHS=70;75;86;89
