@@ -539,6 +539,35 @@ def append_options(command: List[str], options: Mapping[str, Any]) -> None:
         command.extend([option_name, str(value)])
 
 
+def effective_mapper_options(settings: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return mapper options with GPU acceleration enabled by default.
+
+    COLMAP keeps mapper GPU controls separate from the feature extraction and
+    matching controls. Only add options for the selected mapper family;
+    explicit user/config values win over these defaults.
+    """
+    options = dict(settings.get("mapper_options") or {})
+    if not bool(settings.get("use_gpu", True)):
+        return options
+
+    if str(settings.get("mode")) == "global":
+        defaults = {
+            "GlobalMapper.gp_use_gpu": 1,
+            "GlobalMapper.gp_gpu_index": 0,
+            "GlobalMapper.ba_ceres_use_gpu": 1,
+            "GlobalMapper.ba_gpu_index": 0,
+        }
+    else:
+        defaults = {
+            "Mapper.ba_use_gpu": 1,
+            "Mapper.ba_gpu_index": 0,
+        }
+
+    for key, value in defaults.items():
+        options.setdefault(key, value)
+    return options
+
+
 def forced_option_names(namespace: str) -> ColmapOptionNames:
     if namespace == "feature":
         return ColmapOptionNames(
@@ -987,7 +1016,7 @@ def build_core_commands(
         "--output_path",
         sparse_dir,
     ]
-    append_options(mapper_command, settings.get("mapper_options", {}))
+    append_options(mapper_command, effective_mapper_options(settings))
 
     commands.append((mapper_name, mapper_command))
     return commands
