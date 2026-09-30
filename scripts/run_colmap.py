@@ -560,6 +560,11 @@ def effective_mapper_options(
             "GlobalMapper.gp_gpu_index": 0,
             "GlobalMapper.ba_ceres_use_gpu": 1,
         }
+        if mapper_help is not None:
+            if option_supported(mapper_help, "--GlobalMapper.ba_gpu_index"):
+                defaults["GlobalMapper.ba_gpu_index"] = 0
+            elif option_supported(mapper_help, "--GlobalMapper.ba_ceres_gpu_index"):
+                defaults["GlobalMapper.ba_ceres_gpu_index"] = 0
     else:
         defaults = {
             "Mapper.ba_use_gpu": 1,

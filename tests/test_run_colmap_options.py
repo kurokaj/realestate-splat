@@ -11,6 +11,7 @@ class MapperOptionCompatibilityTests(unittest.TestCase):
           --GlobalMapper.gp_use_gpu arg
           --GlobalMapper.gp_gpu_index arg
           --GlobalMapper.ba_ceres_use_gpu arg
+          --GlobalMapper.ba_ceres_gpu_index arg
         """
 
         options = effective_mapper_options(
@@ -24,9 +25,25 @@ class MapperOptionCompatibilityTests(unittest.TestCase):
                 "GlobalMapper.gp_use_gpu": 1,
                 "GlobalMapper.gp_gpu_index": 0,
                 "GlobalMapper.ba_ceres_use_gpu": 1,
+                "GlobalMapper.ba_ceres_gpu_index": 0,
             },
         )
         self.assertNotIn("GlobalMapper.ba_gpu_index", options)
+
+    def test_newer_global_bundle_adjustment_gpu_selector_is_supported(self) -> None:
+        help_text = """
+          --GlobalMapper.ba_ceres_use_gpu arg
+          --GlobalMapper.ba_gpu_index arg
+        """
+
+        options = effective_mapper_options(
+            {"mode": "global", "use_gpu": True, "mapper_options": {}},
+            mapper_help=help_text,
+        )
+
+        self.assertEqual(options["GlobalMapper.ba_ceres_use_gpu"], 1)
+        self.assertEqual(options["GlobalMapper.ba_gpu_index"], 0)
+        self.assertNotIn("GlobalMapper.ba_ceres_gpu_index", options)
 
     def test_unsupported_automatic_default_is_skipped(self) -> None:
         options = effective_mapper_options(

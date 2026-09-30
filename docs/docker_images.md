@@ -174,8 +174,12 @@ Global mapper:
 --GlobalMapper.gp_use_gpu 1
 --GlobalMapper.gp_gpu_index 0
 --GlobalMapper.ba_ceres_use_gpu 1
---GlobalMapper.ba_gpu_index 0
+--GlobalMapper.ba_ceres_gpu_index 0
 ```
+
+COLMAP 4.0.4 exposes the Ceres-specific selector above. Newer builds may expose
+`--GlobalMapper.ba_gpu_index` instead. The runtime wrapper inspects
+`global_mapper -h` and selects the supported spelling automatically.
 
 The global path should still run `view_graph_calibrator` first:
 
@@ -460,7 +464,7 @@ docker run --rm --gpus all \
     --GlobalMapper.gp_use_gpu 1 \
     --GlobalMapper.gp_gpu_index 0 \
     --GlobalMapper.ba_ceres_use_gpu 1 \
-    --GlobalMapper.ba_gpu_index 0
+    --GlobalMapper.ba_ceres_gpu_index 0
 ```
 
 ### Verified smoke result
