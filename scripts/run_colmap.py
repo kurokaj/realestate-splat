@@ -539,7 +539,11 @@ def append_options(command: List[str], options: Mapping[str, Any]) -> None:
         command.extend([option_name, str(value)])
 
 
-def effective_mapper_options(settings: Mapping[str, Any]) -> Dict[str, Any]:
+def effective_mapper_options(
+    settings: Mapping[str, Any],
+    *,
+    mapper_help: Optional[str] = None,
+) -> Dict[str, Any]:
     """Return mapper options with GPU acceleration enabled by default.
 
     COLMAP keeps mapper GPU controls separate from the feature extraction and
@@ -555,7 +559,6 @@ def effective_mapper_options(settings: Mapping[str, Any]) -> Dict[str, Any]:
             "GlobalMapper.gp_use_gpu": 1,
             "GlobalMapper.gp_gpu_index": 0,
             "GlobalMapper.ba_ceres_use_gpu": 1,
-            "GlobalMapper.ba_gpu_index": 0,
         }
     else:
         defaults = {
@@ -564,6 +567,8 @@ def effective_mapper_options(settings: Mapping[str, Any]) -> Dict[str, Any]:
         }
 
     for key, value in defaults.items():
+        if mapper_help is not None and not option_supported(mapper_help, f"--{key}"):
+            continue
         options.setdefault(key, value)
     return options
 
@@ -954,6 +959,7 @@ def build_core_commands(
     option_names: ColmapOptionNames,
     *,
     include_matcher: bool = True,
+    mapper_help: Optional[str] = None,
 ) -> List[Tuple[str, List[str]]]:
     database_path = str(paths["database_path"])
     mapper_database_path = str(paths["database_global_path"] if should_run_view_graph_calibrator(settings) else paths["database_path"])
@@ -1016,7 +1022,10 @@ def build_core_commands(
         "--output_path",
         sparse_dir,
     ]
-    append_options(mapper_command, effective_mapper_options(settings))
+    append_options(
+        mapper_command,
+        effective_mapper_options(settings, mapper_help=mapper_help),
+    )
 
     commands.append((mapper_name, mapper_command))
     return commands
@@ -1793,6 +1802,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     colmap_bin = resolve_colmap_bin(settings, args.dry_run)
     option_names = resolve_colmap_option_names(colmap_bin, settings, args.dry_run)
+    mapper_name = "global_mapper" if settings["mode"] == "global" else "mapper"
+    mapper_help = None if args.dry_run else colmap_command_help(colmap_bin, mapper_name)
     is_single_plan = matching_plan.get("strategy") == "single"
     core_commands = build_core_commands(
         colmap_bin,
@@ -1800,6 +1811,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         paths,
         option_names,
         include_matcher=is_single_plan,
+        mapper_help=mapper_help,
     )
 
     if args.dry_run:

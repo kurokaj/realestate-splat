@@ -434,6 +434,12 @@ commands. Failed runs publish a partial provenance record whenever the wrapper
 can still reach R2. The project UI shows the compact identifying fields; the
 full JSON remains the audit record.
 
+Before a real mapper run, the wrapper reads the selected mapper's own `-h`
+output. Automatic GPU defaults are added only when that exact COLMAP runtime
+advertises the option. Explicit operator-provided mapper options are preserved
+and still fail visibly if the runtime rejects them. This keeps container-version
+differences from breaking a run because of an unsupported automatic tuning flag.
+
 ### RunPod cleanup watchdog
 
 The primary pod cleanup path is the worker's `finally` block around
