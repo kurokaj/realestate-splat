@@ -21,6 +21,7 @@ if str(SRC_DIR) not in sys.path:
 
 from controller_common.raw_upload import clear_preprocess_stale_groups, source_group_key  # noqa: E402
 from realestate_splat.cli import CommandResult, run_logged_command, utc_now, write_json  # noqa: E402
+from realestate_splat.skanea_capture import registered_artifact_paths  # noqa: E402
 from realestate_splat.stage_contract import StageResult, write_stage_result  # noqa: E402
 from realestate_splat.storage import sync_directory  # noqa: E402
 
@@ -246,6 +247,8 @@ def run_group_preprocess(
         group_input = group_root / "input"
         group_output = group_root / "output"
         group_input.mkdir(parents=True, exist_ok=True)
+        raw_sources_by_input_name: Dict[str, Dict[str, Any]] = {}
+        passthrough_coverage_image_names: List[str] = []
         for source in group_sources:
             relative = Path(str(source["relative_path"]))
             source_path = raw_dir / relative
@@ -254,18 +257,35 @@ def run_group_preprocess(
             role = str(source.get("role") or "coverage_image")
             location = str(source.get("location") or "unassigned")
             if role == "hero_image":
-                destination = group_input / "hero" / slug(location) / source_path.name
+                destination = group_input / "hero" / slug(location) / preprocess_input_name(source, source_path)
             else:
-                destination = group_input / source_path.name
+                destination = group_input / preprocess_input_name(source, source_path)
+            if destination.name in raw_sources_by_input_name:
+                raise ValueError(f"Duplicate preprocess input name in {group_key}: {destination.name}")
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, destination)
+            raw_sources_by_input_name[destination.name] = source
+            if role == "coverage_image" and source.get("source_kind") == "skanea_rgbd_frame":
+                passthrough_coverage_image_names.append(destination.name)
 
         profile = str(config.get("profile") or args.profile)
         command = [args.python_bin, "scripts/preprocess_video.py", "--input-dir", str(group_input), "--out", str(group_output), "--profile", profile, "--overwrite"]
         command.extend(str(value) for value in config.get("preprocess_args", args.preprocess_arg))
+        if passthrough_coverage_image_names:
+            passthrough_manifest = group_root / "passthrough_coverage_images.json"
+            write_json(
+                passthrough_manifest,
+                {
+                    "schema_version": 1,
+                    "policy": "retain_all_skanea_rgbd_frames",
+                    "filenames": sorted(passthrough_coverage_image_names),
+                },
+            )
+            command.extend(["--passthrough-coverage-images-json", str(passthrough_manifest)])
         result = run_logged_command(f"preprocess_group_{slug(group_key)}", command, logs_dir, Path.cwd())
         report = read_json(group_output / "reports" / "capture_report.json")
         image_manifest = read_json(group_output / "reports" / "image_manifest.json")
+        attach_raw_source_metadata(report, image_manifest, raw_sources_by_input_name)
         prefix = slug(group_key)
         patch_group_artifacts(report, image_manifest, prefix, group_key, group_output, local_run_dir)
         merged_reports.append(report)
@@ -329,6 +349,57 @@ def slug(value: str) -> str:
     return "".join(char if char.isalnum() else "_" for char in value.lower()).strip("_") or "group"
 
 
+def preprocess_input_name(source: Dict[str, Any], source_path: Path) -> str:
+    value = str(source.get("preprocess_name") or source_path.name)
+    if Path(value).name != value or value in {"", ".", ".."}:
+        raise ValueError(f"Unsafe preprocess_name for {source.get('source_id')}: {value}")
+    return value
+
+
+def attach_raw_source_metadata(
+    report: Dict[str, Any],
+    image_manifest: Dict[str, Any],
+    sources_by_input_name: Dict[str, Dict[str, Any]],
+) -> None:
+    def source_for(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        source_path = item.get("source_path") or item.get("source_image")
+        if not source_path:
+            return None
+        return sources_by_input_name.get(Path(str(source_path)).name)
+
+    for item in image_manifest.get("images", []) if isinstance(image_manifest.get("images"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        source = source_for(item)
+        if source is None:
+            continue
+        item["source_id"] = source.get("source_id")
+        item["source_kind"] = source.get("source_kind") or item.get("source_kind")
+        item["role"] = source.get("role") or item.get("role")
+        item["location"] = source.get("location") or item.get("location")
+        item["camera_group"] = source.get("camera_group") or item.get("camera_group")
+        item["raw_relative_path"] = source.get("relative_path")
+        if isinstance(source.get("rgbd"), dict):
+            item["rgbd"] = dict(source["rgbd"])
+
+    for item in report.get("frames", []) if isinstance(report.get("frames"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        source = source_for(item)
+        if source is None:
+            continue
+        item["source_id"] = source.get("source_id")
+        item["source_kind"] = source.get("source_kind") or item.get("source_kind")
+        item["role"] = source.get("role") or item.get("role")
+        item["camera_group"] = source.get("camera_group") or item.get("camera_group")
+        item["raw_relative_path"] = source.get("relative_path")
+        rgbd = source.get("rgbd")
+        if isinstance(rgbd, dict):
+            item["capture_id"] = rgbd.get("capture_id")
+            item["capture_frame_index"] = rgbd.get("frame_index")
+            item["capture_timestamp_seconds"] = rgbd.get("timestamp_seconds")
+
+
 def patch_group_artifacts(
     report: Dict[str, Any],
     image_manifest: Dict[str, Any],
@@ -352,7 +423,7 @@ def patch_group_artifacts(
             location = group_key.split(":", 1)[1] if ":" in group_key else "unassigned"
             item["group_key"] = group_key
             item["location"] = location
-            item["camera_group"] = f"{role}_{slug(location)}"
+            item["camera_group"] = item.get("camera_group") or f"{role}_{slug(location)}"
     for video in report.get("videos", []) if isinstance(report, dict) else []:
         if isinstance(video, dict):
             video["group_key"] = group_key
@@ -559,14 +630,10 @@ def enforce_manifest_sources(raw_dir: Path) -> None:
     if not isinstance(sources, list):
         raise RuntimeError("Raw sources manifest must contain a sources list.")
 
-    allowed = {"sources_manifest.json"}
-    for source in sources:
-        if not isinstance(source, dict) or not source.get("relative_path"):
-            raise RuntimeError("Raw sources manifest contains an invalid source entry.")
-        relative_path = Path(str(source["relative_path"]))
-        if relative_path.is_absolute() or ".." in relative_path.parts:
-            raise RuntimeError(f"Raw sources manifest contains an unsafe relative path: {relative_path}")
-        allowed.add(relative_path.as_posix())
+    try:
+        allowed = registered_artifact_paths(manifest)
+    except ValueError as exc:
+        raise RuntimeError(f"Raw sources manifest contains an unsafe registered path: {exc}") from exc
 
     for path in sorted(raw_dir.rglob("*"), key=lambda item: len(item.parts), reverse=True):
         relative_path = path.relative_to(raw_dir).as_posix()

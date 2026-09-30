@@ -6,9 +6,10 @@ venv/
 .env
 .env.example
 
-# Keep local captures and generated runs out of source control.
-data/raw/*
-!data/raw/.gitkeep
+# Keep all local capture data out of source control.
+/data/
+
+# Keep generated runs out of source control.
 runs/*
 !runs/.gitkeep
 

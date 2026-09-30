@@ -59,11 +59,12 @@ def build_source_groups(image_manifest: Mapping[str, Any]) -> list[Dict[str, Any
             continue
         source_id = str(entry.get("source_id") or "unassigned")
         camera_group = str(entry.get("camera_group") or "default")
-        group_id = f"{source_id}:{camera_group}"
         role = str(entry.get("role") or "")
         source_kind = str(entry.get("source_kind") or "")
+        group_id = source_group_id(entry)
         is_hero = role in {"hero", "hero_image"} or source_kind == "hero"
         is_video = role == "coverage_video" or source_kind == "video"
+        is_ordered_capture = is_video or source_kind == "skanea_rgbd_frame"
         group = grouped.setdefault(
             group_id,
             {
@@ -75,20 +76,39 @@ def build_source_groups(image_manifest: Mapping[str, Any]) -> list[Dict[str, Any
                     if is_video
                     else "coverage_images"
                 ),
-                "source_ids": [source_id],
+                "source_ids": [],
                 "locations": [],
-                "camera_groups": [camera_group],
+                "camera_groups": [],
                 "ordered": False,
                 "image_count": 0,
             },
         )
         group["image_count"] += 1
+        if source_id not in group["source_ids"]:
+            group["source_ids"].append(source_id)
+        if camera_group not in group["camera_groups"]:
+            group["camera_groups"].append(camera_group)
         location = entry.get("location")
         if location and location not in group["locations"]:
             group["locations"].append(location)
-        if is_video:
+        if is_ordered_capture:
             group["ordered"] = True
     return sorted(grouped.values(), key=lambda group: group["id"])
+
+
+def source_group_id(entry: Mapping[str, Any]) -> str:
+    """Return the matcher group shared by images from one capture source.
+
+    Video manifests already use one source id for every extracted frame. A
+    Skanea import intentionally gives every RGB-D frame a unique source id so
+    its depth sidecars remain addressable, while ``camera_group`` identifies
+    the shared capture. Group those frames by that capture-level identifier.
+    """
+    source_id = str(entry.get("source_id") or "unassigned")
+    camera_group = str(entry.get("camera_group") or "default")
+    if str(entry.get("source_kind") or "") == "skanea_rgbd_frame":
+        return f"{camera_group}:{camera_group}"
+    return f"{source_id}:{camera_group}"
 
 
 def build_hybrid_matching_plan(

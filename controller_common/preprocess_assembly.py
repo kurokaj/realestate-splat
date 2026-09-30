@@ -43,7 +43,10 @@ def parse_group_output_specs(values: list[str]) -> list[dict[str, str]]:
         output_uri = str(payload.get("output_uri") or "").rstrip("/")
         if not group_key or not output_uri:
             raise ValueError("Preprocess group output requires group_key and output_uri")
-        outputs.append({"group_key": group_key, "output_uri": output_uri})
+        output = {"group_key": group_key, "output_uri": output_uri}
+        if payload.get("stage_run_id"):
+            output["stage_run_id"] = str(payload["stage_run_id"])
+        outputs.append(output)
     return outputs
 
 

@@ -25,6 +25,12 @@ from realestate_splat.storage import copy_file, sync_directory  # noqa: E402
 from controller_common.progress import LineProgressParser, R2ProgressReporter  # noqa: E402
 from controller_common.colmap_viewer import write_sparse_viewer_payload  # noqa: E402
 from controller_common.preprocess_assembly import assemble_preprocess_groups_local, parse_group_output_specs  # noqa: E402
+from controller_common.run_provenance import (  # noqa: E402
+    build_colmap_run_provenance,
+    command_version,
+    compact_colmap_provenance,
+    repository_revision,
+)
 
 
 DEFAULT_COLMAP_BIN = Path("/opt/colmap-cuda/bin/colmap")
@@ -66,6 +72,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=str(DEFAULT_COLMAP_BIN),
         help="Absolute COLMAP binary path inside the GPU runtime.",
     )
+    parser.add_argument("--container-image", help="Container image reference supplied by the controller.")
+    parser.add_argument("--provider-api-version", help="Compute-provider API version used to create the Pod.")
     parser.add_argument("--config", type=Path, help="Optional JSON/YAML config passed to scripts/run_colmap.py.")
     parser.add_argument(
         "--matching-plan",
@@ -173,6 +181,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     current_dir = work_dir / "upload_current"
     history_dir = work_dir / "upload_history"
     started_at = utc_now()
+    group_outputs: list[dict[str, str]] = []
+    provenance_context: dict[str, Any] = {}
 
     try:
         if args.dry_run:
@@ -221,6 +231,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if not matching_plan_input.exists():
                 raise FileNotFoundError(f"Matching plan does not exist: {args.matching_plan}")
 
+        provenance_context = collect_provenance_context(args, input_dir, group_outputs)
+
         progress.update(12, "feature_extraction", "Starting COLMAP feature extraction", force=True)
         colmap_result = run_colmap(args, local_run_dir, logs_dir, progress)
         progress.update(90, "artifacts", "Preparing reconstruction artifacts", force=True)
@@ -236,6 +248,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             history_dir=history_dir,
             started_at=started_at,
             colmap_result=colmap_result,
+            provenance_context=provenance_context,
         )
 
         progress.update(96, "uploading", "Uploading COLMAP artifacts to R2", force=True)
@@ -259,6 +272,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     history_dir=history_dir,
                     started_at=started_at,
                     error=exc,
+                    provenance_context=provenance_context,
                 )
                 upload_payloads(args, run_id, current_dir, history_dir)
             except Exception as upload_error:
@@ -456,6 +470,23 @@ def run_colmap(
     )
 
 
+def collect_provenance_context(
+    args: argparse.Namespace,
+    input_dir: Path,
+    group_outputs: Sequence[dict[str, str]],
+) -> dict[str, Any]:
+    frames_dir = input_dir / "frames_selected"
+    return {
+        "preprocess_group_outputs": [dict(item) for item in group_outputs],
+        "image_manifest_path": input_dir / "image_manifest.json",
+        "image_count": sum(1 for path in frames_dir.iterdir() if path.is_file()),
+        "container_image": args.container_image,
+        "provider_api_version": args.provider_api_version,
+        "repository_commit": repository_revision(ROOT_DIR),
+        "colmap_runtime": command_version([str(args.colmap_bin), "-h"]),
+    }
+
+
 def prepare_upload_payloads(
     *,
     project_id: str,
@@ -469,6 +500,7 @@ def prepare_upload_payloads(
     history_dir: Path,
     started_at: str,
     colmap_result: CommandResult,
+    provenance_context: dict[str, Any],
 ) -> None:
     current_dir.mkdir(parents=True, exist_ok=True)
     history_dir.mkdir(parents=True, exist_ok=True)
@@ -480,8 +512,30 @@ def prepare_upload_payloads(
     if not report_path.exists():
         raise FileNotFoundError(f"COLMAP finished without reconstruction_report.json: {report_path}")
     report = read_json(report_path)
+    finished_at = utc_now()
+    provenance = build_colmap_run_provenance(
+        project_id=project_id,
+        stage_run_id=stage_run_id,
+        status="completed",
+        started_at=started_at,
+        finished_at=finished_at,
+        input_uri=input_uri,
+        preprocess_group_outputs=provenance_context.get("preprocess_group_outputs") or [],
+        image_manifest_path=provenance_context.get("image_manifest_path") or local_run_dir / "reports" / "image_manifest.json",
+        image_count=int(provenance_context.get("image_count") or 0),
+        output_uri=output_uri,
+        container_image=provenance_context.get("container_image"),
+        provider_api_version=provenance_context.get("provider_api_version"),
+        repository_commit=provenance_context.get("repository_commit"),
+        colmap_runtime=provenance_context.get("colmap_runtime") or {},
+        stage_command=colmap_result.command,
+        reconstruction_report=report,
+    )
+    report["run_provenance"] = provenance
     write_json(current_dir / "reconstruction_report.json", report)
     write_json(history_dir / "reconstruction_report.json", report)
+    write_json(current_dir / "run_provenance.json", provenance)
+    write_json(history_dir / "run_provenance.json", provenance)
     copy_if_exists(local_run_dir / "reports" / "matching_plan.json", current_dir / "matching_plan.json")
     copy_if_exists(local_run_dir / "reports" / "matching_plan.json", history_dir / "matching_plan.json")
     copy_if_exists(
@@ -494,7 +548,6 @@ def prepare_upload_payloads(
     )
     generate_viewer_payloads(current_dir=current_dir, history_dir=history_dir)
 
-    finished_at = utc_now()
     result = StageResult(
         schema_version=1,
         project_id=project_id,
@@ -515,6 +568,8 @@ def prepare_upload_payloads(
         metadata={
             "colmap_command": colmap_result.command,
             "colmap_duration_seconds": colmap_result.duration_seconds,
+            "run_provenance_uri": f"{output_uri.rstrip('/')}/current/run_provenance.json",
+            "provenance": compact_colmap_provenance(provenance),
             "summary": colmap_stage_summary(report),
         },
     )
@@ -554,16 +609,42 @@ def prepare_failed_payloads(
     history_dir: Path,
     started_at: str,
     error: Exception,
+    provenance_context: dict[str, Any],
 ) -> None:
     current_dir.mkdir(parents=True, exist_ok=True)
     history_dir.mkdir(parents=True, exist_ok=True)
     copy_tree(logs_dir, current_dir / "logs")
     copy_tree(local_run_dir / "colmap" / "logs", current_dir / "logs" / "colmap")
-    copy_if_exists(local_run_dir / "reports" / "reconstruction_report.json", current_dir / "reconstruction_report.json")
+    report_path = local_run_dir / "reports" / "reconstruction_report.json"
+    report = read_json(report_path)
+    finished_at = utc_now()
+    provenance = build_colmap_run_provenance(
+        project_id=project_id,
+        stage_run_id=stage_run_id,
+        status="failed",
+        started_at=started_at,
+        finished_at=finished_at,
+        input_uri=input_uri,
+        preprocess_group_outputs=provenance_context.get("preprocess_group_outputs") or [],
+        image_manifest_path=provenance_context.get("image_manifest_path") or local_run_dir / "reports" / "image_manifest.json",
+        image_count=int(provenance_context.get("image_count") or 0),
+        output_uri=output_uri,
+        container_image=provenance_context.get("container_image"),
+        provider_api_version=provenance_context.get("provider_api_version"),
+        repository_commit=provenance_context.get("repository_commit"),
+        colmap_runtime=provenance_context.get("colmap_runtime") or {},
+        stage_command=None,
+        reconstruction_report=report,
+    )
+    if report:
+        report["run_provenance"] = provenance
+        write_json(current_dir / "reconstruction_report.json", report)
+        write_json(history_dir / "reconstruction_report.json", report)
+    write_json(current_dir / "run_provenance.json", provenance)
+    write_json(history_dir / "run_provenance.json", provenance)
     copy_if_exists(local_run_dir / "reports" / "matching_plan.json", current_dir / "matching_plan.json")
     copy_if_exists(local_run_dir / "reports" / "matching_plan.json", history_dir / "matching_plan.json")
 
-    finished_at = utc_now()
     result = StageResult(
         schema_version=1,
         project_id=project_id,
@@ -578,7 +659,10 @@ def prepare_failed_payloads(
         logs_uri=f"{output_uri.rstrip('/')}/current/logs",
         metrics_uri=f"{output_uri.rstrip('/')}/current/reconstruction_report.json",
         error_message=str(error),
-        metadata={},
+        metadata={
+            "run_provenance_uri": f"{output_uri.rstrip('/')}/current/run_provenance.json",
+            "provenance": compact_colmap_provenance(provenance),
+        },
     )
     write_stage_result(current_dir / "stage_result.json", result)
     write_stage_result(history_dir / "stage_result.json", result)
@@ -599,6 +683,7 @@ def colmap_stage_summary(report: Dict[str, Any]) -> Dict[str, Any]:
         "reconstruction_metrics": report.get("reconstruction_metrics", {}),
         "manifest_reconstruction": report.get("manifest_reconstruction", {}),
         "camera_groups": report.get("camera_groups", []),
+        "provenance": compact_colmap_provenance(report.get("run_provenance") or {}),
     }
 
 
@@ -649,6 +734,7 @@ def validate_complete_payload(current_dir: Path) -> None:
         "stage_result.json",
         "image_manifest.json",
         "reconstruction_report.json",
+        "run_provenance.json",
         "matching_plan.json",
         "viewer/sparse_scene.json",
         "sparse_txt/cameras.txt",
@@ -665,6 +751,7 @@ def uploaded_objects(current_dir: Path) -> list[str]:
         "stage_result.json",
         "image_manifest.json",
         "reconstruction_report.json",
+        "run_provenance.json",
         "matching_plan.json",
         "matching_results.json",
         "viewer/sparse_scene.json",

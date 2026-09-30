@@ -41,13 +41,13 @@ from controller_common.config import (
 from controller_common.db import claim_next_queued_stage, complete_stage_run, connect, create_event, ensure_schema
 from controller_common.fake_provider import FakeProvider
 from controller_common.runpod_gpus import normalize_gpu_types
-from controller_common.runpod_provider import RunpodClient
+from controller_common.runpod_provider import RUNPOD_REST_API_VERSION, RunpodClient, build_gpu_pod_payload
 from src.realestate_splat.storage import delete_file
 
 
 STOP_REQUESTED = False
 ABSENT_POD_STATUS = "ABSENT"
-TERMINAL_POD_STATUSES = {ABSENT_POD_STATUS, "DELETED", "EXITED", "FAILED", "STOPPED", "TERMINATED"}
+TERMINAL_POD_STATUSES = {ABSENT_POD_STATUS, "DELETED", "ERROR", "EXITED", "FAILED", "STOPPED", "TERMINATED"}
 
 
 def request_stop(signum: int, _frame: Any) -> None:
@@ -282,9 +282,9 @@ def run_runpod_colmap(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]:
     require_r2_uri(preprocess_uri, "preprocess_uri")
     require_r2_uri(output_base_uri, "output_uri")
 
-    remote_command = build_colmap_stage_shell_command(stage_run, inputs)
     current_uri = f"{output_base_uri.rstrip('/')}/current"
     image = stage_run.get("image") or inputs.get("image") or runpod_colmap_image()
+    remote_command = build_colmap_stage_shell_command(stage_run, inputs, image=image)
     with connect() as conn:
         create_event(
             conn,
@@ -294,6 +294,7 @@ def run_runpod_colmap(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]:
             payload={
                 "image": image,
                 "gpu_type_ids": inputs.get("gpu_type_ids") or runpod_colmap_gpu_types(),
+                "runpod_api_version": RUNPOD_REST_API_VERSION,
                 "dry_run": bool(inputs.get("dry_run")),
             },
         )
@@ -318,6 +319,7 @@ def run_runpod_colmap(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]:
         return (
             {
                 "provider": "runpod_colmap",
+                "runpod_api_version": RUNPOD_REST_API_VERSION,
                 "stage": "colmap",
                 "dry_run": True,
                 "image": image,
@@ -343,7 +345,7 @@ def run_runpod_colmap(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]:
             stage_run_id=stage_run_id,
             kind="runpod_pod_created",
             message="Created RunPod COLMAP pod",
-            payload={"pod_id": pod.id, "image": image},
+            payload={"pod_id": pod.id, "image": image, "runpod_api_version": RUNPOD_REST_API_VERSION},
         )
         conn.execute(
             """
@@ -396,6 +398,7 @@ def run_runpod_training(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]
             payload={
                 "image": image,
                 "gpu_type_ids": inputs.get("gpu_type_ids") or runpod_training_gpu_types(),
+                "runpod_api_version": RUNPOD_REST_API_VERSION,
                 "dry_run": bool(inputs.get("dry_run")),
             },
         )
@@ -420,6 +423,7 @@ def run_runpod_training(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]
         return (
             {
                 "provider": "runpod_training",
+                "runpod_api_version": RUNPOD_REST_API_VERSION,
                 "stage": "training",
                 "dry_run": True,
                 "image": image,
@@ -440,7 +444,7 @@ def run_runpod_training(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]
             stage_run_id=stage_run_id,
             kind="runpod_pod_created",
             message="Created RunPod training pod",
-            payload={"pod_id": pod.id, "image": image},
+            payload={"pod_id": pod.id, "image": image, "runpod_api_version": RUNPOD_REST_API_VERSION},
         )
         conn.execute(
             """
@@ -473,7 +477,7 @@ def run_runpod_training(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]
             delete_runpod_pod(client, stage_run_id=stage_run_id, pod_id=pod.id, reason="stage_finished")
 
 
-def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str, Any]) -> str:
+def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str, Any], *, image: str) -> str:
     repo_url = inputs.get("repo_url") or controller_repo_url()
     if not repo_url:
         raise ValueError("CONTROLLER_REPO_URL or input_uri_json.repo_url is required for runpod_colmap")
@@ -508,6 +512,10 @@ def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str
         "--sequential-loop-detection" if inputs.get("sequential_loop_detection", True) else "--no-sequential-loop-detection",
         "--colmap-bin",
         inputs.get("colmap_bin", "/opt/colmap-cuda/bin/colmap"),
+        "--container-image",
+        image,
+        "--provider-api-version",
+        RUNPOD_REST_API_VERSION,
     ]
     if inputs.get("raw_uri"):
         command.extend(["--raw-uri", inputs["raw_uri"]])
@@ -594,12 +602,14 @@ def guarded_runpod_stage_shell_command(
 ) -> str:
     stage_run_id = shlex.quote(str(stage_run["id"]))
     sentinel_dir = "/workspace/.buildvision3d_stage_guards"
-    sentinel = f"{sentinel_dir}/{stage_run_id}.done"
+    completed_sentinel = f"{sentinel_dir}/{stage_run_id}.completed"
+    failed_sentinel = f"{sentinel_dir}/{stage_run_id}.failed"
     return "\n".join(
         [
             "set -euo pipefail",
             f"mkdir -p {sentinel_dir}",
-            f"if [ -f {sentinel} ]; then echo 'Buildvision3D {stage_label} stage {stage_run_id} already executed; waiting for controller cleanup'; sleep infinity; fi",
+            f"if [ -f {completed_sentinel} ]; then echo 'Buildvision3D {stage_label} stage {stage_run_id} already completed; waiting for controller cleanup'; sleep infinity; fi",
+            f"if [ -f {failed_sentinel} ]; then stage_exit=$(cat {failed_sentinel} 2>/dev/null || echo 1); echo 'Buildvision3D {stage_label} stage {stage_run_id} already failed; exiting again for controller cleanup'; exit \"$stage_exit\"; fi",
             "mkdir -p /workspace",
             "cd /workspace",
             f"if [ ! -d Buildvision3D/.git ]; then git clone --branch {shlex.quote(git_ref)} {shlex.quote(repo_url)} Buildvision3D; fi",
@@ -609,8 +619,9 @@ def guarded_runpod_stage_shell_command(
             "git pull --ff-only || true",
             "stage_exit=0",
             " ".join(shlex.quote(part) for part in command) + " || stage_exit=$?",
-            f"touch {sentinel}",
-            "if [ \"$stage_exit\" -eq 0 ]; then echo 'Buildvision3D stage complete; waiting for controller cleanup'; sleep infinity; fi",
+            f"if [ \"$stage_exit\" -eq 0 ]; then touch {completed_sentinel}; echo 'Buildvision3D stage complete; waiting for controller cleanup'; sleep infinity; fi",
+            f"printf '%s\\n' \"$stage_exit\" > {failed_sentinel}",
+            "echo \"Buildvision3D stage failed with exit code $stage_exit; exiting for controller cleanup\"",
             "exit \"$stage_exit\"",
         ]
     )
@@ -638,23 +649,18 @@ def build_runpod_colmap_pod_payload(
     if isinstance(raw_gpu_type_ids, str):
         raw_gpu_type_ids = [raw_gpu_type_ids]
     gpu_type_ids = normalize_gpu_types(raw_gpu_type_ids)
-    return {
-        "name": f"buildvision3d-colmap-{stage_run['project_id']}-{stage_run['id']}"[:80],
-        "imageName": image,
-        "computeType": "GPU",
-        "cloudType": inputs.get("cloud_type") or runpod_colmap_cloud_type(),
-        "gpuCount": int(inputs.get("gpu_count") or 1),
-        "gpuTypeIds": gpu_type_ids,
-        "gpuTypePriority": inputs.get("gpu_type_priority") or "availability",
-        "containerDiskInGb": int(inputs.get("container_disk_gb") or runpod_colmap_container_disk_gb()),
-        "minVCPUPerGPU": int(inputs.get("min_vcpu_per_gpu") or 4),
-        "minRAMPerGPU": int(inputs.get("min_ram_per_gpu") or 16),
-        "dockerEntrypoint": ["bash", "-lc"],
-        "dockerStartCmd": [remote_command],
-        "env": env,
-        "ports": [],
-        "supportPublicIp": False,
-    }
+    return build_gpu_pod_payload(
+        name=f"buildvision3d-colmap-{stage_run['project_id']}-{stage_run['id']}"[:80],
+        image=image,
+        gpu_type_id=gpu_type_ids[0],
+        gpu_count=int(inputs.get("gpu_count") or 1),
+        cloud=inputs.get("cloud_type") or runpod_colmap_cloud_type(),
+        disk_gb=int(inputs.get("container_disk_gb") or runpod_colmap_container_disk_gb()),
+        min_vcpu_per_gpu=int(inputs.get("min_vcpu_per_gpu") or 4),
+        min_ram_per_gpu=int(inputs.get("min_ram_per_gpu") or 16),
+        remote_command=remote_command,
+        env=env,
+    )
 
 
 def build_runpod_training_pod_payload(
@@ -679,23 +685,18 @@ def build_runpod_training_pod_payload(
     if isinstance(raw_gpu_type_ids, str):
         raw_gpu_type_ids = [raw_gpu_type_ids]
     gpu_type_ids = normalize_gpu_types(raw_gpu_type_ids)
-    return {
-        "name": f"buildvision3d-training-{stage_run['project_id']}-{stage_run['id']}"[:80],
-        "imageName": image,
-        "computeType": "GPU",
-        "cloudType": inputs.get("cloud_type") or runpod_training_cloud_type(),
-        "gpuCount": int(inputs.get("gpu_count") or 1),
-        "gpuTypeIds": gpu_type_ids,
-        "gpuTypePriority": inputs.get("gpu_type_priority") or "availability",
-        "containerDiskInGb": int(inputs.get("container_disk_gb") or runpod_training_container_disk_gb()),
-        "minVCPUPerGPU": int(inputs.get("min_vcpu_per_gpu") or 8),
-        "minRAMPerGPU": int(inputs.get("min_ram_per_gpu") or 32),
-        "dockerEntrypoint": ["bash", "-lc"],
-        "dockerStartCmd": [remote_command],
-        "env": env,
-        "ports": [],
-        "supportPublicIp": False,
-    }
+    return build_gpu_pod_payload(
+        name=f"buildvision3d-training-{stage_run['project_id']}-{stage_run['id']}"[:80],
+        image=image,
+        gpu_type_id=gpu_type_ids[0],
+        gpu_count=int(inputs.get("gpu_count") or 1),
+        cloud=inputs.get("cloud_type") or runpod_training_cloud_type(),
+        disk_gb=int(inputs.get("container_disk_gb") or runpod_training_container_disk_gb()),
+        min_vcpu_per_gpu=int(inputs.get("min_vcpu_per_gpu") or 8),
+        min_ram_per_gpu=int(inputs.get("min_ram_per_gpu") or 32),
+        remote_command=remote_command,
+        env=env,
+    )
 
 
 def wait_for_colmap_stage_result(
@@ -1122,6 +1123,7 @@ def compact_colmap_summary(
 ) -> dict[str, Any]:
     metadata = stage_result.get("metadata") if isinstance(stage_result.get("metadata"), dict) else {}
     wrapper_summary = metadata.get("summary") if isinstance(metadata.get("summary"), dict) else {}
+    provenance = metadata.get("provenance") if isinstance(metadata.get("provenance"), dict) else {}
     metrics = reconstruction_report.get("reconstruction_metrics") if isinstance(reconstruction_report.get("reconstruction_metrics"), dict) else {}
     settings = reconstruction_report.get("settings") if isinstance(reconstruction_report.get("settings"), dict) else {}
     manifest_reconstruction = reconstruction_report.get("manifest_reconstruction") if isinstance(reconstruction_report.get("manifest_reconstruction"), dict) else {}
@@ -1140,6 +1142,14 @@ def compact_colmap_summary(
     return {
         "provider": "runpod_colmap",
         "provider_job_id": provider_job_id,
+        "runpod_api_version": provenance.get("runpod_api_version") or RUNPOD_REST_API_VERSION,
+        "colmap_version": provenance.get("colmap_version"),
+        "repository_commit": provenance.get("repository_commit"),
+        "container_image": provenance.get("container_image"),
+        "input_manifest_sha256": provenance.get("input_manifest_sha256"),
+        "input_image_count": provenance.get("input_image_count"),
+        "intrinsics_source": provenance.get("intrinsics_source"),
+        "run_provenance_uri": metadata.get("run_provenance_uri") or provenance.get("run_provenance_uri"),
         "stage": "colmap",
         "status": stage_result.get("status"),
         "mode": wrapper_summary.get("mode") or settings.get("mode"),

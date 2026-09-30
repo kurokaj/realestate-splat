@@ -117,6 +117,10 @@ h3 {
   padding: 18px;
 }
 
+.folder-summary {
+  margin-bottom: 12px;
+}
+
 .compact-panel {
   padding: 12px 14px;
 }
@@ -905,6 +909,15 @@ pre {
 .timeline-empty {
   color: var(--muted);
   padding: 12px;
+}
+
+.notice-inline {
+  background: #eef7f7;
+  border: 1px solid #c9e2e2;
+  border-radius: 6px;
+  color: var(--accent-strong);
+  margin: 0;
+  padding: 10px 12px;
 }
 
 .legend {

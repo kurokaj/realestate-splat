@@ -8,7 +8,7 @@ import json
 import subprocess
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Iterable, Optional
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -18,6 +18,7 @@ if str(SRC_DIR) not in sys.path:
 
 from realestate_splat.cli import write_json  # noqa: E402
 from realestate_splat.media_manifest import build_sources_manifest  # noqa: E402
+from realestate_splat.skanea_capture import build_skanea_manifest_fragment  # noqa: E402
 from realestate_splat.storage import copy_file, delete_file, sync_directory  # noqa: E402
 
 
@@ -28,6 +29,7 @@ DEFAULT_EXCLUDES = [
     "*.pyc",
     "sources_manifest.json",
 ]
+SKANEA_EXCLUDES = [".DS_Store", ".active-capture", ".capture-frames.ndjson"]
 
 
 class DuplicateCoverageVideoError(ValueError):
@@ -58,6 +60,17 @@ def safe_relative_upload_path(filename: str | Path) -> Path:
     if not parts:
         raise ValueError("Uploaded file must have a filename")
     return Path(*parts)
+
+
+def strict_relative_upload_path(filename: str | Path) -> Path:
+    """Validate a browser-supplied relative path without silently repairing it."""
+    cleaned = str(filename).replace("\\", "/")
+    candidate = PurePosixPath(cleaned)
+    if candidate.is_absolute() or not candidate.parts:
+        raise ValueError(f"Session upload path must be relative: {filename}")
+    if any(part in {"", ".", ".."} for part in candidate.parts):
+        raise ValueError(f"Session upload contains an unsafe path: {filename}")
+    return Path(*candidate.parts)
 
 
 def write_upload_file(root: Path, filename: str | Path, stream: BinaryIO) -> Path:
@@ -172,6 +185,81 @@ def upload_raw_directory(
     return manifest
 
 
+def upload_skanea_capture(
+    *,
+    project_id: str,
+    capture_dir: Path,
+    location: str,
+    destination_uri: str,
+    endpoint_url: Optional[str],
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Validate and register one finalized Skanea capture as project input."""
+    incoming, capture = build_skanea_manifest_fragment(
+        project_id=project_id,
+        capture_dir=capture_dir,
+        destination_uri=destination_uri,
+        location=location,
+        created_at=utc_now(),
+    )
+    if dry_run:
+        return incoming
+
+    existing = load_manifest(destination_uri, endpoint_url)
+    existing_captures = existing.get("captures") if isinstance(existing.get("captures"), list) else []
+    previous_locations: set[str] = set()
+    for registered in existing_captures:
+        if not isinstance(registered, dict):
+            continue
+        if (
+            registered.get("capture_id") != capture.capture_id
+            and registered.get("raw_root_relative_path") == incoming["captures"][0]["raw_root_relative_path"]
+        ):
+            raise ValueError(
+                "Skanea capture ids normalize to the same raw storage path: "
+                f"{registered.get('capture_id')} and {capture.capture_id}"
+            )
+        if registered.get("capture_id") != capture.capture_id:
+            continue
+        if registered.get("manifest_sha256") != capture.manifest_sha256:
+            raise ValueError(
+                f"Capture id {capture.capture_id} is already registered with different manifest content"
+            )
+        if registered.get("location"):
+            previous_locations.add(str(registered["location"]))
+
+    manifest = merge_with_existing_manifest(
+        incoming,
+        destination_uri,
+        endpoint_url,
+        existing=existing,
+    )
+    group_key = f"location:{incoming['captures'][0]['location']}"
+    stale_reasons = dict(existing.get("preprocess_stale_reasons") or {})
+    stale_reasons[group_key] = "uploaded"
+    for previous_location in previous_locations:
+        stale_reasons[f"location:{previous_location}"] = "capture registration updated"
+    manifest["preprocess_stale_reasons"] = stale_reasons
+    manifest["preprocess_stale_groups"] = sorted(stale_reasons)
+
+    raw_root = str(incoming["captures"][0]["raw_root_relative_path"])
+    sync_directory(
+        capture.directory,
+        f"{destination_uri.rstrip('/')}/{raw_root}",
+        endpoint_url=endpoint_url,
+        exclude=SKANEA_EXCLUDES,
+    )
+    with tempfile.TemporaryDirectory(prefix="buildvision3d-skanea-manifest-") as temp_dir:
+        manifest_path = Path(temp_dir) / "sources_manifest.json"
+        write_json(manifest_path, manifest)
+        copy_file(
+            manifest_path,
+            f"{destination_uri.rstrip('/')}/sources_manifest.json",
+            endpoint_url=endpoint_url,
+        )
+    return manifest
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -215,12 +303,24 @@ def merge_with_existing_manifest(
     for source in incoming_sources:
         if isinstance(source, dict) and source.get("relative_path"):
             by_path[source["relative_path"]] = source
+    existing_captures = existing.get("captures") if isinstance(existing.get("captures"), list) else []
+    incoming_captures = incoming.get("captures") if isinstance(incoming.get("captures"), list) else []
+    captures_by_id = {
+        str(capture.get("capture_id")): capture
+        for capture in existing_captures
+        if isinstance(capture, dict) and capture.get("capture_id")
+    }
+    for capture in incoming_captures:
+        if isinstance(capture, dict) and capture.get("capture_id"):
+            captures_by_id[str(capture["capture_id"])] = capture
     return {
+        **existing,
         **incoming,
         "schema_version": max(int(existing.get("schema_version") or 0), int(incoming.get("schema_version") or 0), 3),
         "created_at": existing.get("created_at") or incoming.get("created_at"),
         "updated_at": utc_now(),
         "sources": [by_path[path] for path in sorted(by_path)],
+        "captures": [captures_by_id[capture_id] for capture_id in sorted(captures_by_id)],
     }
 
 
@@ -263,6 +363,16 @@ def remove_raw_source(
     safe_path = safe_relative_upload_path(relative_path).as_posix()
     manifest = load_manifest(destination_uri, endpoint_url)
     sources = manifest.get("sources") if isinstance(manifest.get("sources"), list) else []
+    target = next(
+        (
+            source
+            for source in sources
+            if isinstance(source, dict) and source.get("relative_path") == safe_path
+        ),
+        None,
+    )
+    if isinstance(target, dict) and target.get("source_kind") == "skanea_rgbd_frame":
+        raise ValueError("Skanea RGB-D frames belong to a capture and cannot be removed individually")
     remaining = [source for source in sources if isinstance(source, dict) and source.get("relative_path") != safe_path]
     if len(remaining) == len(sources):
         raise ValueError(f"Raw source is not present in the manifest: {safe_path}")

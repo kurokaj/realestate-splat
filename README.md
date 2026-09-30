@@ -49,8 +49,9 @@ The stack contains:
 
 ## Raw Upload
 
-The UI accepts drag-and-drop uploads. The CLI is useful for large files or
-retries:
+The UI accepts drag-and-drop uploads for ordinary media and has a separate
+folder picker for complete Skanea sessions. The CLI remains useful for large
+files, automation, or retries:
 
 ```bash
 python scripts/upload_raw_project.py \
@@ -62,6 +63,24 @@ python scripts/upload_raw_project.py \
 
 Uploads are additive. The API updates `sources_manifest.json`, preserves source
 metadata, and marks affected locations for preprocessing.
+
+A finalized Skanea schema-v2 RGB-D session is imported as a structured source;
+its RGB frames enter ordinary preprocessing while depth, confidence, pose, and
+calibration remain linked raw sidecars:
+
+```bash
+python scripts/import_skanea_capture.py \
+  --project-id dev-smoke \
+  --capture-dir /path/to/session-UUID \
+  --location living_room \
+  --destination-uri "r2://$R2_BUCKET/projects/dev-smoke/raw" \
+  --endpoint-url "$R2_ENDPOINT" \
+  --dry-run
+```
+
+Remove `--dry-run` only after inspecting the validation summary. The importer
+does not process depth, alter the source capture, or add any phone-side network
+behavior.
 
 ## Stage Contracts
 

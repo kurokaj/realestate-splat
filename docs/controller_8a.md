@@ -341,6 +341,12 @@ The COLMAP artifact publish side already lives in `scripts/run_colmap_stage.py`.
 The controller queues and launches that wrapper; it should not duplicate COLMAP
 artifacts in Postgres.
 
+The lifecycle adapter uses the Runpod REST API v2 at
+`https://api.runpod.io/v2`. Pod creation uses the v2 nested `gpu` request,
+array-form `entrypoint` and `cmd`, and no exposed ports, SSH, Jupyter, or global
+networking. The selected GPU in the UI remains the single requested GPU type.
+Create, status polling, and delete all use the same v2 client.
+
 Queue COLMAP through the API:
 
 ```bash
@@ -396,6 +402,13 @@ small `stage_runs.summary_json`:
 ```text
 provider
 provider_job_id
+runpod_api_version
+colmap_version
+repository_commit
+container_image
+input_manifest_sha256 / input_image_count
+intrinsics_source
+run_provenance_uri
 stage/status
 mode/matcher
 image_count
@@ -412,6 +425,15 @@ reconstruction_report_uri
 Full reports, sparse models, databases, and failed-run logs remain in R2 under
 `colmap/current/` and `colmap/runs/<stage_run_id>/`.
 
+Every real COLMAP run also writes `run_provenance.json` to both locations. It
+links the project and COLMAP run to each approved preprocess run, fingerprints
+the effective assembled `image_manifest.json`, records the exact post-blacklist
+image count, Runpod API version, container image, repository commit, bounded
+`colmap -h` output, effective settings, wrapper command, and executed COLMAP
+commands. Failed runs publish a partial provenance record whenever the wrapper
+can still reach R2. The project UI shows the compact identifying fields; the
+full JSON remains the audit record.
+
 ### RunPod cleanup watchdog
 
 The primary pod cleanup path is the worker's `finally` block around
@@ -419,6 +441,12 @@ The primary pod cleanup path is the worker's `finally` block around
 active wait loop attempts to delete the RunPod pod and clears
 `stage_runs.provider_pod_id` after successful deletion. `provider_job_id`
 remains as historical trace.
+
+The Pod-side execution guard records completion and failure separately. A
+restarted successful container waits for controller deletion, while a restarted
+failed container exits with its original failure code again. This prevents an
+argument/configuration failure from being mistaken for a completed run that
+waits indefinitely.
 
 The worker also runs a light watchdog at startup. It finds `runpod_colmap`
 stage runs with `provider_pod_id` still set when:

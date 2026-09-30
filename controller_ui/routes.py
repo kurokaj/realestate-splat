@@ -1262,7 +1262,13 @@ def approved_preprocess_group_outputs(raw_summary: dict[str, Any], preprocess_ru
         run = latest_by_group.get(group_key)
         if not run or run.get("status") != "approved" or not run.get("output_uri"):
             raise HTTPException(status_code=400, detail=f"Missing approved preprocess output for {group_key}")
-        outputs.append({"group_key": group_key, "output_uri": str(run["output_uri"]).rstrip("/")})
+        outputs.append(
+            {
+                "group_key": group_key,
+                "output_uri": str(run["output_uri"]).rstrip("/"),
+                "stage_run_id": str(run["id"]),
+            }
+        )
     return outputs
 
 
@@ -1316,7 +1322,6 @@ def colmap_review_context(
             visible_connections.append({**connection, "from": source, "to": target})
     has_heroes = any(group.get("kind") == "hero" for group in source_groups)
     coverage_group_count = sum(group.get("kind") in {"video", "coverage_images"} for group in source_groups)
-    video_group_count = sum(group.get("kind") == "video" for group in source_groups)
     ui_strategy = "single" if displayed_plan.get("strategy") == "single" else ("hybrid" if displayed_plan else "single")
     single_matching_style = displayed_plan.get("single_matching_style") or next(
         (stage.get("matching_style") for stage in displayed_plan.get("matching_stages", []) if stage.get("id") == "single_matcher"),
@@ -1376,11 +1381,11 @@ def colmap_review_context(
         "colmap_source_groups": source_groups,
         "matching_strategy_options": [
             {"value": "single", "label": "Single matcher (fallback)", "enabled": True},
-            {"value": "hybrid", "label": "Hybrid source matching", "enabled": video_group_count > 1 or has_heroes},
+            {"value": "hybrid", "label": "Hybrid source matching", "enabled": coverage_group_count > 1 or has_heroes},
         ],
         "matching_has_heroes": has_heroes,
-        "matching_has_multiple_coverages": video_group_count > 1,
-        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "registered_images", "registered_by_location", "registered_by_group", "point_count", "feature_extractor", "matching_type", "matcher", "sequential_loop_detection", "vocab_tree", "camera_model", "max_image_size", "mode", "container_disk_gb"]),
+        "matching_has_multiple_coverages": coverage_group_count > 1,
+        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "runpod_api_version", "colmap_version", "repository_commit", "container_image", "input_manifest_sha256", "input_image_count", "run_provenance_uri", "registered_images", "registered_by_location", "registered_by_group", "point_count", "feature_extractor", "matching_type", "matcher", "sequential_loop_detection", "vocab_tree", "camera_model", "intrinsics_source", "max_image_size", "mode", "container_disk_gb"]),
         "colmap_blacklist": load_colmap_blacklist(project),
     }
 
@@ -1432,6 +1437,7 @@ def source_manifest_from_raw_summary(raw_summary: dict[str, Any]) -> dict[str, A
                 "role": "hero" if role == "hero_image" else role,
                 "location": source.get("location"),
                 "image_name": source.get("relative_path") or source.get("source_id"),
+                "source_kind": source.get("source_kind"),
             }
         )
     return {"schema_version": 1, "images": images}
@@ -1597,6 +1603,16 @@ def raw_source_location_blocks(sources: list[dict[str, Any]]) -> list[dict[str, 
             block["coverage_count"] = 0
             block["coverage_group_key"] = f"location:{location}"
         block["hero_count"] = len(block["hero_images"])
+        block["skanea_frame_count"] = sum(
+            1
+            for source in block["coverage_images"]
+            if source.get("source_kind") == "skanea_rgbd_frame"
+        )
+        block["has_skanea_frames"] = block["skanea_frame_count"] > 0
+        block["skanea_passthrough"] = bool(block["coverage_images"]) and all(
+            source.get("source_kind") == "skanea_rgbd_frame"
+            for source in block["coverage_images"]
+        )
         blocks.append(block)
     return blocks
 
@@ -1649,6 +1665,7 @@ def compact_raw_sources(sources: list[Any], stale_groups: set[str]) -> list[dict
         rows.append(
             {
                 "source_id": source.get("source_id"),
+                "source_kind": source.get("source_kind"),
                 "relative_path": source.get("relative_path"),
                 "role": source.get("role"),
                 "camera_group": source.get("camera_group"),
@@ -2268,7 +2285,12 @@ def coverage_image_grid(capture_report: dict[str, Any], group_key: Optional[str]
         return {"items": [], "counts": {}}
     image_frames = [
         frame for frame in group_frames(capture_report, group_key, location)
-        if str(frame.get("source_id") or "") == "coverage_images"
+        if (
+            frame.get("role") == "coverage_image"
+            or frame.get("source_kind") == "skanea_rgbd_frame"
+            or str(frame.get("source_id") or "") == "coverage_images"
+            or (frame.get("source_image") and not frame.get("source_video"))
+        )
     ]
     items = []
     counts = Counter()
@@ -2435,7 +2457,7 @@ def image_hover_title(frame: dict[str, Any], decision: str) -> str:
 
 def image_decision(frame: dict[str, Any]) -> str:
     decision = str(frame.get("decision") or frame.get("selected_by") or "selected")
-    if decision in {"quality", "selected", "coverage_fallback", "force_keep"}:
+    if decision in {"quality", "selected", "coverage_fallback", "force_keep", "source_passthrough"}:
         return "selected"
     return "rejected"
 

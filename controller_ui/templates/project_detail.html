@@ -42,51 +42,83 @@
   <section class="tab-panel{% if active_tab == 'preprocess' %} is-active{% endif %}" data-tab-panel="preprocess">
     {% if active_tab == 'preprocess' %}
     <div class="grid two">
-      <div class="panel">
-        <div class="panel-heading">
-          <h2>Upload Raw Files</h2>
-          <span class="muted">R2 upload + sources manifest</span>
-        </div>
-        <form id="raw-upload-form" class="stack" data-project-id="{{ project.id }}">
-          <label>
-            Project display name
-            <input name="name" value="{{ project.name }}">
-          </label>
-          <label>
-            Destination URI
-            <input name="destination_uri" value="{{ project.raw_uri or default_raw_uri }}">
-          </label>
-          <label>
-            Batch location
-            <input name="batch_location" placeholder="livingroom / hallway / livingroom_kitchen">
-          </label>
-          <label>
-            Files
-            <input name="files" type="file" multiple required>
-          </label>
-          <div class="upload-table-wrap scroll-table-wrap" hidden>
-            <table class="compact" id="upload-metadata-table">
-              <thead>
-                <tr>
-                  <th>File</th>
-                  <th>Role</th>
-                  <th>COLMAP</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
+      <div class="stack">
+        <div class="panel">
+          <div class="panel-heading">
+            <h2>Upload Raw Files</h2>
+            <span class="muted">R2 upload + sources manifest</span>
           </div>
-          <input name="metadata_json" type="hidden">
-          <input name="override_video" type="hidden" value="false">
-          <div class="button-row">
-            <label class="checkbox-row">
-              <input type="checkbox" name="dry_run" value="true">
-              Dry run
+          <form id="raw-upload-form" class="stack" data-project-id="{{ project.id }}">
+            <label>
+              Project display name
+              <input name="name" value="{{ project.name }}">
             </label>
-            <button type="submit">Upload to R2</button>
+            <label>
+              Destination URI
+              <input name="destination_uri" value="{{ project.raw_uri or default_raw_uri }}">
+            </label>
+            <label>
+              Batch location
+              <input name="batch_location" placeholder="livingroom / hallway / livingroom_kitchen">
+            </label>
+            <label>
+              Files
+              <input name="files" type="file" multiple required>
+            </label>
+            <div class="upload-table-wrap scroll-table-wrap" hidden>
+              <table class="compact" id="upload-metadata-table">
+                <thead>
+                  <tr>
+                    <th>File</th>
+                    <th>Role</th>
+                    <th>COLMAP</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <input name="metadata_json" type="hidden">
+            <input name="override_video" type="hidden" value="false">
+            <div class="button-row">
+              <label class="checkbox-row">
+                <input type="checkbox" name="dry_run" value="true">
+                Dry run
+              </label>
+              <button type="submit">Upload to R2</button>
+            </div>
+            <pre class="result" id="upload-result" hidden></pre>
+          </form>
+        </div>
+        <div class="panel">
+          <div class="panel-heading">
+            <h2>Skanea Session Importer</h2>
+            <span class="muted">Structured RGB-D import</span>
           </div>
-          <pre class="result" id="upload-result" hidden></pre>
-        </form>
+          <p class="muted">Preserves RGB, depth, confidence, poses, and derived session artifacts.</p>
+          <form class="stack skanea-upload-form" data-project-id="{{ project.id }}">
+            <label>
+              Destination URI
+              <input name="destination_uri" value="{{ project.raw_uri or default_raw_uri }}">
+            </label>
+            <label>
+              Session location
+              <input name="location" placeholder="living_room / hallway" required>
+            </label>
+            <label>
+              Skanea session folder
+              <input name="session_folder" type="file" webkitdirectory directory multiple required>
+            </label>
+            <p class="muted folder-summary" data-folder-summary>Select one finalized session folder.</p>
+            <div class="button-row">
+              <label class="checkbox-row">
+                <input type="checkbox" name="dry_run" value="true">
+                Dry run
+              </label>
+              <button type="submit">Import session</button>
+            </div>
+            <pre class="result" data-skanea-upload-result hidden></pre>
+          </form>
+        </div>
       </div>
 
       <div class="panel">
@@ -197,6 +229,12 @@
             <input name="endpoint_url" type="hidden" value="{{ preprocess_form_values.endpoint_url or '' }}">
             <input name="group_settings_json" type="hidden">
             <section class="preprocess-group-card" data-preprocess-group="{{ block.group_key }}">
+              {% if block.has_skanea_frames %}
+                <p class="notice-inline">
+                  {{ block.skanea_frame_count }} Skanea RGB-D frame{% if block.skanea_frame_count != 1 %}s{% endif %} use automatic pass-through. They are scored for review but are not removed by FPS, quality, duplicate, or target-count filtering.
+                </p>
+              {% endif %}
+              {% if not block.skanea_passthrough %}
               <div class="grid three tight">
                 <label>
                   <span class="label-title">Candidate FPS <span class="info-dot" tabindex="0" data-tip="How many candidate frames per second to score from this video. Images ignore this.">i</span></span>
@@ -227,6 +265,7 @@
                   <input data-group-field="force_keep_interval" type="number" step="1" value="{{ block.form_values.force_keep_interval }}" {% if block.coverage_kind != 'video' %}disabled{% endif %}>
                 </label>
               </div>
+              {% endif %}
             </section>
             <div class="button-row">
               <label class="checkbox-row">
@@ -239,15 +278,23 @@
 
           <div class="source-review-grid">
             <section>
-              <h3>Last Parameters</h3>
-              {% if block.last_parameter_rows %}
+              {% if block.skanea_passthrough %}
+                <h3>Selection Policy</h3>
+                <dl class="stat-list compact-stat-list">
+                  <dt>Skanea RGB-D frames</dt><dd>Retain all</dd>
+                  <dt>Quality metrics</dt><dd>Review only</dd>
+                </dl>
+              {% else %}
+                <h3>Last Parameters</h3>
+                {% if block.last_parameter_rows %}
                 <dl class="stat-list compact-stat-list">
                   {% for row in block.last_parameter_rows %}
                     <dt>{{ row.label }}</dt><dd>{{ row.value }}</dd>
                   {% endfor %}
                 </dl>
-              {% else %}
-                <div class="timeline-empty">No completed run parameters yet.</div>
+                {% else %}
+                  <div class="timeline-empty">No completed run parameters yet.</div>
+                {% endif %}
               {% endif %}
 
               <h3>Coverage</h3>
@@ -290,7 +337,7 @@
                 {% endfor %}
               {% elif block.coverage_kind == "images" %}
                 <div class="legend">
-                  <span style="--legend-color:#2267c7;">selected</span>
+                  <span style="--legend-color:#2267c7;">{% if block.skanea_passthrough %}retained{% else %}selected{% endif %}</span>
                   <span style="--legend-color:rgba(101,112,128,0.45);">rejected</span>
                 </div>
                 {% if block.coverage_image_grid["items"] %}
@@ -388,7 +435,7 @@
       <form method="post" action="/ui/projects/{{ project.id }}/matching-strategy" class="stack" data-matching-strategy-form>
         <div class="grid two tight">
           <label>
-            <span class="label-title">Strategy <span class="info-dot" tabindex="0" data-tip="Single is the direct fallback. Hybrid strategies run each ordered video separately, then match only the connections shown below.">i</span></span>
+            <span class="label-title">Strategy <span class="info-dot" tabindex="0" data-tip="Single runs one matcher over all approved images. Hybrid runs each ordered video or Skanea capture separately, then matches only the connections shown below.">i</span></span>
             <select name="processing_strategy" data-colmap-processing-strategy>
               {% for option in matching_strategy_options %}
                 <option value="{{ option.value }}" {% if colmap_form_values.processing_strategy == option.value %}selected{% endif %} {% if not option.enabled %}disabled{% endif %}>{{ option.label }}</option>
@@ -396,7 +443,7 @@
             </select>
           </label>
           <label data-single-style-row>
-            <span class="label-title">Matching style <span class="info-dot" tabindex="0" data-tip="The single-source matching route: sequential for ordered video, exhaustive for complete pair coverage, or vocabulary tree for large unordered sets.">i</span></span>
+            <span class="label-title">Matching style <span class="info-dot" tabindex="0" data-tip="The single matching route: sequential for ordered video or Skanea frames, exhaustive for complete pair coverage, or vocabulary tree for large unordered sets.">i</span></span>
             <select name="single_matching_style" data-single-matching-style>
               <option value="sequential" {% if colmap_form_values.single_matching_style == "sequential" %}selected{% endif %}>Sequential</option>
               <option value="exhaustive" {% if colmap_form_values.single_matching_style == "exhaustive" %}selected{% endif %}>Exhaustive</option>
@@ -416,7 +463,7 @@
         {% if matching_has_multiple_coverages %}
         <div class="grid two tight">
           <label data-video-bridge-style-row>
-            <span class="label-title">Video bridge matching style <span class="info-dot" tabindex="0" data-tip="Matching used between connected video sources. Sequential matching is used inside each video; this style is used only across video-to-video connections.">i</span></span>
+            <span class="label-title">Coverage bridge matching style <span class="info-dot" tabindex="0" data-tip="Matching used between connected video or Skanea capture groups. Sequential matching is used inside each ordered source; this style is used only across connected groups.">i</span></span>
             <select name="video_bridge_matching_style" data-video-bridge-style>
               <option value="exhaustive" {% if colmap_form_values.video_bridge_matching_style != "vocab_tree" %}selected{% endif %}>Exhaustive</option>
               <option value="vocab_tree" {% if colmap_form_values.video_bridge_matching_style == "vocab_tree" %}selected{% endif %}>Vocabulary tree</option>
@@ -430,24 +477,24 @@
           <span class="checkbox-row">
             <input type="hidden" name="sequential_loop_detection" value="false">
             <input type="checkbox" name="sequential_loop_detection" value="true" {% if colmap_form_values.sequential_loop_detection is not sameas false %}checked{% endif %} data-matching-loop-detection>
-            <span class="muted">Use for ordered video sources.</span>
+            <span class="muted">Use for ordered video or Skanea sources.</span>
           </span>
         </label>
         <div class="matching-plan-editor" data-colmap-plan-editor>
           <div class="panel-heading">
             <h3>Overlapping coverage sources</h3>
-            <span class="muted">Connect videos that share visible space. Hero connections are generated from their preprocessing location.</span>
+            <span class="muted">Connect videos or Skanea captures that share visible space. Hero connections are generated from their preprocessing location.</span>
           </div>
           <div class="relation-editor-shell">
             <div
               class="drawflow relation-editor-canvas"
               data-relation-editor
-              data-relation-entries="{{ colmap_source_groups|selectattr('kind', 'equalto', 'video')|list|tojson|forceescape }}"
+              data-relation-entries="{{ colmap_source_groups|rejectattr('kind', 'equalto', 'hero')|list|tojson|forceescape }}"
               data-relation-project="{{ project.id }}"
             ></div>
           </div>
           <input type="hidden" name="matching_connections_json" value="{{ colmap_form_values.matching_connections_json or '[]' }}" data-colmap-connections-input>
-          <p class="muted">Drag blocks to arrange the graph. Connect the output handle of one video to the input handle of another. A line means the videos will receive targeted cross-source matching.</p>
+          <p class="muted">Drag blocks to arrange the graph. Connect the output handle of one coverage source to the input handle of another. A line means the sources will receive targeted cross-source matching.</p>
         </div>
         <button type="submit">Save Matching Strategy</button>
       </form>

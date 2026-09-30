@@ -147,10 +147,102 @@ function setupRawUploadForm(form) {
   });
 }
 
+function setupSkaneaUploadForm(form) {
+  if (form.dataset.uploadSetup === "true") return;
+  form.dataset.uploadSetup = "true";
+  const folderInput = form.querySelector('input[name="session_folder"]');
+  const summary = form.querySelector("[data-folder-summary]");
+  const result = form.querySelector("[data-skanea-upload-result]");
+  const submitButton = form.querySelector('button[type="submit"]');
+
+  folderInput.addEventListener("change", () => {
+    const files = Array.from(folderInput.files || []);
+    const bytes = files.reduce((total, file) => total + file.size, 0);
+    const roots = new Set(files.map((file) => (file.webkitRelativePath || file.name).split("/")[0]));
+    const size = bytes >= 1_000_000_000
+      ? `${(bytes / 1_000_000_000).toFixed(2)} GB`
+      : `${(bytes / 1_000_000).toFixed(1)} MB`;
+    summary.textContent = files.length
+      ? `${Array.from(roots).join(", ")} · ${files.length} files · ${size}`
+      : "Select one finalized session folder.";
+  });
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const files = Array.from(folderInput.files || []);
+    const captureManifests = files.filter((file) => (file.webkitRelativePath || file.name).endsWith("/capture.json") || file.name === "capture.json");
+    result.hidden = false;
+    if (captureManifests.length !== 1) {
+      result.textContent = `Select exactly one session folder containing capture.json (found ${captureManifests.length}).`;
+      return;
+    }
+
+    const payload = new FormData();
+    payload.append("location", form.querySelector('[name="location"]').value.trim());
+    payload.append("destination_uri", form.querySelector('[name="destination_uri"]').value.trim());
+    if (form.querySelector('[name="dry_run"]').checked) payload.append("dry_run", "true");
+    files.forEach((file) => payload.append("files", file, file.webkitRelativePath || file.name));
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/projects/${form.dataset.projectId}/raw/skanea`);
+    form.dataset.uploading = "true";
+    submitButton.disabled = true;
+    result.textContent = `Uploading ${files.length} session files...`;
+    xhr.upload.addEventListener("progress", (progressEvent) => {
+      if (!progressEvent.lengthComputable) return;
+      const percent = Math.round((progressEvent.loaded / progressEvent.total) * 100);
+      result.textContent = `Uploading session folder: ${percent}%`;
+    });
+    xhr.upload.addEventListener("load", () => {
+      result.textContent = "Upload received. Validating session and copying it to raw storage...";
+    });
+    xhr.addEventListener("load", () => {
+      form.dataset.uploading = "false";
+      submitButton.disabled = false;
+      let body;
+      try {
+        body = JSON.parse(xhr.responseText || "{}");
+      } catch (_error) {
+        body = { detail: xhr.responseText || "Invalid server response" };
+      }
+      const succeeded = xhr.status >= 200 && xhr.status < 300;
+      const isDryRun = body.dry_run === true;
+      if (succeeded) {
+        result.textContent = [
+          isDryRun ? "Validation successful" : "Session import successful",
+          `Capture: ${body.capture_id || "unknown"}`,
+          `Location: ${body.location || form.querySelector('[name="location"]').value.trim()}`,
+          `RGB-D frames: ${body.manifest_summary?.source_count ?? "unknown"}`,
+          `Session files: ${body.uploaded_file_count ?? files.length}`,
+          isDryRun ? "No project or R2 data was changed." : "The project manifest and raw storage were updated.",
+        ].join("\n");
+      } else {
+        const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail || body, null, 2);
+        result.textContent = `Validation failed\n${detail}`;
+      }
+      if (succeeded && !isDryRun) {
+        window.setTimeout(() => window.location.reload(), 900);
+      }
+    });
+    xhr.addEventListener("error", () => {
+      form.dataset.uploading = "false";
+      submitButton.disabled = false;
+      result.textContent = "Session upload failed because the server connection was interrupted.";
+    });
+    xhr.addEventListener("abort", () => {
+      form.dataset.uploading = "false";
+      submitButton.disabled = false;
+      result.textContent = "Session upload was cancelled.";
+    });
+    xhr.send(payload);
+  });
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("input", markFormEdited, true);
   document.addEventListener("change", markFormEdited, true);
   document.querySelectorAll("#raw-upload-form").forEach(setupRawUploadForm);
+  document.querySelectorAll(".skanea-upload-form").forEach(setupSkaneaUploadForm);
   document.querySelectorAll(".preprocess-queue-form").forEach((form) => {
     setupPreprocessDependencyState(form);
     setupPreprocessDraftPersistence(form);
@@ -332,6 +424,7 @@ function initializeTabPanel(panel) {
   }
   if (panel.dataset.tabPanel === "preprocess") {
     panel.querySelectorAll("#raw-upload-form").forEach(setupRawUploadForm);
+    panel.querySelectorAll(".skanea-upload-form").forEach(setupSkaneaUploadForm);
     panel.querySelectorAll(".preprocess-queue-form").forEach((form) => {
       setupPreprocessDependencyState(form);
       setupPreprocessDraftPersistence(form);
@@ -492,7 +585,10 @@ function setupAutoRefresh() {
     const active = document.activeElement;
     const editable = active?.matches?.("input, select, textarea");
     const hasDirtyPreprocessForm = Boolean(document.querySelector('.preprocess-queue-form[data-user-dirty="true"]'));
-    return Boolean(editable) || hasDirtyPreprocessForm || Date.now() - lastFormEditAt < 15000;
+    const hasSelectedFiles = Array.from(document.querySelectorAll('input[type="file"]'))
+      .some((input) => (input.files?.length || 0) > 0);
+    const hasActiveUpload = Boolean(document.querySelector('.skanea-upload-form[data-uploading="true"]'));
+    return Boolean(editable) || hasDirtyPreprocessForm || hasSelectedFiles || hasActiveUpload || Date.now() - lastFormEditAt < 15000;
   }
 
   async function poll() {

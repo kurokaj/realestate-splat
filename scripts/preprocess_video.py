@@ -148,6 +148,7 @@ class FrameRecord:
     source_image: Optional[str] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    source_passthrough: bool = False
 
 
 @dataclass
@@ -307,6 +308,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--jpeg-quality", type=int, default=92, help="JPEG quality for selected frames.")
     parser.add_argument(
+        "--passthrough-coverage-images-json",
+        type=Path,
+        help="Internal manifest of coverage-image filenames that must be retained without filtering.",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Replace existing generated JPEG frames in frames_selected/.",
@@ -418,6 +424,25 @@ def discover_coverage_images(input_dir: Path) -> List[Path]:
         for path in input_dir.iterdir()
         if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
     )
+
+
+def load_passthrough_coverage_image_names(path: Optional[Path]) -> set[str]:
+    if path is None:
+        return set()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Could not read passthrough coverage-image manifest: {exc}") from exc
+    values = payload.get("filenames") if isinstance(payload, dict) else None
+    if not isinstance(values, list):
+        raise SystemExit("Passthrough coverage-image manifest must contain a filenames list.")
+    names: set[str] = set()
+    for value in values:
+        name = str(value or "").strip()
+        if not name or Path(name).name != name:
+            raise SystemExit(f"Unsafe passthrough coverage-image filename: {value!r}")
+        names.add(name)
+    return names
 
 
 def discover_hero_images(input_dir: Path) -> List[Tuple[str, Path]]:
@@ -1015,8 +1040,10 @@ def process_coverage_images(
     image_paths: Sequence[Path],
     out_dir: Path,
     settings: Dict[str, Any],
+    passthrough_image_names: Optional[set[str]] = None,
 ) -> CoverageImageRunResult:
     source_id = "coverage_images"
+    passthrough_names = passthrough_image_names or set()
     records: List[FrameRecord] = []
     selected_initial: List[FrameRecord] = []
     last_selected_hash: Optional[int] = None
@@ -1028,11 +1055,12 @@ def process_coverage_images(
             raise SystemExit(f"Could not read coverage image: {image_path}")
 
         metrics, ahash_value, signature = score_frame(image)
-        reject_reason = first_quality_rejection(metrics, settings)
+        source_passthrough = image_path.name in passthrough_names
+        reject_reason = None if source_passthrough else first_quality_rejection(metrics, settings)
         hash_distance_value: Optional[int] = None
         pixel_difference_value: Optional[float] = None
 
-        if reject_reason is None and last_selected_hash is not None and last_selected_signature is not None:
+        if not source_passthrough and reject_reason is None and last_selected_hash is not None and last_selected_signature is not None:
             hash_distance_value = hamming_distance(ahash_value, last_selected_hash)
             pixel_difference_value = pixel_difference(signature, last_selected_signature)
             if (
@@ -1061,17 +1089,25 @@ def process_coverage_images(
             source_image=str(image_path),
             width=int(width),
             height=int(height),
+            source_passthrough=source_passthrough,
         )
         records.append(record)
 
         if reject_reason is None:
             selected_initial.append(record)
-            last_selected_hash = ahash_value
-            last_selected_signature = signature
+            if not source_passthrough:
+                last_selected_hash = ahash_value
+                last_selected_signature = signature
 
     target_max = int(settings["target_max"])
-    if len(selected_initial) > target_max:
-        selected_ids = {id(record) for record in best_quality_frames(selected_initial, target_max)}
+    passthrough_records = [record for record in selected_initial if record.source_passthrough]
+    filtered_records = [record for record in selected_initial if not record.source_passthrough]
+    if len(filtered_records) > target_max:
+        selected_ids = {
+            id(record) for record in passthrough_records
+        } | {
+            id(record) for record in best_quality_frames(filtered_records, target_max)
+        }
     else:
         selected_ids = {id(record) for record in selected_initial}
 
@@ -1079,7 +1115,7 @@ def process_coverage_images(
     for record in records:
         if id(record) in selected_ids:
             record.selected_final = True
-            record.selected_by = "quality"
+            record.selected_by = "source_passthrough" if record.source_passthrough else "quality"
             selected_final.append(record)
         elif record.selected_initial:
             record.reject_reason = "trimmed_after_target_max"
@@ -2350,6 +2386,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     validate_args(args, settings)
     sources = discover_video_sources(args)
     coverage_image_inputs = discover_coverage_images(args.input_dir)
+    passthrough_image_names = load_passthrough_coverage_image_names(args.passthrough_coverage_images_json)
+    unknown_passthrough_names = passthrough_image_names - {path.name for path in coverage_image_inputs}
+    if unknown_passthrough_names:
+        raise SystemExit(
+            "Passthrough coverage-image manifest references missing inputs: "
+            + ", ".join(sorted(unknown_passthrough_names))
+        )
+    settings["passthrough_coverage_image_count"] = len(passthrough_image_names)
     hero_inputs = discover_hero_images(args.input_dir)
     if not sources and not coverage_image_inputs and not hero_inputs:
         video_suffixes = ", ".join(sorted(VIDEO_SUFFIXES))
@@ -2372,7 +2416,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for source in sources
     ]
     coverage_image_result = (
-        process_coverage_images(coverage_image_inputs, out_dir, settings)
+        process_coverage_images(
+            coverage_image_inputs,
+            out_dir,
+            settings,
+            passthrough_image_names=passthrough_image_names,
+        )
         if coverage_image_inputs
         else None
     )

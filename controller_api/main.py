@@ -7,10 +7,11 @@ import json
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from psycopg.types.json import Jsonb
+from starlette.concurrency import run_in_threadpool
 
 from controller_common.config import default_r2_bucket
 from controller_common.db import (
@@ -32,6 +33,8 @@ from controller_common.raw_upload import (
     manifest_summary,
     metadata_overrides_by_filename,
     remove_raw_source,
+    strict_relative_upload_path,
+    upload_skanea_capture,
     upload_raw_directory,
     uploaded_file_names,
     grouped_upload_path,
@@ -328,6 +331,130 @@ def upload_project_raw(
             "uploaded_files": uploaded_file_names(saved_paths, upload_root),
             "manifest_summary": manifest_summary(manifest),
             "sources": manifest.get("sources", []),
+        }
+
+
+@app.post("/projects/{project_id}/raw/skanea", status_code=201)
+async def upload_project_skanea_session(project_id: str, request: Request) -> dict[str, Any]:
+    """Import one complete Skanea session selected as a browser directory."""
+    with connect() as conn:
+        project = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # A few minutes at 3 FPS already exceeds Starlette's default 1,000-file
+    # multipart limit because each frame has RGB, depth, and confidence files.
+    form = await request.form(max_files=50_000, max_fields=100)
+    uploads = [
+        value
+        for value in form.getlist("files")
+        if getattr(value, "filename", None) and getattr(value, "file", None)
+    ]
+    if not uploads:
+        raise HTTPException(status_code=400, detail="Select one Skanea session folder")
+
+    location = str(form.get("location") or "").strip()
+    if not location:
+        raise HTTPException(status_code=400, detail="Session location is required")
+    destination_uri = str(form.get("destination_uri") or project.get("raw_uri") or "").strip()
+    if not destination_uri:
+        destination_uri = f"r2://{default_r2_bucket()}/projects/{project_id}/raw"
+    require_r2_uri(destination_uri, "destination_uri")
+    endpoint_url = str(form.get("endpoint_url") or "").strip() or None
+    dry_run = str(form.get("dry_run") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    try:
+        result = await run_in_threadpool(
+            import_uploaded_skanea_session,
+            project_id=project_id,
+            uploads=uploads,
+            location=location,
+            destination_uri=destination_uri,
+            endpoint_url=endpoint_url,
+            dry_run=dry_run,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Skanea session import failed: {exc}") from exc
+
+    row = None
+    if not dry_run:
+        with connect() as conn:
+            row = conn.execute(
+                """
+                UPDATE projects
+                SET status = 'raw_uploaded', raw_uri = %s, updated_at = now()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (destination_uri, project_id),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=500, detail="Session imported but project update failed")
+
+    manifest = result["manifest"]
+    return {
+        "project": row_to_json(row) if row is not None else None,
+        "raw_uri": destination_uri,
+        "dry_run": dry_run,
+        "capture_id": result["capture_id"],
+        "location": location,
+        "uploaded_file_count": result["uploaded_file_count"],
+        "manifest_summary": manifest_summary(manifest),
+    }
+
+
+def import_uploaded_skanea_session(
+    *,
+    project_id: str,
+    uploads: list[Any],
+    location: str,
+    destination_uri: str,
+    endpoint_url: Optional[str],
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Materialize one directory upload, validate it, and run the importer."""
+    with tempfile.TemporaryDirectory(prefix=f"buildvision3d-skanea-upload-{project_id}-") as temp_dir:
+        upload_root = Path(temp_dir) / "incoming"
+        upload_root.mkdir(parents=True, exist_ok=True)
+        saved_paths: list[Path] = []
+        seen_paths: set[str] = set()
+        for upload in uploads:
+            relative_path = strict_relative_upload_path(str(upload.filename))
+            relative_key = relative_path.as_posix()
+            if relative_key in seen_paths:
+                raise ValueError(f"Session upload contains a duplicate path: {relative_key}")
+            seen_paths.add(relative_key)
+            saved_paths.append(write_upload_file(upload_root, relative_path, upload.file))
+
+        capture_manifests = [path for path in saved_paths if path.name == "capture.json"]
+        if len(capture_manifests) != 1:
+            raise ValueError(
+                f"Select exactly one Skanea session folder; found {len(capture_manifests)} capture.json files"
+            )
+        capture_dir = capture_manifests[0].parent
+        for path in saved_paths:
+            try:
+                path.relative_to(capture_dir)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Uploaded file is outside the selected session root: {path.relative_to(upload_root)}"
+                ) from exc
+
+        manifest = upload_skanea_capture(
+            project_id=project_id,
+            capture_dir=capture_dir,
+            location=location,
+            destination_uri=destination_uri,
+            endpoint_url=endpoint_url,
+            dry_run=dry_run,
+        )
+        capture_id = str(json.loads((capture_dir / "capture.json").read_text(encoding="utf-8"))["sessionID"])
+        return {
+            "manifest": manifest,
+            "capture_id": capture_id,
+            "uploaded_file_count": len(saved_paths),
         }
 
 

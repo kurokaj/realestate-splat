@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Sequence
 
+from controller_common.matching_plan import source_group_id
+
 
 def execute_matching_plan(
     *,
@@ -117,9 +119,7 @@ def resolve_group_image_names(
     for entry in image_manifest.get("images") or []:
         if not isinstance(entry, Mapping):
             continue
-        source_id = str(entry.get("source_id") or "unassigned")
-        camera_group = str(entry.get("camera_group") or "default")
-        group_id = f"{source_id}:{camera_group}"
+        group_id = source_group_id(entry)
         image_name = entry.get("image_name")
         if group_id in names and image_name:
             names[group_id].append(str(image_name))
