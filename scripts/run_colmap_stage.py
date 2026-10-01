@@ -505,7 +505,15 @@ def prepare_upload_payloads(
     current_dir.mkdir(parents=True, exist_ok=True)
     history_dir.mkdir(parents=True, exist_ok=True)
 
+    # Completed experiment runs retain the full reconstruction payload in both
+    # the mutable current view and the immutable run-history prefix. The two
+    # databases are required to reuse the exact feature/match graph in mapper
+    # comparisons; sparse binary/text models are required for filtering and
+    # visual comparison without rerunning COLMAP.
     copy_colmap_outputs(local_run_dir, current_dir)
+    copy_colmap_outputs(local_run_dir, history_dir)
+    copy_success_logs(local_run_dir, logs_dir, current_dir)
+    copy_success_logs(local_run_dir, logs_dir, history_dir)
     copy_if_exists(local_run_dir / "reports" / "image_manifest.json", current_dir / "image_manifest.json")
     copy_if_exists(local_run_dir / "reports" / "image_manifest.json", history_dir / "image_manifest.json")
     report_path = local_run_dir / "reports" / "reconstruction_report.json"
@@ -588,6 +596,11 @@ def copy_colmap_outputs(local_run_dir: Path, current_dir: Path) -> None:
     copy_tree(colmap_dir / "sparse_txt", current_dir / "sparse_txt")
 
 
+def copy_success_logs(local_run_dir: Path, logs_dir: Path, destination_dir: Path) -> None:
+    copy_tree(logs_dir, destination_dir / "logs" / "wrapper")
+    copy_tree(local_run_dir / "colmap" / "logs", destination_dir / "logs" / "colmap")
+
+
 def generate_viewer_payloads(*, current_dir: Path, history_dir: Path) -> None:
     sparse_txt_dir = current_dir / "sparse_txt"
     if not sparse_txt_dir.exists():
@@ -615,6 +628,8 @@ def prepare_failed_payloads(
     history_dir.mkdir(parents=True, exist_ok=True)
     copy_tree(logs_dir, current_dir / "logs")
     copy_tree(local_run_dir / "colmap" / "logs", current_dir / "logs" / "colmap")
+    copy_tree(logs_dir, history_dir / "logs")
+    copy_tree(local_run_dir / "colmap" / "logs", history_dir / "logs" / "colmap")
     report_path = local_run_dir / "reports" / "reconstruction_report.json"
     report = read_json(report_path)
     finished_at = utc_now()
@@ -690,6 +705,7 @@ def colmap_stage_summary(report: Dict[str, Any]) -> Dict[str, Any]:
 def upload_payloads(args: argparse.Namespace, stage_run_id: str, current_dir: Path, history_dir: Path) -> None:
     output = args.output_uri.rstrip("/")
     validate_complete_payload(current_dir)
+    validate_complete_payload(history_dir)
     sync_directory(
         current_dir,
         f"{output}/current",
@@ -736,30 +752,30 @@ def validate_complete_payload(current_dir: Path) -> None:
         "reconstruction_report.json",
         "run_provenance.json",
         "matching_plan.json",
+        "database.db",
         "viewer/sparse_scene.json",
         "sparse_txt/cameras.txt",
         "sparse_txt/images.txt",
         "sparse_txt/points3D.txt",
     ]
     missing = [relative_path for relative_path in required if not (current_dir / relative_path).is_file()]
+    report = read_json(current_dir / "reconstruction_report.json")
+    settings = report.get("settings") if isinstance(report.get("settings"), dict) else {}
+    if settings.get("mode") == "global" and not (current_dir / "database_global.db").is_file():
+        missing.append("database_global.db")
+    sparse_model_files = list((current_dir / "sparse").glob("*/points3D.bin"))
+    if not sparse_model_files:
+        missing.append("sparse/*/points3D.bin")
     if missing:
         raise FileNotFoundError(f"COLMAP stage payload is incomplete; missing: {', '.join(missing)}")
 
 
 def uploaded_objects(current_dir: Path) -> list[str]:
-    expected = [
-        "stage_result.json",
-        "image_manifest.json",
-        "reconstruction_report.json",
-        "run_provenance.json",
-        "matching_plan.json",
-        "matching_results.json",
-        "viewer/sparse_scene.json",
-        "sparse_txt/cameras.txt",
-        "sparse_txt/images.txt",
-        "sparse_txt/points3D.txt",
-    ]
-    return [relative_path for relative_path in expected if (current_dir / relative_path).is_file()]
+    return sorted(
+        str(path.relative_to(current_dir))
+        for path in current_dir.rglob("*")
+        if path.is_file() and path.name != "upload_complete.json"
+    )
 
 
 def copy_if_exists(source: Path, destination: Path) -> None:

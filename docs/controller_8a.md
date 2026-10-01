@@ -422,8 +422,14 @@ stage_result_uri
 reconstruction_report_uri
 ```
 
-Full reports, sparse models, databases, and failed-run logs remain in R2 under
-`colmap/current/` and `colmap/runs/<stage_run_id>/`.
+Completed experimental runs retain full reports, both source and calibrated
+databases, binary/text sparse models, viewer data, and available logs under
+both `colmap/current/` and the immutable
+`colmap/runs/<stage_run_id>/` prefix. This intentionally uses more R2 storage
+so mapper, filtering, pose-alignment, and training comparisons can reuse the
+exact same features, matches, cameras, and points without rerunning COLMAP.
+Failed runs retain their reports, provenance, and available logs but do not
+promise a complete reconstruction snapshot.
 
 Every real COLMAP run also writes `run_provenance.json` to both locations. It
 links the project and COLMAP run to each approved preprocess run, fingerprints

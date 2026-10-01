@@ -90,6 +90,39 @@ Start the matching/reconstruction job in the UI. When it finishes, open the reco
 - which frame IDs failed to register;
 - preservation of image-name to Skanea-frame identity.
 
+### Run A result — 2026-09-30
+
+- Stage run: `colmap_run_ac7df867a9d8`
+- Immutable artifact prefix: `r2://buildvision3d-pipeline/projects/first_lidar_test/colmap/runs/colmap_run_ac7df867a9d8`
+- Runtime: COLMAP 4.0.4 in `docker.io/blackjokuro/buildvision3d-colmap-gpu:cuda12.4-colmap-r2-runtime-onnx-cudnn-pycolmap-sm75-sm86-sm89-r1`
+- Repository commit: `c7187178cf983c87512a563e9f832eebcada34e7`
+- Input: 316 images; manifest SHA-256 `9ae0ebee9f155a4d45693520e583d1ad323f2802d5457e754c873a8b58645054`
+- Registered: 278/316 images (87.97%); 38 unregistered
+- Selected model: `colmap/sparse/0`; 84,052 sparse points; 497,506 observations
+- Mean track length: 5.919026; mean observations per registered image: 1,789.589928
+- Reported mean reprojection error: 0.000531 px. Treat this as unverified until the analyzer/parser and a distribution metric are checked; it is unusually small.
+- Intrinsics source: `colmap_image_reader_estimated`; ARKit intrinsics were not seeded.
+- Command durations: feature extraction 14.328 s; sequential matching 101.324 s; view-graph calibration 17.166 s; Global Mapper 254.070 s; conversion 4.049 s; analyzer 0.582 s.
+- Wrapper duration: approximately 407.4 s. Controller end-to-end duration, including Pod startup, transfers, and publication: approximately 539.5 s.
+- Matching: sequential with loop detection; mapper: Global; ARKit poses and LiDAR depth unused.
+- Still required before Gate 1: inspect the sparse model and camera trajectory; enumerate the 38 unregistered frame IDs; confirm image-to-Skanea-frame identity; record disconnected-model evidence and reprojection-error distribution if available.
+
+### Planned sparse-point filtering comparison
+
+Preserve the unmodified Run A sparse model as the raw control. After the
+camera-pose experiments, generate versioned derivative models with COLMAP-native
+multi-view filtering and compare them in the same viewer:
+
+- **Raw:** no post-filtering.
+- **Conservative:** minimum track length 3, maximum reprojection error 2 px, minimum triangulation angle 1.5 degrees.
+- **Comparison:** minimum track length 4, maximum reprojection error 2 px, minimum triangulation angle 2 degrees.
+
+Record retained point/observation counts, per-criterion removals, camera-count
+invariance, and visual changes to the below-floor and outside-wall floaters.
+Do not replace the raw model. Apply the same filtering contract to candidate
+mapper outputs before selecting a downstream splat-initialization model. Later,
+add high-confidence LiDAR agreement as a stronger, separate geometric test.
+
 ### Gate 1
 
 Do not reject the pipeline merely because blank-wall frames are missing. This run is the control. Stop and repair the visual pipeline only if outputs are corrupt, frame identity is lost, no useful connected model is produced, or the trajectory is clearly invalid.
