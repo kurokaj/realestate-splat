@@ -22,13 +22,13 @@ The immediate goal is not to force LiDAR into COLMAP. It is to determine, with c
 
 | ID | Reconstruction | Question answered |
 | --- | --- | --- |
-| A | Visual-only Global mapper | What can the existing verified path reconstruct unaided? |
-| B | Visual-only Incremental mapper | What changes because of mapper choice alone? |
-| C | Incremental pose-prior mapper | What do conservative ARKit position priors add over B? |
-| D | Hybrid camera set | Can aligned ARKit poses safely retain visually unregistered frames? |
+| A | Visual-only Global mapper — 278/316 registered in the first run | What can the existing verified path reconstruct unaided? |
+| A_hybrid | Run A plus aligned ARKit poses for visually unregistered frames | Can the strongest visual reconstruction safely retain the remaining Skanea RGB-D frames? |
+| B | Visual-only Incremental mapper — 244/316 registered in the first run | What changes because of mapper choice alone? |
+| C | Incremental `pose_prior_mapper` | What do conservative ARKit position priors add over B, and can C match or exceed A? |
 | E | High-confidence depth overlay | Does the aligned depth agree with the visual model and across frames? |
 
-Comparing A directly with C is useful operationally but does not isolate pose-prior value because both mapper type and prior use change. The controlled prior comparison is B versus C.
+Compare C against both controls. B versus C isolates the value of pose priors within the Incremental family: C must improve on B's 244/316 to demonstrate that the priors helped. A versus C is the operational benchmark: C must reach or exceed A's 278/316 before replacing Global on registration coverage. A_hybrid is a separate derived result, not another COLMAP mapper run; registered cameras retain COLMAP poses and only missing eligible cameras receive aligned ARKit poses with explicit provenance.
 
 ## Step 0 — Freeze the test input and add run provenance
 
@@ -131,6 +131,12 @@ Do not reject the pipeline merely because blank-wall frames are missing. This ru
 
 ### Implementation
 
+Implemented: the dependency-light alignment core and CLI pair exact image-manifest identities with COLMAP text-model cameras, estimate a deterministic robust per-capture similarity, validate the documented ARKit/OpenCV camera-axis conversion, and emit per-frame position/angular residuals plus compact run summaries. Future COLMAP runs create `analysis/arkit_alignment.json` automatically; manifests without Skanea ARKit metadata are reported as `not_applicable` without changing or blocking the generic pipeline. The COLMAP UI can backfill the diagnostic from any preserved completed run without starting a GPU Pod or modifying that model.
+
+The selected-run trajectory viewer loads the immutable sparse model and matching alignment artifact together. It overlays the sampled sparse cloud, COLMAP trajectory, aligned full ARKit trajectory, strict hybrid trajectory, accepted/rejected correspondence links, and ARKit-only frames that COLMAP did not register. Layers and an outlier-only mode can be toggled independently, and clicking a trajectory point displays its frame identity plus positional and angular disagreement. The browser renderer uses locally vendored, pinned Three.js r186 modules; it performs no runtime CDN fetch. For a single reference capture, the sparse cloud and every trajectory are transformed through the inverse alignment into the metric, gravity-aligned ARKit frame so the floor/ceiling orientation is meaningful.
+
+Camera direction glyphs use the COLMAP/OpenCV positive-Z optical axis and an explicit wireframe frustum: the pose point is the apex and the rectangular image plane is in front of it. Schema-v1 sparse-viewer artifacts contained the opposite COLMAP forward vector; the controller upgrades those vectors in memory while new artifacts use schema v2. This correction also removes a false near-180-degree Hybrid direction change when pose provenance switches between COLMAP and ARKit.
+
 For frames registered in Run A:
 
 1. Convert the stored ARKit column-major camera-to-world transform into the explicitly documented camera convention used by the diagnostic code.
@@ -149,6 +155,15 @@ Open Run A and select **Analyze ARKit alignment**. Inspect the overlaid trajecto
 ### Gate 2
 
 Proceed only if the trajectory orientation, handedness, scale, and direction are visibly correct. A numerically small residual is not sufficient if the coordinate conversion is mirrored or axes are wrong. Record the first-run residuals as observations; do not invent a permanent acceptance threshold from one capture.
+
+### Initial numerical validation — 2026-10-01
+
+The new analyzer was run read-only against both preserved models before enabling propagation:
+
+- **A / Global:** 278 correspondences, 258 robust inliers (92.81%), scale 3.653176 COLMAP units per meter, position median 0.0169 m and p95 0.0575 m, angular median 0.698° and p95 2.203°. Twenty correspondences were rejected by the initial 5%-of-trajectory-extent RANSAC threshold and require inspection in the trajectory overlay.
+- **B / Incremental:** 244 correspondences, all 244 inliers, scale 3.759553 COLMAP units per meter, position median 0.0167 m and p95 0.0378 m, angular median 0.625° and p95 1.127°.
+
+The independently reconstructed scales differ, as expected for visual SfM's arbitrary gauge, while the low position and angular residuals in both runs support the implemented transform direction and camera-axis conversion. The Run A viewer now exposes all 316 ARKit poses, 278 COLMAP poses, 258 accepted pairs, 20 rejected pairs, and 38 ARKit-only frames. This is strong evidence for continuing with A_hybrid, but operator inspection of the overlay and local checks around A's rejected anchors remain mandatory before propagating the 38 missing cameras.
 
 ## Step 3 — Run B: visual-only Incremental control
 
@@ -171,11 +186,30 @@ Start Run B and inspect it using the same checklist as Run A.
 
 Confirm that Run B completed with an inspectable model and report. Keep both A and B regardless of which looks better. B is the direct control for the pose-prior mapper.
 
+### Run B result — 2026-10-01
+
+- Stage run: `colmap_run_b7e49f21d4b6`
+- Immutable artifact prefix: `r2://buildvision3d-pipeline/projects/first_lidar_test/colmap/runs/colmap_run_b7e49f21d4b6`
+- Provider job: `vtf368paat8eqw`; repository commit `e03b7017ddf48498a9c8ee460a352d52fe381cc9`
+- Runtime: COLMAP 4.0.4 in the same `cuda12.4-colmap-r2-runtime-onnx-cudnn-pycolmap-sm75-sm86-sm89-r1` image as A
+- Input: the same 316 images and manifest SHA-256 `9ae0ebee9f155a4d45693520e583d1ad323f2802d5457e754c873a8b58645054`
+- Registered: 244/316 images (77.22%); 72 unregistered, which is 34 fewer registered cameras than A
+- Selected model: `colmap/sparse/0`; 87,075 sparse points
+- Mean track length: 5.841102; mean observations per registered image: 2,084.483607
+- Mean reprojection error: 0.792875 px
+- End-to-end runtime observed by the operator: approximately 24 minutes
+- Interpretation: B has a somewhat denser connected core but materially worse frame coverage. Keep A as the strongest visual-only operational result; use B as the controlled baseline for C.
+
 ## Step 4 — Run C: conservative ARKit position priors
 
 ### Implementation
 
-Add an experimental **Incremental + ARKit position priors** mapper mode using COLMAP's documented pose-prior path for the recorded runtime version.
+Implemented: the COLMAP UI exposes **pose-prior incremental** as a reusable,
+standalone mapper mode using COLMAP's documented `pose_prior_mapper` path for
+the recorded runtime version. It performs a complete fresh feature-extraction
+and matching run with the selected settings, writes ARKit position priors into
+that run's database, and then maps from those inputs. Run C therefore does not
+depend on or mutate Run A, Run B, or either run's preserved database.
 
 - Import only camera positions as formal priors unless the runtime is proven to support another constraint correctly.
 - Preserve the original full ARKit transforms for diagnostics, but do not imply that COLMAP used the rotations as constraints.
@@ -184,11 +218,24 @@ Add an experimental **Incremental + ARKit position priors** mapper mode using CO
 - Make the actual covariance/standard deviation and all COLMAP options visible in the run report.
 - Do not lower visual registration inlier requirements merely to increase the registered-frame count.
 
+The named isotropic position presets are **Strong = 5 cm**, **Conservative =
+10 cm**, and **Relaxed = 25 cm**. The first Run C uses Conservative. Database
+covariance is retained (`overwrite_priors_covariance=0`), the robust prior loss
+is enabled, and its loss scale is recorded as `7.815`. Each prior uses the
+translation from Skanea's column-major ARKit camera-to-world transform in a
+Cartesian, metric coordinate system. Multiple rooms are supported when they
+belong to one continuous Skanea capture; combining unrelated capture origins is
+rejected until cross-capture alignment is implemented.
+
 The first run uses the middle, conservative uncertainty preset. Stronger or weaker presets are only run after inspecting the result.
 
 ### Operator action
 
-Use the same matching configuration as Run B and choose **Incremental + ARKit position priors**. Select the default conservative preset, start Run C, and inspect its model and report.
+Use the same sequential matching configuration as Run B and choose
+**pose-prior incremental**. Select the default **Conservative · 10 cm** preset,
+start Run C, and inspect its model and report. Feature extraction and matching
+will run again by design, making C a complete production-usable mode rather than
+a one-off mapper-only experiment.
 
 ### Compare B versus C
 
@@ -205,24 +252,36 @@ Use the same matching configuration as Run B and choose **Incremental + ARKit po
 
 Adopt position priors as an available mode only if C improves registration, stability, or metric behavior without visibly degrading reprojection or geometry. Keep visual-only modes available. A truly featureless image is not expected to register from a position prior alone.
 
-## Step 5 — Build Run D: hybrid camera set for unregistered frames
+## Step 5 — Build A_hybrid: Run A plus aligned ARKit cameras
 
 ### Implementation
 
-Use the accepted visual reconstruction and its robust ARKit-to-COLMAP alignment to create a derived camera set:
+Implemented: the UI exposes **Build A_hybrid Camera Set** for an analyzed COLMAP run. The builder produces a deterministic immutable JSON artifact under the run-specific `analyses/arkit_hybrid` prefix without modifying the source sparse model. Every frame retains image, capture, intrinsics, depth, and confidence identity; stores full camera-to-world transforms in both COLMAP/OpenCV and metric reference-ARKit conventions; and records `colmap_registered` or `arkit_propagated` provenance plus explicit replacement reasons and residuals. The stage summary stores the artifact URI, selection fingerprint, counts, and transition-validation result.
 
-- registered frames keep their refined COLMAP poses and `colmap_registered` provenance;
-- unregistered Skanea frames receive transformed ARKit poses with `arkit_propagated` provenance;
+Implemented: every COLMAP↔ARKit boundary is compared with the original ARKit inter-frame motion. A boundary is marked for review when the selected motion differs by more than 10 cm or 5 degrees. The read-only Run A validation produced 316 frames (193 COLMAP and 123 ARKit), six source transitions, zero transitions requiring review, a maximum translation-step delta of 2.389 cm, and a maximum angular-step delta of 0.541 degrees. This validation did not publish the artifact; the operator creates it from the UI after approving the preview.
+
+### B_hybrid diagnostic artifact — 2026-10-04
+
+Before publishing A_hybrid, the workflow produced a valid derived artifact from Run B (`colmap_run_b7e49f21d4b6`). It contains all 316 frames, with 220 retained COLMAP poses and 96 ARKit replacements, four source transitions, and zero transitions requiring review. The immutable artifact is `r2://buildvision3d-pipeline/projects/first_lidar_test/colmap/analyses/arkit_hybrid/colmap_run_b7e49f21d4b6/arkit_hybrid_23c60721b3cc/hybrid_camera_set.json`. Keep it as the B_hybrid comparison; it does not modify Run B and does not replace the required A_hybrid result.
+
+Use Run A, or a later visual reconstruction that demonstrably exceeds it, and its robust ARKit-to-COLMAP alignment to create a derived camera set:
+
+- stable registered frames keep their refined COLMAP poses and `colmap_registered` provenance;
+- unregistered and alignment-rejected Skanea frames receive transformed ARKit poses with `arkit_propagated` provenance;
+- registered frames that exceed the stricter 5 cm positional or 3 degree angular diagnostic limit receive transformed ARKit poses;
+- consecutive unstable runs are expanded by a five-frame guard band on both sides because the visual trajectory may begin drifting before a correspondence crosses the hard limit; isolated missing frames do not expand into stable neighbors;
 - every propagated pose points back to the alignment artifact and source frame;
 - frames are excluded rather than propagated when the capture-level alignment is rejected;
 - initial acceptance uses capture-level alignment plus local checks against neighboring registered anchor frames;
 - the derived camera set never mutates the source COLMAP model.
 
+The first implementation exposes this selection as a purple preview trajectory and records `hybrid_pose_source` plus explicit replacement reasons per frame. These thresholds are an inspectable first-capture policy, not a permanent universal acceptance rule; revise them only from additional captured-room evidence.
+
 Do not run ordinary bundle adjustment over all propagated cameras and assume it has validated them. With no visual tracks, there is no reprojection evidence to refine those cameras.
 
 ### Operator action
 
-From the accepted reconstruction, select **Build hybrid camera set**. The UI must preview counts before creation:
+From the accepted reconstruction, select **Build A_hybrid camera set**. The UI must preview counts before creation:
 
 - COLMAP-registered cameras;
 - eligible ARKit-propagated cameras;
@@ -238,12 +297,48 @@ Proceed only if propagated cameras remain temporally and spatially continuous wi
 
 ### Implementation
 
+Implemented for operator validation: the selected COLMAP run now exposes **Build Depth Diagnostic** after an immutable hybrid camera set exists and all source transitions pass. The operation downloads only the referenced raw depth/confidence sidecars, selects confidence value 2, rejects non-finite and out-of-range samples, scales RGB intrinsics to the depth grid, and back-projects through each frame's selected metric reference-frame pose. It does not start a GPU pod and never modifies raw capture objects.
+
+The artifact records per-frame and per-pose-source counts, deterministic settings and provenance, multi-frame agreement-cell coverage, frame-centroid spread, a local surface-normal spread/thickness proxy, and the centroid offset where COLMAP-pose and propagated-ARKit-pose depth overlap. A separate source-aware 3 cm voxel cloud is deterministically capped at 150,000 browser points. The Three.js view exposes independent COLMAP-pose and ARKit-pose depth layers alongside COLMAP points and hybrid cameras. This implementation adds no third-party dependency: it reuses NumPy already required by ARKit alignment and the vendored Three.js viewer.
+
+The first live A_hybrid artifact still requires operator execution and visual inspection before Gate 6 can pass. The thickness and overlap values are diagnostics, not calibrated LiDAR accuracy guarantees.
+
+### Run E result for A_hybrid — 2026-10-04
+
+- Source hybrid artifact: `arkit_hybrid_d523b4bdb1b2` from Run A (`colmap_run_ac7df867a9d8`)
+- Depth artifact: `r2://buildvision3d-pipeline/projects/first_lidar_test/colmap/analyses/depth_diagnostic/colmap_run_ac7df867a9d8/arkit_hybrid_d523b4bdb1b2/depth_diagnostic_a2a9a46c7491/depth_diagnostic.json`
+- Processed: 316/316 frames with zero skips
+- Valid high-confidence depth samples: 12,325,274; stride-2 back-projected samples: 3,083,416
+- Source-aware 3 cm voxels: 169,467; browser sample: 150,000 points
+- Multi-frame sample coverage in 10 cm agreement cells: 99.87%
+- Frame-centroid spread p95: 3.49 cm
+- Local surface-normal spread/thickness proxy p95: 1.68 cm
+- COLMAP-pose versus propagated-ARKit-pose centroid offset p95: 4.62 cm
+- Operator visual inspection: geometry looks coherent and closely matches the known-good ARKit point cloud; no obvious source-transition splitting was reported.
+
+Gate 6 passes provisionally for A_hybrid. The near-complete multi-frame support and centimeter-scale spread are consistent with a usable indoor LiDAR overlay, but the metrics are tied to the configured 10 cm agreement cells and are not absolute sensor-accuracy estimates. Run the identical diagnostic on B_hybrid as a low-cost comparison before choosing between the two hybrid camera sets; this requires no GPU pod. C remains the subsequent pose-prior mapper experiment.
+
+### Run E result for B_hybrid — 2026-10-04
+
+- Source hybrid artifact: `arkit_hybrid_23c60721b3cc` from Run B (`colmap_run_b7e49f21d4b6`)
+- Depth artifact: `r2://buildvision3d-pipeline/projects/first_lidar_test/colmap/analyses/depth_diagnostic/colmap_run_b7e49f21d4b6/arkit_hybrid_23c60721b3cc/depth_diagnostic_50433d497cb6/depth_diagnostic.json`
+- Processed: 316/316 frames with zero skips
+- Valid high-confidence depth samples: 12,325,274; stride-2 back-projected samples: 3,083,416
+- Source-aware 3 cm voxels: 164,038; browser sample: 150,000 points
+- Multi-frame sample coverage in 10 cm agreement cells: 99.86%
+- Frame-centroid spread p95: 3.41 cm
+- Local surface-normal spread/thickness proxy p95: 1.72 cm
+- COLMAP-pose versus propagated-ARKit-pose centroid offset p95: 4.69 cm
+- Operator visual inspection: overall geometry is effectively the same as A_hybrid. Both visual reconstructions contain similarly bad COLMAP outliers, but at different locations.
+
+The A/B depth comparison is a practical tie. Relative to A, B changes centroid spread by -0.08 cm, thickness proxy by +0.04 cm, source offset by +0.07 cm, and multi-frame coverage by -0.01 percentage points. These sub-millimeter, opposing changes are not meaningful evidence that either hybrid is geometrically superior. Keep A_hybrid as the primary path because Run A registered 278 visual cameras versus B's 244; retain B_hybrid as the completed control. The differently located mapper outliers reinforce the decision to preserve provenance and replace guarded unstable visual segments rather than trusting either mapper's complete trajectory unconditionally.
+
 For each accepted Skanea camera:
 
 1. Read the raw 256 × 192 float32 depth and uint8 confidence maps.
 2. Scale the 1920 × 1440 RGB intrinsics to the depth grid.
 3. Start with high-confidence, finite, physically plausible samples only.
-4. Back-project samples using the camera provenance selected in Run D.
+4. Back-project samples using the camera provenance selected in A_hybrid.
 5. Preserve capture ID, frame index, confidence, and camera provenance on derived statistics.
 6. Produce a voxel-downsampled diagnostic overlay without altering raw depth.
 7. Calculate cross-frame surface disagreement and wall/surface thickness statistics where observations overlap.
@@ -290,7 +385,7 @@ The practical UI sequence is:
 4. Run and inspect visual Incremental control B.
 5. Run and compare position-prior reconstruction C.
 6. Choose the accepted visual reconstruction using the comparison evidence.
-7. Build and inspect hybrid camera set D.
+7. Build and inspect A_hybrid.
 8. Build and inspect high-confidence depth overlay E.
 9. Only then start downstream training ablations.
 

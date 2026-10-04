@@ -454,6 +454,19 @@ label.is-disabled select:disabled {
   top: 12px;
 }
 
+.viewer-selection {
+  background: rgba(9, 14, 16, 0.74);
+  border: 1px solid rgba(113, 136, 147, 0.25);
+  border-radius: 6px;
+  color: #b8c8d0;
+  font-size: 11px;
+  line-height: 1.45;
+  margin-top: 8px;
+  max-width: min(420px, calc(100vw - 72px));
+  padding: 7px 9px;
+  white-space: pre-line;
+}
+
 .viewer-legend {
   background: rgba(9, 14, 16, 0.72);
   border: 1px solid rgba(113, 136, 147, 0.25);
@@ -503,6 +516,12 @@ label.is-disabled select:disabled {
   gap: 8px;
   position: absolute;
   right: 12px;
+}
+
+.viewer-toolbar-layers {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: min(620px, calc(100% - 24px));
 }
 
 .viewer-button {

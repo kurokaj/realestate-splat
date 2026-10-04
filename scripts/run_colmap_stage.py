@@ -84,7 +84,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--matching-plan-uri",
         help="R2 JSON matching plan. It is downloaded into the temporary COLMAP run before execution.",
     )
-    parser.add_argument("--mode", choices=["incremental", "global"], default="global", help="COLMAP mapper mode.")
+    parser.add_argument(
+        "--mode",
+        choices=["incremental", "global", "pose_prior_incremental"],
+        default="global",
+        help="COLMAP mapper mode.",
+    )
+    parser.add_argument(
+        "--pose-prior-uncertainty",
+        choices=["strong", "conservative", "relaxed"],
+        default="conservative",
+        help="Named ARKit position-prior uncertainty preset.",
+    )
     parser.add_argument(
         "--feature-extractor",
         choices=["SIFT", "sift", "ALIKED_N16ROT", "ALIKED_N32"],
@@ -233,7 +244,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         provenance_context = collect_provenance_context(args, input_dir, group_outputs)
 
-        progress.update(12, "feature_extraction", "Starting COLMAP feature extraction", force=True)
+        progress.update(
+            12,
+            "feature_extraction",
+            "Starting COLMAP feature extraction"
+            + (" for pose-prior incremental mapping" if args.mode == "pose_prior_incremental" else ""),
+            force=True,
+        )
         colmap_result = run_colmap(args, local_run_dir, logs_dir, progress)
         progress.update(90, "artifacts", "Preparing reconstruction artifacts", force=True)
         prepare_upload_payloads(
@@ -414,6 +431,8 @@ def build_colmap_command(args: argparse.Namespace, local_run_dir: Path) -> List[
         str(args.colmap_bin),
         "--mode",
         args.mode,
+        "--pose-prior-uncertainty",
+        args.pose_prior_uncertainty,
         "--feature-extractor",
         args.feature_extractor,
         "--matcher",
@@ -520,6 +539,12 @@ def prepare_upload_payloads(
     if not report_path.exists():
         raise FileNotFoundError(f"COLMAP finished without reconstruction_report.json: {report_path}")
     report = read_json(report_path)
+    alignment_report = generate_arkit_alignment_diagnostic(local_run_dir, stage_run_id)
+    from realestate_splat.arkit_alignment import compact_alignment_summary
+
+    alignment_summary = compact_alignment_summary(alignment_report)
+    alignment_summary["artifact"] = "analysis/arkit_alignment.json"
+    report["arkit_alignment"] = alignment_summary
     finished_at = utc_now()
     provenance = build_colmap_run_provenance(
         project_id=project_id,
@@ -553,6 +578,14 @@ def prepare_upload_payloads(
     copy_if_exists(
         local_run_dir / "colmap" / "logs" / "matching_stages" / "matching_results.json",
         history_dir / "matching_results.json",
+    )
+    copy_if_exists(
+        local_run_dir / "reports" / "arkit_alignment.json",
+        current_dir / "analysis" / "arkit_alignment.json",
+    )
+    copy_if_exists(
+        local_run_dir / "reports" / "arkit_alignment.json",
+        history_dir / "analysis" / "arkit_alignment.json",
     )
     generate_viewer_payloads(current_dir=current_dir, history_dir=history_dir)
 
@@ -607,6 +640,38 @@ def generate_viewer_payloads(*, current_dir: Path, history_dir: Path) -> None:
         return
     viewer_path = write_sparse_viewer_payload(sparse_txt_dir, current_dir / "viewer" / "sparse_scene.json")
     copy_if_exists(viewer_path, history_dir / "viewer" / "sparse_scene.json")
+
+
+def generate_arkit_alignment_diagnostic(local_run_dir: Path, stage_run_id: str) -> dict[str, Any]:
+    from realestate_splat.arkit_alignment import analyze_arkit_alignment_files
+
+    output_path = local_run_dir / "reports" / "arkit_alignment.json"
+    manifest_path = local_run_dir / "reports" / "image_manifest.json"
+    images_path = local_run_dir / "colmap" / "sparse_txt" / "images.txt"
+    try:
+        report = analyze_arkit_alignment_files(
+            manifest_path,
+            images_path,
+            source_run_id=stage_run_id,
+        )
+    except Exception as exc:
+        # Alignment is an opt-in diagnostic and must never invalidate an
+        # otherwise usable visual reconstruction. Preserve the error as a
+        # versioned artifact so malformed Skanea metadata remains visible.
+        report = {
+            "schema_version": 1,
+            "status": "error",
+            "source_run_id": stage_run_id,
+            "error": str(exc),
+            "capture_count": 0,
+            "completed_capture_count": 0,
+            "correspondence_count": 0,
+            "inlier_count": 0,
+            "captures": [],
+        }
+        print(f"ARKit alignment diagnostic failed without blocking COLMAP: {exc}", file=sys.stderr, flush=True)
+    write_json(output_path, report)
+    return report
 
 
 def prepare_failed_payloads(
@@ -689,6 +754,7 @@ def colmap_stage_summary(report: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "status": report.get("status"),
         "mode": (report.get("settings") or {}).get("mode") if isinstance(report.get("settings"), dict) else None,
+        "pose_prior": (report.get("settings") or {}).get("pose_prior") if isinstance(report.get("settings"), dict) else None,
         "feature_extractor": (report.get("settings") or {}).get("feature_extractor") if isinstance(report.get("settings"), dict) else None,
         "matcher": (report.get("settings") or {}).get("matcher") if isinstance(report.get("settings"), dict) else None,
         "matching_type": (report.get("settings") or {}).get("matching_type") if isinstance(report.get("settings"), dict) else None,
@@ -698,6 +764,7 @@ def colmap_stage_summary(report: Dict[str, Any]) -> Dict[str, Any]:
         "reconstruction_metrics": report.get("reconstruction_metrics", {}),
         "manifest_reconstruction": report.get("manifest_reconstruction", {}),
         "camera_groups": report.get("camera_groups", []),
+        "arkit_alignment": report.get("arkit_alignment", {}),
         "provenance": compact_colmap_provenance(report.get("run_provenance") or {}),
     }
 

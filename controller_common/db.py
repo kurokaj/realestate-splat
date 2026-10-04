@@ -270,6 +270,22 @@ def create_stage_run(
     return row
 
 
+def merge_stage_run_summary(conn: psycopg.Connection, *, stage_run_id: str, values: dict[str, Any]) -> None:
+    """Merge derived metadata into a run summary without changing stage state."""
+    row = conn.execute(
+        "SELECT summary_json FROM stage_runs WHERE id = %s FOR UPDATE",
+        (stage_run_id,),
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"Stage run not found: {stage_run_id}")
+    summary = dict(row["summary_json"] or {})
+    summary.update(values)
+    conn.execute(
+        "UPDATE stage_runs SET summary_json = %s, updated_at = now() WHERE id = %s",
+        (Jsonb(summary), stage_run_id),
+    )
+
+
 def enqueue_next_stage_after_approval(
     conn: psycopg.Connection,
     *,

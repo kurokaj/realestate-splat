@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from collections import Counter
 from datetime import datetime, timezone
 from functools import wraps
 from time import monotonic, perf_counter
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from fastapi import APIRouter, Body, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -29,6 +31,7 @@ from controller_common.db import (
     connect,
     create_stage_run,
     enqueue_next_stage_after_approval,
+    merge_stage_run_summary,
     reject_stage_run,
     retry_stage_run,
     row_to_json,
@@ -42,7 +45,20 @@ from controller_common.runpod_gpus import (
     normalize_gpu_name,
 )
 from controller_common.preprocess_assembly import assembled_project_preprocess_uri, preprocess_output_base_uri
+from controller_common.colmap_viewer import build_alignment_viewer_overlay, normalize_sparse_viewer_payload
 from src.realestate_splat.storage import copy_file, parse_storage_uri
+from src.realestate_splat.arkit_alignment import (
+    analyze_arkit_alignment_files,
+    build_hybrid_camera_set,
+    compact_alignment_summary,
+    compact_hybrid_camera_set_summary,
+    read_colmap_images_streaming,
+)
+from src.realestate_splat.depth_diagnostic import (
+    build_depth_diagnostic,
+    compact_depth_diagnostic_summary,
+)
+from src.realestate_splat.cli import utc_now
 from scripts.preprocess_video import PROFILE_DEFAULTS
 from controller_common.raw_upload import source_group_key
 from controller_common.matching_plan import build_hybrid_matching_plan, build_single_matching_plan, build_source_groups, resolve_group_reference, validate_matching_plan
@@ -187,32 +203,86 @@ def ui_create_project(
 
 
 @router.get("/projects/{project_id}/colmap-viewer")
-def project_colmap_viewer(project_id: str) -> JSONResponse:
+def project_colmap_viewer(
+    project_id: str,
+    colmap_stage_run_id: Optional[str] = Query(default=None),
+    include_alignment: bool = Query(default=False),
+    include_depth: bool = Query(default=False),
+) -> JSONResponse:
     with connect() as conn:
         project = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
+        selected_run = None
+        if colmap_stage_run_id:
+            selected_run = conn.execute(
+                "SELECT * FROM stage_runs WHERE id = %s AND project_id = %s AND stage = 'colmap'",
+                (colmap_stage_run_id, project_id),
+            ).fetchone()
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    colmap_current_uri = project.get("colmap_current_uri")
-    if not colmap_current_uri:
-        raise HTTPException(status_code=404, detail="COLMAP current output is not available yet")
-    payload = load_json_uri(f"{colmap_current_uri.rstrip('/')}/viewer/sparse_scene.json")
+    if colmap_stage_run_id and selected_run is None:
+        raise HTTPException(status_code=404, detail="Selected COLMAP run not found")
+    selected_run_json = row_to_json(selected_run) if selected_run is not None else None
+    if selected_run_json:
+        source_uri = colmap_history_uri(selected_run_json)
+    else:
+        source_uri = str(project.get("colmap_current_uri") or "").rstrip("/")
+    if not source_uri:
+        raise HTTPException(status_code=404, detail="COLMAP output is not available yet")
+    payload = load_json_uri(f"{source_uri}/viewer/sparse_scene.json")
     if not payload:
         raise HTTPException(status_code=404, detail="COLMAP viewer artifact is not available yet")
-    blacklist = load_colmap_blacklist(row_to_json(project))
-    excluded_names = {
-        Path(str(entry.get("image_name") or "")).name
-        for entry in blacklist.get("excluded_images", [])
-        if isinstance(entry, dict) and entry.get("image_name")
-    }
-    if excluded_names and isinstance(payload.get("cameras"), list):
-        original_cameras = payload["cameras"]
-        payload = dict(payload)
-        payload["cameras"] = [
-            camera
-            for camera in original_cameras
-            if Path(str(camera.get("name") or camera.get("image_name") or "")).name not in excluded_names
-        ]
-        payload["blacklisted_camera_count"] = len(original_cameras) - len(payload["cameras"])
+    payload = normalize_sparse_viewer_payload(payload)
+    payload["source_run_id"] = colmap_stage_run_id
+    if include_alignment:
+        if not selected_run_json:
+            raise HTTPException(status_code=400, detail="Alignment overlay requires a selected COLMAP run")
+        summary = selected_run_json.get("summary_json") if isinstance(selected_run_json.get("summary_json"), dict) else {}
+        alignment_summary = summary.get("arkit_alignment") if isinstance(summary.get("arkit_alignment"), dict) else {}
+        artifact_uri = str(alignment_summary.get("artifact_uri") or "")
+        if not artifact_uri:
+            artifact = str(alignment_summary.get("artifact") or "analysis/arkit_alignment.json").lstrip("/")
+            artifact_uri = f"{source_uri}/{artifact}"
+        try:
+            alignment_report = load_json_uri(artifact_uri)
+            image_manifest = load_json_uri(f"{source_uri}/image_manifest.json")
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail=f"Alignment viewer artifacts are unavailable: {exc}") from exc
+        if not alignment_report or not image_manifest:
+            raise HTTPException(status_code=404, detail="Alignment viewer artifacts are unavailable")
+        payload["alignment"] = build_alignment_viewer_overlay(alignment_report, image_manifest)
+        payload["bounds"] = payload["alignment"]["bounds"]
+        if include_depth:
+            depth_summary = summary.get("depth_diagnostic") if isinstance(summary.get("depth_diagnostic"), dict) else {}
+            depth_uri = str(depth_summary.get("artifact_uri") or "")
+            if not depth_uri:
+                raise HTTPException(status_code=404, detail="Depth diagnostic has not been built for this run")
+            try:
+                depth_artifact = load_json_uri(depth_uri)
+            except Exception as exc:
+                raise HTTPException(status_code=404, detail=f"Depth diagnostic artifact is unavailable: {exc}") from exc
+            payload["depth_diagnostic"] = {
+                "status": depth_artifact.get("status"),
+                "viewer_point_count": depth_artifact.get("viewer_point_count"),
+                "voxel_count": depth_artifact.get("voxel_count"),
+                "source_statistics": depth_artifact.get("source_statistics"),
+                "overlap_statistics": depth_artifact.get("overlap_statistics"),
+                "points": depth_artifact.get("points") or [],
+            }
+    elif not selected_run_json:
+        blacklist = load_colmap_blacklist(row_to_json(project))
+        excluded_names = {
+            Path(str(entry.get("image_name") or "")).name
+            for entry in blacklist.get("excluded_images", [])
+            if isinstance(entry, dict) and entry.get("image_name")
+        }
+        if excluded_names and isinstance(payload.get("cameras"), list):
+            original_cameras = payload["cameras"]
+            payload["cameras"] = [
+                camera
+                for camera in original_cameras
+                if Path(str(camera.get("name") or camera.get("image_name") or "")).name not in excluded_names
+            ]
+            payload["blacklisted_camera_count"] = len(original_cameras) - len(payload["cameras"])
     return JSONResponse(payload)
 
 
@@ -265,11 +335,17 @@ def project_detail(
     show_history: bool = Query(default=False),
     history_page: int = Query(default=0, ge=0, le=1000),
     tab: str = Query(default="preprocess"),
+    arkit_alignment_run_id: Optional[str] = Query(default=None),
 ) -> HTMLResponse:
     started_at = perf_counter()
     timing: dict[str, float] = {}
     mark = perf_counter()
-    data = load_project_detail(project_id, show_history=show_history, history_page=history_page)
+    data = load_project_detail(
+        project_id,
+        show_history=show_history,
+        history_page=history_page,
+        extra_run_ids=[arkit_alignment_run_id] if arkit_alignment_run_id else None,
+    )
     timing["project_load"] = elapsed_ms(mark)
     if data["project"] is None:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -297,6 +373,20 @@ def project_detail(
             review.get("preprocess_group_reports") if active_tab == "matching" else {},
         )
         timing["colmap_context"] = elapsed_ms(mark)
+        alignment_options = colmap_review.get("arkit_alignment_run_options") or []
+        selected_alignment_run = next(
+            (run for run in alignment_options if run.get("id") == arkit_alignment_run_id),
+            None,
+        )
+        if selected_alignment_run is None:
+            selected_alignment_run = next(
+                (run for run in alignment_options if run.get("alignment")),
+                alignment_options[0] if alignment_options else None,
+            )
+        colmap_review["selected_arkit_alignment_run"] = selected_alignment_run
+        colmap_review["selected_arkit_alignment_run_id"] = (
+            selected_alignment_run.get("id") if selected_alignment_run else None
+        )
     if active_tab == "training":
         mark = perf_counter()
         training_review = training_review_context(data["project"], data["stage_runs"])
@@ -467,6 +557,7 @@ def ui_queue_colmap(
     output_uri: Optional[str] = Form(default=None),
     endpoint_url: Optional[str] = Form(default=None),
     mode: str = Form(default="global"),
+    pose_prior_uncertainty: str = Form(default="conservative"),
     feature_extractor: str = Form(default="SIFT"),
     matcher: Optional[str] = Form(default=None),
     processing_strategy: Optional[str] = Form(default=None),
@@ -515,6 +606,12 @@ def ui_queue_colmap(
         resolved_output_uri = empty_to_none(output_uri) or f"r2://{default_r2_bucket()}/projects/{project_id}/colmap"
         require_r2_uri(resolved_preprocess_uri, "preprocess_uri")
         require_r2_uri(resolved_output_uri, "output_uri")
+        validate_choice(mode, {"global", "incremental", "pose_prior_incremental"}, "mode")
+        validate_choice(
+            pose_prior_uncertainty,
+            {"strong", "conservative", "relaxed"},
+            "pose_prior_uncertainty",
+        )
         validate_choice(feature_extractor, {option["value"] for option in COLMAP_FEATURE_EXTRACTOR_OPTIONS}, "feature_extractor")
         validate_choice(matching_type, {option["value"] for option in COLMAP_FEATURE_MATCHER_OPTIONS}, "matching_type")
         validate_choice(camera_model, {option["value"] for option in COLMAP_CAMERA_MODEL_OPTIONS}, "camera_model")
@@ -575,6 +672,7 @@ def ui_queue_colmap(
             "output_uri": resolved_output_uri,
             "endpoint_url": empty_to_none(endpoint_url),
             "mode": mode,
+            "pose_prior_uncertainty": pose_prior_uncertainty,
             "feature_extractor": feature_extractor,
             "matcher": matcher,
             "processing_strategy": processing_strategy,
@@ -601,6 +699,267 @@ def ui_queue_colmap(
             output_uri=f"{resolved_output_uri.rstrip('/')}/current",
         )
     return RedirectResponse(url=f"/ui/projects/{project_id}", status_code=303)
+
+
+@router.post("/projects/{project_id}/arkit-alignment")
+def ui_analyze_arkit_alignment(
+    project_id: str,
+    colmap_stage_run_id: str = Form(...),
+) -> RedirectResponse:
+    """Backfill the lightweight ARKit alignment diagnostic for a preserved run."""
+    with connect() as conn:
+        run = conn.execute(
+            "SELECT * FROM stage_runs WHERE id = %s AND project_id = %s AND stage = 'colmap'",
+            (colmap_stage_run_id, project_id),
+        ).fetchone()
+    if run is None:
+        raise HTTPException(status_code=404, detail="COLMAP run not found")
+    run_json = row_to_json(run)
+    if run_json.get("status") not in {"completed", "approved", "awaiting_colmap_approval"}:
+        raise HTTPException(status_code=400, detail="ARKit alignment requires a completed COLMAP run")
+
+    source_uri = colmap_history_uri(run_json)
+    output_uri = (
+        f"{colmap_output_base_uri(run_json)}/analyses/arkit_alignment/"
+        f"{colmap_stage_run_id}/arkit_alignment.json"
+    )
+    input_json = run_json.get("input_uri_json") if isinstance(run_json.get("input_uri_json"), dict) else {}
+    endpoint_url = empty_to_none(input_json.get("endpoint_url"))
+    with tempfile.TemporaryDirectory(prefix=f"buildvision3d-alignment-{colmap_stage_run_id}-") as temp_dir:
+        work_dir = Path(temp_dir)
+        manifest_path = work_dir / "image_manifest.json"
+        images_path = work_dir / "images.txt"
+        output_path = work_dir / "arkit_alignment.json"
+        try:
+            copy_file(f"{source_uri}/image_manifest.json", manifest_path, endpoint_url=endpoint_url)
+            copy_file(f"{source_uri}/sparse_txt/images.txt", images_path, endpoint_url=endpoint_url)
+            report = analyze_arkit_alignment_files(
+                manifest_path,
+                images_path,
+                source_run_id=colmap_stage_run_id,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Could not analyze ARKit alignment: {exc}") from exc
+        report["created_at"] = utc_now()
+        report["source_colmap_uri"] = source_uri
+        report["artifact_uri"] = output_uri
+        output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        copy_file(output_path, output_uri, endpoint_url=endpoint_url)
+
+    summary = compact_alignment_summary(report)
+    summary["artifact_uri"] = output_uri
+    with connect() as conn:
+        merge_stage_run_summary(
+            conn,
+            stage_run_id=colmap_stage_run_id,
+            values={"arkit_alignment": summary},
+        )
+    return RedirectResponse(
+        url=(
+            f"/ui/projects/{project_id}?tab=colmap&show_history=true"
+            f"&arkit_alignment_run_id={colmap_stage_run_id}#arkit-alignment"
+        ),
+        status_code=303,
+    )
+
+
+@router.post("/projects/{project_id}/arkit-hybrid")
+def ui_build_arkit_hybrid_camera_set(
+    project_id: str,
+    colmap_stage_run_id: str = Form(...),
+) -> RedirectResponse:
+    """Persist the approved A_hybrid selection as a derived immutable artifact."""
+    with connect() as conn:
+        run = conn.execute(
+            "SELECT * FROM stage_runs WHERE id = %s AND project_id = %s AND stage = 'colmap'",
+            (colmap_stage_run_id, project_id),
+        ).fetchone()
+    if run is None:
+        raise HTTPException(status_code=404, detail="COLMAP run not found")
+    run_json = row_to_json(run)
+    if run_json.get("status") not in {"completed", "approved", "awaiting_colmap_approval"}:
+        raise HTTPException(status_code=400, detail="A_hybrid requires a completed COLMAP run")
+    summary_json = run_json.get("summary_json") if isinstance(run_json.get("summary_json"), dict) else {}
+    alignment_summary = summary_json.get("arkit_alignment") if isinstance(summary_json.get("arkit_alignment"), dict) else {}
+    alignment_uri = str(alignment_summary.get("artifact_uri") or "")
+    if not alignment_uri:
+        raise HTTPException(status_code=400, detail="Analyze and approve ARKit alignment before building A_hybrid")
+
+    source_uri = colmap_history_uri(run_json)
+    input_json = run_json.get("input_uri_json") if isinstance(run_json.get("input_uri_json"), dict) else {}
+    endpoint_url = empty_to_none(input_json.get("endpoint_url"))
+    with tempfile.TemporaryDirectory(prefix=f"buildvision3d-hybrid-{colmap_stage_run_id}-") as temp_dir:
+        work_dir = Path(temp_dir)
+        manifest_path = work_dir / "image_manifest.json"
+        images_path = work_dir / "images.txt"
+        alignment_path = work_dir / "arkit_alignment.json"
+        output_path = work_dir / "hybrid_camera_set.json"
+        try:
+            copy_file(f"{source_uri}/image_manifest.json", manifest_path, endpoint_url=endpoint_url)
+            copy_file(f"{source_uri}/sparse_txt/images.txt", images_path, endpoint_url=endpoint_url)
+            copy_file(alignment_uri, alignment_path, endpoint_url=endpoint_url)
+            image_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            alignment_report = json.loads(alignment_path.read_text(encoding="utf-8"))
+            images = read_colmap_images_streaming(images_path)
+            artifact = build_hybrid_camera_set(
+                alignment_report,
+                image_manifest,
+                images,
+                source_run_id=colmap_stage_run_id,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Could not build A_hybrid camera set: {exc}") from exc
+        if not artifact.get("frame_count"):
+            raise HTTPException(status_code=400, detail="A_hybrid camera set contains no eligible frames")
+        selection_sha256 = str(artifact.get("selection_sha256") or "")
+        artifact_id = f"arkit_hybrid_{selection_sha256[:12]}"
+        output_uri = (
+            f"{colmap_output_base_uri(run_json)}/analyses/arkit_hybrid/"
+            f"{colmap_stage_run_id}/{artifact_id}/hybrid_camera_set.json"
+        )
+        artifact["artifact_id"] = artifact_id
+        artifact["source_colmap_uri"] = source_uri
+        artifact["source_alignment_uri"] = alignment_uri
+        artifact["artifact_uri"] = output_uri
+        output_path.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
+        copy_file(output_path, output_uri, endpoint_url=endpoint_url)
+
+    summary_created_at = utc_now()
+    hybrid_summary = compact_hybrid_camera_set_summary(artifact)
+    hybrid_summary.update(
+        {
+            "artifact_id": artifact_id,
+            "artifact_uri": output_uri,
+            "created_at": summary_created_at,
+        }
+    )
+    with connect() as conn:
+        merge_stage_run_summary(
+            conn,
+            stage_run_id=colmap_stage_run_id,
+            values={"arkit_hybrid": hybrid_summary},
+        )
+    return RedirectResponse(
+        url=(
+            f"/ui/projects/{project_id}?tab=colmap&show_history=true"
+            f"&arkit_alignment_run_id={colmap_stage_run_id}#arkit-hybrid"
+        ),
+        status_code=303,
+    )
+
+
+@router.post("/projects/{project_id}/depth-diagnostic")
+def ui_build_depth_diagnostic(
+    project_id: str,
+    colmap_stage_run_id: str = Form(...),
+) -> RedirectResponse:
+    """Build an immutable high-confidence depth overlay from A_hybrid."""
+    with connect() as conn:
+        run = conn.execute(
+            "SELECT * FROM stage_runs WHERE id = %s AND project_id = %s AND stage = 'colmap'",
+            (colmap_stage_run_id, project_id),
+        ).fetchone()
+    if run is None:
+        raise HTTPException(status_code=404, detail="COLMAP run not found")
+    run_json = row_to_json(run)
+    summary_json = run_json.get("summary_json") if isinstance(run_json.get("summary_json"), dict) else {}
+    hybrid_summary = summary_json.get("arkit_hybrid") if isinstance(summary_json.get("arkit_hybrid"), dict) else {}
+    hybrid_uri = str(hybrid_summary.get("artifact_uri") or "")
+    if not hybrid_uri:
+        raise HTTPException(status_code=400, detail="Build and approve A_hybrid before building a depth diagnostic")
+    transition_validation = hybrid_summary.get("transition_validation")
+    if isinstance(transition_validation, dict) and int(transition_validation.get("review_required_count") or 0):
+        raise HTTPException(status_code=400, detail="Resolve A_hybrid source transitions requiring review first")
+
+    input_json = run_json.get("input_uri_json") if isinstance(run_json.get("input_uri_json"), dict) else {}
+    endpoint_url = empty_to_none(input_json.get("endpoint_url"))
+    with tempfile.TemporaryDirectory(prefix=f"buildvision3d-depth-{colmap_stage_run_id}-") as temp_dir:
+        work_dir = Path(temp_dir)
+        hybrid_path = work_dir / "hybrid_camera_set.json"
+        output_path = work_dir / "depth_diagnostic.json"
+        try:
+            copy_file(hybrid_uri, hybrid_path, endpoint_url=endpoint_url, timeout_seconds=60)
+            hybrid_artifact = json.loads(hybrid_path.read_text(encoding="utf-8"))
+            attachment_paths = _prefetch_depth_attachments(
+                hybrid_artifact,
+                work_dir / "attachments",
+                endpoint_url=endpoint_url,
+            )
+            artifact = build_depth_diagnostic(
+                hybrid_artifact,
+                lambda uri: attachment_paths[uri].read_bytes(),
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Could not build depth diagnostic: {exc}") from exc
+        selection_sha256 = str(artifact.get("selection_sha256") or "")
+        artifact_id = f"depth_diagnostic_{selection_sha256[:12]}"
+        hybrid_id = str(hybrid_summary.get("artifact_id") or "arkit_hybrid")
+        output_uri = (
+            f"{colmap_output_base_uri(run_json)}/analyses/depth_diagnostic/"
+            f"{colmap_stage_run_id}/{hybrid_id}/{artifact_id}/depth_diagnostic.json"
+        )
+        artifact["artifact_id"] = artifact_id
+        artifact["source_hybrid_uri"] = hybrid_uri
+        artifact["artifact_uri"] = output_uri
+        output_path.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
+        copy_file(output_path, output_uri, endpoint_url=endpoint_url)
+
+    depth_summary = compact_depth_diagnostic_summary(artifact)
+    depth_summary.update(
+        {
+            "artifact_id": artifact_id,
+            "artifact_uri": output_uri,
+            "source_hybrid_uri": hybrid_uri,
+            "created_at": utc_now(),
+        }
+    )
+    with connect() as conn:
+        merge_stage_run_summary(
+            conn,
+            stage_run_id=colmap_stage_run_id,
+            values={"depth_diagnostic": depth_summary},
+        )
+    return RedirectResponse(
+        url=(
+            f"/ui/projects/{project_id}?tab=colmap&show_history=true"
+            f"&arkit_alignment_run_id={colmap_stage_run_id}#depth-diagnostic"
+        ),
+        status_code=303,
+    )
+
+
+def _prefetch_depth_attachments(
+    hybrid_artifact: Mapping[str, Any],
+    destination: Path,
+    *,
+    endpoint_url: Optional[str],
+) -> dict[str, Path]:
+    uris: set[str] = set()
+    for capture in hybrid_artifact.get("captures") or []:
+        if not isinstance(capture, dict):
+            continue
+        for frame in capture.get("frames") or []:
+            if not isinstance(frame, dict):
+                continue
+            for key in ("depth", "confidence"):
+                attachment = frame.get(key)
+                if isinstance(attachment, dict) and attachment.get("uri"):
+                    uris.add(str(attachment["uri"]))
+    if not uris:
+        raise ValueError("A_hybrid contains no depth/confidence attachments")
+    destination.mkdir(parents=True, exist_ok=True)
+    paths = {
+        uri: destination / f"{hashlib.sha256(uri.encode('utf-8')).hexdigest()}{Path(parse_storage_uri(uri).key).suffix}"
+        for uri in sorted(uris)
+    }
+
+    def download(item: tuple[str, Path]) -> None:
+        uri, path = item
+        copy_file(uri, path, endpoint_url=endpoint_url, timeout_seconds=120)
+
+    with ThreadPoolExecutor(max_workers=min(8, len(paths))) as pool:
+        list(pool.map(download, paths.items()))
+    return paths
 
 
 @router.post("/projects/{project_id}/matching-strategy")
@@ -813,7 +1172,11 @@ def run_stage_action(stage_run_id: str, notes: Optional[str], action: str) -> Re
 
 
 def load_project_detail(
-    project_id: str, *, show_history: bool = False, history_page: int = 0
+    project_id: str,
+    *,
+    show_history: bool = False,
+    history_page: int = 0,
+    extra_run_ids: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     with connect() as conn:
         project = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
@@ -843,6 +1206,7 @@ def load_project_detail(
         ).fetchall()
     stage_run_json = rows_to_json(metadata_rows)
     detailed_ids = required_project_detail_run_ids(stage_run_json, show_history, history_page)
+    detailed_ids = list(dict.fromkeys([*detailed_ids, *(extra_run_ids or [])]))
     if detailed_ids:
         with connect() as conn:
             detailed_rows = conn.execute(
@@ -1354,6 +1718,7 @@ def colmap_review_context(
             "output_uri": input_json.get("output_uri") or colmap_output_base,
             "endpoint_url": input_json.get("endpoint_url") or "",
             "mode": input_json.get("mode") or "global",
+            "pose_prior_uncertainty": input_json.get("pose_prior_uncertainty") or "conservative",
             "feature_extractor": feature_extractor,
             "matcher": input_json.get("matcher") or "exhaustive",
             "processing_strategy": ui_strategy,
@@ -1385,9 +1750,41 @@ def colmap_review_context(
         ],
         "matching_has_heroes": has_heroes,
         "matching_has_multiple_coverages": coverage_group_count > 1,
-        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "runpod_api_version", "colmap_version", "repository_commit", "container_image", "input_manifest_sha256", "input_image_count", "run_provenance_uri", "registered_images", "registered_by_location", "registered_by_group", "point_count", "feature_extractor", "matching_type", "matcher", "sequential_loop_detection", "vocab_tree", "camera_model", "intrinsics_source", "max_image_size", "mode", "container_disk_gb"]),
+        "colmap_info_rows": stage_info_rows(latest_run, preferred_keys=["provider_job_id", "provider_pod_id", "runpod_api_version", "colmap_version", "repository_commit", "container_image", "input_manifest_sha256", "input_image_count", "run_provenance_uri", "registered_images", "registered_by_location", "registered_by_group", "point_count", "feature_extractor", "matching_type", "matcher", "sequential_loop_detection", "vocab_tree", "camera_model", "intrinsics_source", "max_image_size", "mode", "pose_prior", "container_disk_gb"]),
         "colmap_blacklist": load_colmap_blacklist(project),
+        "arkit_alignment_run_options": [
+            {
+                "id": run.get("id"),
+                "status": run.get("status_label") or run.get("status"),
+                "mode": (run.get("summary_json") or {}).get("mode") if isinstance(run.get("summary_json"), dict) else None,
+                "registered_images": (run.get("summary_json") or {}).get("registered_images") if isinstance(run.get("summary_json"), dict) else None,
+                "created_at": run.get("created_at"),
+                "alignment": (run.get("summary_json") or {}).get("arkit_alignment") if isinstance(run.get("summary_json"), dict) else None,
+                "hybrid": (run.get("summary_json") or {}).get("arkit_hybrid") if isinstance(run.get("summary_json"), dict) else None,
+                "depth_diagnostic": (run.get("summary_json") or {}).get("depth_diagnostic") if isinstance(run.get("summary_json"), dict) else None,
+            }
+            for run in colmap_runs
+            if run.get("status") in {"completed", "approved", "awaiting_colmap_approval"}
+        ],
     }
+
+
+def colmap_output_base_uri(run: dict[str, Any]) -> str:
+    output_uri = str(run.get("output_uri") or "").rstrip("/")
+    if output_uri.endswith("/current"):
+        return output_uri[: -len("/current")]
+    input_json = run.get("input_uri_json") if isinstance(run.get("input_uri_json"), dict) else {}
+    configured = str(input_json.get("output_uri") or "").rstrip("/")
+    if configured:
+        return configured[: -len("/current")] if configured.endswith("/current") else configured
+    raise HTTPException(status_code=400, detail="COLMAP run has no output URI")
+
+
+def colmap_history_uri(run: dict[str, Any]) -> str:
+    run_id = str(run.get("id") or "")
+    if not run_id:
+        raise HTTPException(status_code=400, detail="COLMAP run has no stable run id")
+    return f"{colmap_output_base_uri(run)}/runs/{run_id}"
 
 
 def parse_matching_connections(raw: Optional[str]) -> list[dict[str, Any]]:

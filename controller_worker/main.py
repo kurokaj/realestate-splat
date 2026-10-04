@@ -496,6 +496,8 @@ def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str
         output_uri,
         "--mode",
         inputs.get("mode", "global"),
+        "--pose-prior-uncertainty",
+        inputs.get("pose_prior_uncertainty", "conservative"),
         "--feature-extractor",
         inputs.get("feature_extractor", "SIFT"),
         "--matcher",

@@ -50,6 +50,10 @@ from controller_common.matching_plan import (
     validate_matching_plan,
 )
 from controller_common.matching_executor import execute_matching_plan
+from realestate_splat.pose_priors import (
+    POSE_PRIOR_STANDARD_DEVIATIONS_METERS,
+    write_arkit_position_priors,
+)
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
@@ -84,6 +88,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "matcher_options": {},
     "view_graph_calibrator_options": {},
     "mapper_options": {},
+    "pose_prior_uncertainty": "conservative",
 }
 
 
@@ -123,8 +128,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["incremental", "global"],
+        choices=["incremental", "global", "pose_prior_incremental"],
         help="COLMAP reconstruction mode.",
+    )
+    parser.add_argument(
+        "--pose-prior-uncertainty",
+        choices=sorted(POSE_PRIOR_STANDARD_DEVIATIONS_METERS),
+        help="Named ARKit position-prior uncertainty preset.",
     )
     parser.add_argument(
         "--matcher",
@@ -424,6 +434,7 @@ def build_settings(args: argparse.Namespace) -> Dict[str, Any]:
         "vocab_tree": str(args.vocab_tree) if args.vocab_tree is not None else None,
         "export_text": args.export_text,
         "undistort": args.undistort,
+        "pose_prior_uncertainty": args.pose_prior_uncertainty,
     }
     for key, value in cli_overrides.items():
         if value is not None:
@@ -454,8 +465,13 @@ def normalize_mapper_setting(settings: Dict[str, Any]) -> None:
         settings["mode"] = "global"
     elif mapper_name in {"mapper", "incremental_mapper", "incremental"}:
         settings["mode"] = "incremental"
+    elif mapper_name in {"pose_prior_mapper", "pose_prior_incremental"}:
+        settings["mode"] = "pose_prior_incremental"
     else:
-        raise SystemExit("colmap.mapper must be global_mapper, mapper, incremental_mapper, or incremental.")
+        raise SystemExit(
+            "colmap.mapper must be global_mapper, mapper, incremental_mapper, incremental, "
+            "pose_prior_mapper, or pose_prior_incremental."
+        )
 
 
 def normalize_colmap_feature_settings(settings: Dict[str, Any]) -> None:
@@ -479,8 +495,12 @@ def validate_settings(settings: Mapping[str, Any]) -> None:
     binary = Path(str(settings["binary"])).expanduser()
     if not binary.is_absolute():
         raise SystemExit("colmap.binary / --colmap-bin must be an absolute path; do not rely on PATH.")
-    if settings["mode"] not in {"incremental", "global"}:
-        raise SystemExit("--mode must be incremental or global.")
+    if settings["mode"] not in {"incremental", "global", "pose_prior_incremental"}:
+        raise SystemExit("--mode must be incremental, global, or pose_prior_incremental.")
+    if settings.get("pose_prior_uncertainty") not in POSE_PRIOR_STANDARD_DEVIATIONS_METERS:
+        raise SystemExit(
+            "--pose-prior-uncertainty must be strong, conservative, or relaxed."
+        )
     if settings["feature_extractor"] not in {"SIFT", "ALIKED_N16ROT", "ALIKED_N32"}:
         raise SystemExit("--feature-extractor must be SIFT, ALIKED_N16ROT, or ALIKED_N32.")
     if settings["matcher"] not in {"exhaustive", "sequential", "vocab_tree"}:
@@ -551,25 +571,43 @@ def effective_mapper_options(
     explicit user/config values win over these defaults.
     """
     options = dict(settings.get("mapper_options") or {})
+    mode = str(settings.get("mode"))
+    defaults: Dict[str, Any] = {}
+    if mode == "pose_prior_incremental":
+        defaults.update(
+            {
+                "overwrite_priors_covariance": 0,
+                "use_robust_loss_on_prior_position": 1,
+                "prior_position_loss_scale": 7.815,
+            }
+        )
+
     if not bool(settings.get("use_gpu", True)):
+        for key, value in defaults.items():
+            if mapper_help is None or option_supported(mapper_help, f"--{key}"):
+                options.setdefault(key, value)
         return options
 
-    if str(settings.get("mode")) == "global":
-        defaults = {
-            "GlobalMapper.gp_use_gpu": 1,
-            "GlobalMapper.gp_gpu_index": 0,
-            "GlobalMapper.ba_ceres_use_gpu": 1,
-        }
+    if mode == "global":
+        defaults.update(
+            {
+                "GlobalMapper.gp_use_gpu": 1,
+                "GlobalMapper.gp_gpu_index": 0,
+                "GlobalMapper.ba_ceres_use_gpu": 1,
+            }
+        )
         if mapper_help is not None:
             if option_supported(mapper_help, "--GlobalMapper.ba_gpu_index"):
                 defaults["GlobalMapper.ba_gpu_index"] = 0
             elif option_supported(mapper_help, "--GlobalMapper.ba_ceres_gpu_index"):
                 defaults["GlobalMapper.ba_ceres_gpu_index"] = 0
     else:
-        defaults = {
-            "Mapper.ba_use_gpu": 1,
-            "Mapper.ba_gpu_index": 0,
-        }
+        defaults.update(
+            {
+                "Mapper.ba_use_gpu": 1,
+                "Mapper.ba_gpu_index": 0,
+            }
+        )
 
     for key, value in defaults.items():
         if mapper_help is not None and not option_supported(mapper_help, f"--{key}"):
@@ -615,6 +653,28 @@ def colmap_command_help(colmap_bin: str, command: str) -> str:
 
 def option_supported(help_text: str, option_name: str) -> bool:
     return option_name in help_text
+
+
+def mapper_name_for_mode(mode: str) -> str:
+    if mode == "global":
+        return "global_mapper"
+    if mode == "pose_prior_incremental":
+        return "pose_prior_mapper"
+    return "mapper"
+
+
+def validate_pose_prior_mapper_help(help_text: str) -> None:
+    required = [
+        "--overwrite_priors_covariance",
+        "--use_robust_loss_on_prior_position",
+        "--prior_position_loss_scale",
+    ]
+    missing = [option for option in required if not option_supported(help_text, option)]
+    if missing:
+        raise SystemExit(
+            "The selected COLMAP runtime does not expose the required pose-prior options: "
+            + ", ".join(missing)
+        )
 
 
 def resolve_colmap_option_names(colmap_bin: str, settings: Mapping[str, Any], dry_run: bool) -> ColmapOptionNames:
@@ -957,6 +1017,53 @@ def apply_manifest_camera_groups_to_database(
     )
 
 
+def inject_arkit_pose_priors(
+    *,
+    database_path: Path,
+    manifest: Mapping[str, Any],
+    uncertainty_preset: str,
+    logs_dir: Path,
+) -> tuple[CommandResult, Dict[str, Any]]:
+    log_path = logs_dir / "inject_arkit_pose_priors.log"
+    started_at = utc_now()
+    start_time = time.monotonic()
+    print(
+        f"\n$ inject_arkit_pose_priors {database_path} --uncertainty {uncertainty_preset}",
+        flush=True,
+    )
+    summary = write_arkit_position_priors(
+        database_path,
+        manifest,
+        uncertainty_preset=uncertainty_preset,
+    )
+    log_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    print(
+        "Inserted {count} position-only ARKit priors with {std:.3f} m standard deviation.".format(
+            count=summary["prior_count"],
+            std=summary["position_standard_deviation_meters"],
+        ),
+        flush=True,
+    )
+    finished_at = utc_now()
+    return (
+        CommandResult(
+            name="inject_arkit_pose_priors",
+            command=[
+                "inject_arkit_pose_priors",
+                str(database_path),
+                "--uncertainty",
+                uncertainty_preset,
+            ],
+            log_path=str(log_path),
+            returncode=0,
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_seconds=round(time.monotonic() - start_time, 3),
+        ),
+        summary,
+    )
+
+
 def build_core_commands(
     colmap_bin: str,
     settings: Mapping[str, Any],
@@ -1016,7 +1123,7 @@ def build_core_commands(
         append_options(view_graph_calibrator_command, settings.get("view_graph_calibrator_options", {}))
         commands.append(("view_graph_calibrator", view_graph_calibrator_command))
 
-    mapper_name = "global_mapper" if settings["mode"] == "global" else "mapper"
+    mapper_name = mapper_name_for_mode(str(settings["mode"]))
     mapper_command = [
         colmap_bin,
         mapper_name,
@@ -1772,6 +1879,12 @@ def print_dry_run(
                 )
             )
 
+    if settings.get("mode") == "pose_prior_incremental":
+        print(
+            "# after feature extraction and matching: insert position-only ARKit priors "
+            f"({settings.get('pose_prior_uncertainty')} preset)"
+        )
+
     assumed_model = paths["sparse_dir"] / "0"
     for _name, command in build_followup_commands("colmap", settings, paths, assumed_model):
         shown = list(command)
@@ -1807,8 +1920,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     colmap_bin = resolve_colmap_bin(settings, args.dry_run)
     option_names = resolve_colmap_option_names(colmap_bin, settings, args.dry_run)
-    mapper_name = "global_mapper" if settings["mode"] == "global" else "mapper"
+    mapper_name = mapper_name_for_mode(str(settings["mode"]))
     mapper_help = None if args.dry_run else colmap_command_help(colmap_bin, mapper_name)
+    if settings["mode"] == "pose_prior_incremental" and mapper_help is not None:
+        validate_pose_prior_mapper_help(mapper_help)
     is_single_plan = matching_plan.get("strategy") == "single"
     core_commands = build_core_commands(
         colmap_bin,
@@ -1831,11 +1946,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     error: Optional[str] = None
 
     try:
+        pose_priors_injected = False
+
+        def ensure_pose_priors() -> None:
+            nonlocal pose_priors_injected
+            if settings["mode"] != "pose_prior_incremental" or pose_priors_injected:
+                return
+            result, summary = inject_arkit_pose_priors(
+                database_path=paths["database_path"],
+                manifest=image_manifest,
+                uncertainty_preset=str(settings["pose_prior_uncertainty"]),
+                logs_dir=paths["logs_dir"],
+            )
+            command_results.append(result)
+            settings["pose_prior"] = summary
+            pose_priors_injected = True
+
         deferred_commands: List[Tuple[str, List[str]]] = []
         for name, command in core_commands:
             if not is_single_plan and name != "feature_extractor":
                 deferred_commands.append((name, command))
                 continue
+            if name == "pose_prior_mapper":
+                ensure_pose_priors()
             command_results.append(
                 run_command(
                     name,
@@ -1880,6 +2013,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
             # Hybrid matching must be complete before view-graph calibration
             # and mapping consume the database.
+            ensure_pose_priors()
             for name, command in deferred_commands:
                 command_results.append(run_command(name, command, paths["logs_dir"]))
 

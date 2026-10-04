@@ -139,6 +139,12 @@ class LineProgressParser:
         elif "global_mapper" in lowered or "global mapping" in lowered:
             self.last_phase = "global_mapping"
             self.reporter(75, self.last_phase, "Building global reconstruction")
+        elif "inject_arkit_pose_priors" in lowered:
+            self.last_phase = "pose_priors"
+            self.reporter(70, self.last_phase, "Writing ARKit position priors")
+        elif "pose_prior_mapper" in lowered:
+            self.last_phase = "pose_prior_mapping"
+            self.reporter(75, self.last_phase, "Building pose-prior incremental reconstruction")
         elif " mapper" in lowered or lowered.startswith("$ mapper"):
             self.last_phase = "mapping"
             self.reporter(75, self.last_phase, "Building reconstruction")

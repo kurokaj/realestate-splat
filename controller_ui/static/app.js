@@ -26,6 +26,15 @@ function markFormEdited() {
   lastFormEditAt = Date.now();
 }
 
+function setupLongRunningForm(form) {
+  form.addEventListener("submit", () => {
+    const button = form.querySelector('button[type="submit"]');
+    if (!button) return;
+    button.disabled = true;
+    button.textContent = "Building depth diagnostic…";
+  });
+}
+
 function setupPreprocessQueueSubmission(form) {
   form.addEventListener("submit", () => {
     const hidden = form.querySelector('input[name="group_settings_json"]');
@@ -254,11 +263,23 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   document.querySelectorAll('form[action$="/matching-strategy"]').forEach(setupMatchingPlanEditor);
   document.querySelectorAll('form[action$="/training"]').forEach(setupProviderDependencyState);
+  document.querySelectorAll("[data-long-running-form]").forEach(setupLongRunningForm);
   setupTabs();
   setupAutoRefresh();
 });
 
 function setupColmapFormBehavior(form) {
+  const modeSelect = form.querySelector("[data-colmap-mode-select]");
+  const posePriorSettings = form.querySelector("[data-pose-prior-settings]");
+  const posePriorUncertainty = form.querySelector("[data-pose-prior-uncertainty]");
+  function syncPosePriorState() {
+    const enabled = modeSelect?.value === "pose_prior_incremental";
+    if (posePriorSettings) posePriorSettings.hidden = !enabled;
+    if (posePriorUncertainty) posePriorUncertainty.disabled = !enabled;
+  }
+  modeSelect?.addEventListener("change", syncPosePriorState);
+  syncPosePriorState();
+
   const matcherSelect = form.querySelector("[data-colmap-matcher-select]");
   const loopDetectionInput = form.querySelector("[data-colmap-loop-detection-input]");
   const loopDetectionRow = form.querySelector("[data-colmap-loop-detection-row]");
@@ -706,7 +727,11 @@ async function setupColmapViewer(root) {
   const canvas = root.querySelector(".viewer-canvas");
   const status = root.querySelector(".viewer-status");
   const modeButtons = root.querySelectorAll("[data-viewer-mode]");
+  const layerButtons = root.querySelectorAll("[data-viewer-layer]");
+  const outliersButton = root.querySelector("[data-viewer-outliers]");
   const resetButton = root.querySelector("[data-viewer-reset]");
+  const selection = root.querySelector("[data-viewer-selection]");
+  const isAlignmentViewer = root.dataset.alignmentViewer === "true";
   if (!canvas || !status) return;
 
   try {
@@ -716,8 +741,29 @@ async function setupColmapViewer(root) {
       return;
     }
     const scene = await response.json();
-    const viewer = renderSparseViewer(canvas, scene);
+    let viewer;
+    try {
+      const viewerModule = await import("/ui/static/colmap_viewer_three.js?v=20261004-depth-1");
+      viewer = viewerModule.renderSparseViewer(canvas, scene);
+    } catch (viewerError) {
+      console.error("Three.js viewer failed; using the legacy Canvas fallback.", viewerError);
+      viewer = renderSparseViewerLegacy(canvas, scene);
+    }
     canvas.addEventListener("click", async (event) => {
+      if (isAlignmentViewer) {
+        const picked = viewer.pickTrajectory?.(event.clientX, event.clientY);
+        if (!picked || !selection) return;
+        const frame = picked.frame;
+        const residual = frame.position_residual_meters == null ? Number.NaN : Number(frame.position_residual_meters);
+        const angle = frame.angular_residual_degrees == null ? Number.NaN : Number(frame.angular_residual_degrees);
+        selection.textContent = [
+          `${frame.image_name || "Frame"} · ARKit ${frame.frame_index}`,
+          `Selected: ${picked.source} · ${frame.classification}`,
+          Number.isFinite(residual) ? `Position difference: ${(residual * 100).toFixed(2)} cm` : "Position difference: no COLMAP pose",
+          Number.isFinite(angle) ? `Angular difference: ${angle.toFixed(3)}°` : "Angular difference: no COLMAP pose",
+        ].join("\n");
+        return;
+      }
       const camera = viewer.pickCamera?.(event.clientX, event.clientY);
       if (!camera || !root.dataset.colmapBlacklistUrl) return;
       const details = [
@@ -740,20 +786,71 @@ async function setupColmapViewer(root) {
       }
       window.location.reload();
     });
-    renderViewerLegend(root.querySelector("[data-viewer-legend]"), scene.camera_group_colors || {});
+    if (isAlignmentViewer) {
+      renderAlignmentLegend(root.querySelector("[data-viewer-legend]"), Boolean(scene.depth_diagnostic));
+    } else {
+      renderViewerLegend(root.querySelector("[data-viewer-legend]"), scene.camera_group_colors || {});
+    }
+    layerButtons.forEach((button) => {
+      viewer.setLayer?.(button.dataset.viewerLayer, button.classList.contains("is-active"));
+    });
     modeButtons.forEach((button) => {
       button.addEventListener("click", () => {
         viewer.setMode(button.dataset.viewerMode || "orbit");
         modeButtons.forEach((item) => item.classList.toggle("is-active", item === button));
       });
     });
+    layerButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const active = !button.classList.contains("is-active");
+        button.classList.toggle("is-active", active);
+        viewer.setLayer?.(button.dataset.viewerLayer, active);
+      });
+    });
+    outliersButton?.addEventListener("click", () => {
+      const active = !outliersButton.classList.contains("is-active");
+      outliersButton.classList.toggle("is-active", active);
+      viewer.setOutliersOnly?.(active);
+    });
     resetButton?.addEventListener("click", () => viewer.reset());
     const pointCount = scene.point_sample_count || (scene.points || []).length || 0;
     const cameraCount = scene.camera_count || (scene.cameras || []).length || 0;
-    status.textContent = `${pointCount} sampled points · ${cameraCount} cameras`;
+    const alignment = scene.alignment;
+    const depthCount = scene.depth_diagnostic?.viewer_point_count || 0;
+    status.textContent = alignment
+      ? `${pointCount} COLMAP points${depthCount ? ` · ${depthCount} depth points` : ""} · ${alignment.frame_count || 0} ARKit · ${alignment.registered_count || 0} COLMAP · ${alignment.hybrid_arkit_count || 0} ARKit replacements · ${viewer.rendererName || "viewer"}`
+      : `${pointCount} sampled points · ${cameraCount} cameras · ${viewer.rendererName || "viewer"}`;
   } catch (error) {
     status.textContent = `Viewer load failed: ${error}`;
   }
+}
+
+function renderAlignmentLegend(legend, includeDepth = false) {
+  if (!legend) return;
+  legend.replaceChildren();
+  const entries = [
+    ["COLMAP trajectory", [90, 200, 250]],
+    ["Aligned ARKit trajectory", [255, 209, 102]],
+    ["Strict hybrid trajectory", [190, 142, 255]],
+    ["Accepted pair", [91, 214, 132]],
+    ["Rejected pair", [255, 92, 92]],
+    ["ARKit only / missing COLMAP", [166, 177, 186]],
+  ];
+  if (includeDepth) entries.push(
+    ["Depth via COLMAP pose", [66, 206, 255]],
+    ["Depth via ARKit pose", [255, 158, 64]],
+  );
+  entries.forEach(([text, color]) => {
+    const item = document.createElement("span");
+    item.className = "viewer-legend-item";
+    const swatch = document.createElement("span");
+    swatch.className = "viewer-legend-swatch";
+    swatch.style.backgroundColor = `rgb(${color.join(", ")})`;
+    const label = document.createElement("span");
+    label.textContent = text;
+    item.append(swatch, label);
+    legend.append(item);
+  });
 }
 
 function renderViewerLegend(legend, colors) {
@@ -772,12 +869,15 @@ function renderViewerLegend(legend, colors) {
   });
 }
 
-function renderSparseViewer(canvas, scene) {
+function renderSparseViewerLegacy(canvas, scene) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return { setMode() {}, reset() {} };
 
   const points = Array.isArray(scene.points) ? scene.points : [];
   const cameras = Array.isArray(scene.cameras) ? scene.cameras : [];
+  const alignment = scene.alignment && typeof scene.alignment === "object" ? scene.alignment : null;
+  const trajectories = Array.isArray(alignment?.captures) ? alignment.captures : [];
+  const trajectoryFrames = trajectories.flatMap((capture) => Array.isArray(capture.frames) ? capture.frames : []);
   const bounds = scene.bounds || { center: [0, 0, 0], radius: 1 };
   const center = Array.isArray(bounds.center) ? bounds.center : [0, 0, 0];
   const radius = Number(bounds.radius || 1);
@@ -789,6 +889,8 @@ function renderSparseViewer(canvas, scene) {
   let lastY = 0;
   let animationFrame = 0;
   let lastTick = 0;
+  let outliersOnly = false;
+  const visibleLayers = { points: true, colmap: true, arkit: true, links: true };
   const pressed = new Set();
 
   const orbitDefaults = {
@@ -911,20 +1013,24 @@ function renderSparseViewer(canvas, scene) {
     ctx.fillStyle = "#0b1012";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    const projectedPoints = points
-      .map((point) => ({ point, projection: project(point.position) }))
-      .filter((entry) => entry.projection)
-      .sort((a, b) => b.projection.depth - a.projection.depth);
+    if (visibleLayers.points) {
+      const projectedPoints = points
+        .map((point) => ({ point, projection: project(point.position) }))
+        .filter((entry) => entry.projection)
+        .sort((a, b) => b.projection.depth - a.projection.depth);
 
-    for (const entry of projectedPoints) {
-      const [r, g, b] = entry.point.color || [180, 200, 210];
-      const alpha = clamp(1.1 - entry.projection.depth / (radius * 7), 0.18, 0.95);
-      const size = clamp((radius * 0.5) / Math.max(entry.projection.depth, radius * 0.1), 1.2, 3.6) * dpr;
-      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
-      ctx.fillRect(entry.projection.x, entry.projection.y, size, size);
+      for (const entry of projectedPoints) {
+        const [r, g, b] = entry.point.color || [180, 200, 210];
+        const alpha = clamp(1.1 - entry.projection.depth / (radius * 7), 0.12, alignment ? 0.5 : 0.95);
+        const size = clamp((radius * 0.5) / Math.max(entry.projection.depth, radius * 0.1), 1.2, 3.6) * dpr;
+        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        ctx.fillRect(entry.projection.x, entry.projection.y, size, size);
+      }
     }
 
-    for (const camera of cameras) {
+    if (alignment) drawAlignmentTrajectories();
+
+    for (const camera of visibleLayers.colmap ? cameras : []) {
       const origin = project(camera.position);
       if (!origin) continue;
       const forward = camera.forward || [0, 0, 1];
@@ -934,8 +1040,8 @@ function renderSparseViewer(canvas, scene) {
         camera.position[2] + forward[2] * radius * 0.08,
       ]);
       if (!tip) continue;
-      const stroke = camera.stroke_color || [163, 178, 194];
-      const fill = camera.fill_color || stroke;
+      const stroke = alignment ? [90, 200, 250] : (camera.stroke_color || [163, 178, 194]);
+      const fill = alignment ? [90, 200, 250] : (camera.fill_color || stroke);
       ctx.strokeStyle = `rgba(${stroke[0]}, ${stroke[1]}, ${stroke[2]}, 0.95)`;
       const isHero = camera.role === "hero";
       ctx.lineWidth = (isHero ? 2.4 : 1.2) * dpr;
@@ -945,9 +1051,68 @@ function renderSparseViewer(canvas, scene) {
       ctx.stroke();
       ctx.fillStyle = `rgb(${fill[0]}, ${fill[1]}, ${fill[2]})`;
       ctx.beginPath();
-      ctx.arc(origin.x, origin.y, (isHero ? 5 : 2.6) * dpr, 0, Math.PI * 2);
+      ctx.arc(origin.x, origin.y, (alignment ? 2.2 : (isHero ? 5 : 2.6)) * dpr, 0, Math.PI * 2);
       ctx.fill();
     }
+  }
+
+  function drawPath(frames, key, color, alpha) {
+    let previous = null;
+    ctx.strokeStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, ${alpha})`;
+    ctx.lineWidth = 1.8 * dpr;
+    ctx.beginPath();
+    frames.forEach((frame) => {
+      const position = frame[key];
+      const projected = Array.isArray(position) ? project(position) : null;
+      if (!projected) {
+        previous = null;
+        return;
+      }
+      if (previous) ctx.lineTo(projected.x, projected.y);
+      else ctx.moveTo(projected.x, projected.y);
+      previous = projected;
+    });
+    ctx.stroke();
+  }
+
+  function drawAlignmentTrajectories() {
+    trajectories.forEach((capture) => {
+      const frames = Array.isArray(capture.frames) ? capture.frames : [];
+      if (visibleLayers.colmap) drawPath(frames.filter((frame) => frame.registered), "colmap_position", [90, 200, 250], outliersOnly ? 0.18 : 0.92);
+      if (visibleLayers.arkit) drawPath(frames, "arkit_position", [255, 209, 102], outliersOnly ? 0.18 : 0.9);
+    });
+
+    trajectoryFrames.forEach((frame) => {
+      const showFrame = !outliersOnly || frame.classification === "outlier";
+      const arkit = Array.isArray(frame.arkit_position) ? project(frame.arkit_position) : null;
+      const colmap = Array.isArray(frame.colmap_position) ? project(frame.colmap_position) : null;
+      if (visibleLayers.links && showFrame && arkit && colmap) {
+        const color = frame.classification === "outlier" ? [255, 92, 92] : [91, 214, 132];
+        ctx.strokeStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, ${frame.classification === "outlier" ? 0.95 : 0.28})`;
+        ctx.lineWidth = (frame.classification === "outlier" ? 2.4 : 1.0) * dpr;
+        ctx.beginPath();
+        ctx.moveTo(colmap.x, colmap.y);
+        ctx.lineTo(arkit.x, arkit.y);
+        ctx.stroke();
+      }
+      if (visibleLayers.colmap && showFrame && colmap) {
+        ctx.fillStyle = "rgb(90, 200, 250)";
+        ctx.beginPath();
+        ctx.arc(colmap.x, colmap.y, (frame.classification === "outlier" ? 4.2 : 2.8) * dpr, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (visibleLayers.arkit && showFrame && arkit) {
+        const color = frame.classification === "outlier"
+          ? [255, 92, 92]
+          : frame.classification === "missing"
+            ? [166, 177, 186]
+            : [255, 209, 102];
+        ctx.fillStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+        ctx.beginPath();
+        ctx.arc(arkit.x, arkit.y, (frame.classification === "outlier" ? 5.2 : 3.1) * dpr, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    });
   }
 
   function panOrbit(dx, dy) {
@@ -984,6 +1149,18 @@ function renderSparseViewer(canvas, scene) {
     draw();
   }
 
+  function setLayer(layer, visible) {
+    if (Object.prototype.hasOwnProperty.call(visibleLayers, layer)) {
+      visibleLayers[layer] = Boolean(visible);
+      draw();
+    }
+  }
+
+  function setOutliersOnly(enabled) {
+    outliersOnly = Boolean(enabled);
+    draw();
+  }
+
   function pickCamera(clientX, clientY) {
     resizeCanvas();
     const rect = canvas.getBoundingClientRect();
@@ -1001,6 +1178,29 @@ function renderSparseViewer(canvas, scene) {
         bestDistance = distance;
       }
     }
+    return selected;
+  }
+
+  function pickTrajectory(clientX, clientY) {
+    resizeCanvas();
+    const rect = canvas.getBoundingClientRect();
+    const x = (clientX - rect.left) * dpr;
+    const y = (clientY - rect.top) * dpr;
+    let selected = null;
+    let bestDistance = Infinity;
+    trajectoryFrames.forEach((frame) => {
+      [["ARKit", frame.arkit_position], ["COLMAP", frame.colmap_position]].forEach(([source, position]) => {
+        if (!Array.isArray(position)) return;
+        const projected = project(position);
+        if (!projected) return;
+        const distance = Math.hypot(projected.x - x, projected.y - y);
+        const priorityDistance = frame.classification === "outlier" ? distance * 0.7 : distance;
+        if (distance <= 14 * dpr && priorityDistance < bestDistance) {
+          selected = { frame, source };
+          bestDistance = priorityDistance;
+        }
+      });
+    });
     return selected;
   }
 
@@ -1114,5 +1314,5 @@ function renderSparseViewer(canvas, scene) {
   }
 
   draw();
-  return { setMode, reset, pickCamera };
+  return { setMode, setLayer, setOutliersOnly, reset, pickCamera, pickTrajectory };
 }

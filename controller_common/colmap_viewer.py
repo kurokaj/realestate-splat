@@ -7,12 +7,15 @@ import math
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+import numpy as np
+
 from scripts.prepare_nerfstudio_from_colmap import (
     colmap_pose_to_nerfstudio_transform,
     qvec_to_rotmat,
     read_cameras,
     read_images,
 )
+from src.realestate_splat.arkit_alignment import build_aligned_arkit_trajectories
 
 ROLE_CAMERA_COLORS: dict[str, dict[str, list[int]]] = {
     "coverage": {
@@ -98,7 +101,8 @@ def build_sparse_viewer_payload(sparse_txt_dir: Path, *, max_points: int = 25000
     camera_group_colors = assign_camera_group_colors(camera_rows)
     bounds = scene_bounds([point["position"] for point in converted_points], [camera["position"] for camera in camera_rows])
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "camera_forward_convention": "camera center toward image plane",
         "point_count": len(points),
         "point_sample_count": len(converted_points),
         "camera_count": len(camera_rows),
@@ -200,7 +204,9 @@ def assign_camera_group_colors(camera_rows: list[dict[str, Any]]) -> dict[str, d
 def camera_row(image: Any, manifest_entry: Mapping[str, Any] | None = None) -> dict[str, Any]:
     transform = colmap_pose_to_nerfstudio_transform(image)
     rotation = qvec_to_rotmat(image.qvec)
-    forward_cv = [-rotation[2][0], -rotation[2][1], -rotation[2][2]]
+    # COLMAP/OpenCV cameras look along +Z. The camera-to-world forward axis is
+    # therefore the positive third row of the world-to-camera rotation.
+    forward_cv = [rotation[2][0], rotation[2][1], rotation[2][2]]
     up_cv = [-rotation[1][0], -rotation[1][1], -rotation[1][2]]
     role = str((manifest_entry or {}).get("role") or "coverage")
     group = viewer_group_key(manifest_entry, role)
@@ -251,3 +257,106 @@ def write_sparse_viewer_payload(sparse_txt_dir: Path, output_path: Path, *, max_
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return output_path
+
+
+def normalize_sparse_viewer_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Upgrade legacy viewer camera directions without rewriting R2 artifacts."""
+    normalized = dict(payload)
+    schema_version = int(normalized.get("schema_version") or 1)
+    cameras = normalized.get("cameras")
+    if schema_version < 2 and isinstance(cameras, list):
+        upgraded_cameras = []
+        for raw_camera in cameras:
+            if not isinstance(raw_camera, dict):
+                continue
+            camera = dict(raw_camera)
+            forward = camera.get("forward")
+            if isinstance(forward, list) and len(forward) == 3:
+                camera["forward"] = [-float(value) for value in forward]
+            upgraded_cameras.append(camera)
+        normalized["cameras"] = upgraded_cameras
+        normalized["schema_version"] = 2
+        normalized["camera_forward_convention"] = "camera center toward image plane"
+        normalized["upgraded_from_schema_version"] = schema_version
+    return normalized
+
+
+def build_alignment_viewer_overlay(
+    alignment_report: Mapping[str, Any],
+    image_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return browser-ready trajectories in the sparse viewer axis convention."""
+    overlay = build_aligned_arkit_trajectories(alignment_report, image_manifest)
+    converted_captures = []
+    trajectory_positions: list[Sequence[float]] = []
+    display_transform: list[list[float]] | None = None
+    display_reference_capture_id: str | None = None
+    for capture in overlay.get("captures") or []:
+        if display_transform is None:
+            colmap_to_arkit_values = capture.get("colmap_to_arkit_matrix_row_major")
+            if isinstance(colmap_to_arkit_values, list) and len(colmap_to_arkit_values) == 4:
+                # Sparse viewer artifacts use [COLMAP X, COLMAP Z, -COLMAP Y].
+                # Convert that presentation frame back to COLMAP, then apply
+                # the inverse capture similarity to recover ARKit's metric,
+                # gravity-aligned world where +Y is up.
+                viewer_to_colmap = np.asarray(
+                    [
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 0.0, -1.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ],
+                    dtype=np.float64,
+                )
+                colmap_to_arkit = np.asarray(colmap_to_arkit_values, dtype=np.float64)
+                if colmap_to_arkit.shape == (4, 4) and np.all(np.isfinite(colmap_to_arkit)):
+                    viewer_to_arkit = colmap_to_arkit @ viewer_to_colmap
+                    display_transform = [round_vector(row, digits=12) for row in viewer_to_arkit]
+                    display_reference_capture_id = str(capture.get("capture_id") or "") or None
+        converted_frames = []
+        for frame in capture.get("frames") or []:
+            converted = dict(frame)
+            converted["arkit_position"] = round_vector(
+                convert_xyz_to_nerfstudio_axes(frame["aligned_arkit_center_colmap"])
+            )
+            trajectory_positions.append(converted["arkit_position"])
+            converted["arkit_forward"] = round_vector(
+                convert_xyz_to_nerfstudio_axes(frame["aligned_arkit_forward_colmap"])
+            )
+            converted["arkit_up"] = round_vector(
+                convert_xyz_to_nerfstudio_axes(frame["aligned_arkit_up_colmap"])
+            )
+            if frame.get("colmap_center") is not None:
+                converted["colmap_position"] = round_vector(
+                    convert_xyz_to_nerfstudio_axes(frame["colmap_center"])
+                )
+                trajectory_positions.append(converted["colmap_position"])
+            else:
+                converted["colmap_position"] = None
+            hybrid_position = frame.get("hybrid_position_colmap")
+            converted["hybrid_position"] = (
+                round_vector(convert_xyz_to_nerfstudio_axes(hybrid_position))
+                if isinstance(hybrid_position, list) and len(hybrid_position) == 3
+                else None
+            )
+            if converted["hybrid_position"] is not None:
+                trajectory_positions.append(converted["hybrid_position"])
+            converted.pop("aligned_arkit_center_colmap", None)
+            converted.pop("aligned_arkit_forward_colmap", None)
+            converted.pop("aligned_arkit_up_colmap", None)
+            converted.pop("colmap_center", None)
+            converted.pop("hybrid_position_colmap", None)
+            converted.pop("hybrid_forward_colmap", None)
+            converted_frames.append(converted)
+        converted_capture = dict(capture)
+        converted_capture.pop("colmap_to_arkit_matrix_row_major", None)
+        converted_capture["frames"] = converted_frames
+        converted_captures.append(converted_capture)
+    overlay["captures"] = converted_captures
+    overlay["bounds"] = scene_bounds([], trajectory_positions)
+    overlay["coordinate_convention"] = "viewer: [COLMAP X, COLMAP Z, -COLMAP Y]"
+    if display_transform is not None:
+        overlay["display_transform_row_major"] = display_transform
+        overlay["display_reference_capture_id"] = display_reference_capture_id
+        overlay["display_coordinate_convention"] = "reference ARKit world: meters, +Y up (gravity aligned)"
+    return overlay

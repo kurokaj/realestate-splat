@@ -531,10 +531,11 @@
             </select>
           </label>
           <label>
-            <span class="label-title">Mode <span class="info-dot" tabindex="0" data-tip="COLMAP mapper route. Global is currently the verified faster path for the car_single smoke input.">i</span></span>
-            <select name="mode">
-              <option value="global" {% if colmap_form_values.mode != "incremental" %}selected{% endif %}>global</option>
+            <span class="label-title">Mode <span class="info-dot" tabindex="0" data-tip="Pose-prior incremental performs a complete fresh feature/matching run, writes Skanea ARKit positions as robust metric priors, and then runs COLMAP's pose_prior_mapper.">i</span></span>
+            <select name="mode" data-colmap-mode-select>
+              <option value="global" {% if colmap_form_values.mode == "global" %}selected{% endif %}>global</option>
               <option value="incremental" {% if colmap_form_values.mode == "incremental" %}selected{% endif %}>incremental</option>
+              <option value="pose_prior_incremental" {% if colmap_form_values.mode == "pose_prior_incremental" %}selected{% endif %}>pose-prior incremental</option>
             </select>
           </label>
           <label>
@@ -544,6 +545,17 @@
                 <option value="{{ option.value }}" {% if colmap_form_values.feature_extractor == option.value %}selected{% endif %}>{{ option.label }}</option>
               {% endfor %}
             </select>
+          </label>
+        </div>
+        <div class="grid one tight" data-pose-prior-settings {% if colmap_form_values.mode != "pose_prior_incremental" %}hidden{% endif %}>
+          <label>
+            <span class="label-title">ARKit position uncertainty <span class="info-dot" tabindex="0" data-tip="Controls how strongly COLMAP trusts each ARKit camera position. Conservative is the first Run C preset; rotations are retained for diagnostics but are not constrained by the mapper.">i</span></span>
+            <select name="pose_prior_uncertainty" data-pose-prior-uncertainty>
+              <option value="strong" {% if colmap_form_values.pose_prior_uncertainty == "strong" %}selected{% endif %}>Strong · 5 cm</option>
+              <option value="conservative" {% if colmap_form_values.pose_prior_uncertainty == "conservative" %}selected{% endif %}>Conservative · 10 cm</option>
+              <option value="relaxed" {% if colmap_form_values.pose_prior_uncertainty == "relaxed" %}selected{% endif %}>Relaxed · 25 cm</option>
+            </select>
+            <span class="muted">Position-only Cartesian priors from the continuous Skanea capture. The full feature extraction and selected matching strategy still run normally.</span>
           </label>
         </div>
         <div class="grid three tight">
@@ -648,6 +660,27 @@
           {% else %}
             <p class="empty">No COLMAP run info yet.</p>
           {% endif %}
+          {% set arkit_alignment = (latest_colmap_run.summary_json.arkit_alignment if latest_colmap_run and latest_colmap_run.summary_json else {}) %}
+          {% if arkit_alignment %}
+            <h3>Latest COLMAP Run · ARKit Alignment</h3>
+            <p class="muted mono">{{ latest_colmap_run.id }}</p>
+            <dl class="stat-list">
+              <dt>Status</dt><dd>{{ arkit_alignment.status or "unknown" }}</dd>
+              <dt>Correspondences</dt><dd>{{ arkit_alignment.correspondence_count or 0 }}</dd>
+              <dt>Inliers</dt><dd>{{ arkit_alignment.inlier_count or 0 }}</dd>
+              <dt>Captures</dt><dd>{{ arkit_alignment.completed_capture_count or 0 }} / {{ arkit_alignment.capture_count or 0 }}</dd>
+            </dl>
+            {% for capture in arkit_alignment.captures or [] %}
+              <h4>{{ capture.capture_id }}</h4>
+              <dl class="stat-list">
+                <dt>Scale</dt><dd>{{ capture.scale_colmap_units_per_meter }} COLMAP units / m</dd>
+                <dt>Position median</dt><dd>{{ capture.position_residual_meters.median if capture.position_residual_meters else "" }} m</dd>
+                <dt>Position p95</dt><dd>{{ capture.position_residual_meters.p95 if capture.position_residual_meters else "" }} m</dd>
+                <dt>Angle median</dt><dd>{{ capture.angular_residual_degrees.median if capture.angular_residual_degrees else "" }}°</dd>
+                <dt>Angle p95</dt><dd>{{ capture.angular_residual_degrees.p95 if capture.angular_residual_degrees else "" }}°</dd>
+              </dl>
+            {% endfor %}
+          {% endif %}
         </div>
       </div>
       <section class="blacklist-block">
@@ -675,6 +708,173 @@
           <p class="empty">No images blacklisted.</p>
         {% endif %}
       </section>
+    </section>
+
+    <section class="panel" id="arkit-alignment">
+      <div class="panel-heading">
+        <h2>ARKit Alignment</h2>
+        <span class="muted">Backfill or refresh diagnostics from a preserved COLMAP run</span>
+      </div>
+      {% if arkit_alignment_run_options %}
+        <form method="get" action="/ui/projects/{{ project.id }}" class="stack">
+          <input type="hidden" name="tab" value="colmap">
+          <input type="hidden" name="show_history" value="true">
+          <label>
+            <span class="label-title">Source COLMAP run</span>
+            <select name="arkit_alignment_run_id">
+              {% for run in arkit_alignment_run_options %}
+                <option value="{{ run.id }}"{% if run.id == selected_arkit_alignment_run_id %} selected{% endif %}>
+                  {{ run.id }}{% if run.mode %} · {{ run.mode }}{% endif %}{% if run.registered_images %} · {{ run.registered_images }} registered{% endif %}{% if run.alignment %} · analyzed{% endif %}{% if run.hybrid %} · hybrid built{% endif %}
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+          <button type="submit">View Selected Run</button>
+        </form>
+        {% if selected_arkit_alignment_run %}
+          <p><strong>Displayed run:</strong> <span class="mono">{{ selected_arkit_alignment_run.id }}</span>{% if selected_arkit_alignment_run.mode %} · {{ selected_arkit_alignment_run.mode }}{% endif %}</p>
+          <form method="post" action="/ui/projects/{{ project.id }}/arkit-alignment" class="stack">
+            <input type="hidden" name="colmap_stage_run_id" value="{{ selected_arkit_alignment_run.id }}">
+            <p class="muted">Analyze or refresh only the displayed run. This downloads the preserved manifest and sparse camera metadata; it does not start a GPU pod or modify the source COLMAP model.</p>
+            <button type="submit">{% if selected_arkit_alignment_run.alignment %}Refresh Displayed Run Analysis{% else %}Analyze Displayed Run{% endif %}</button>
+          </form>
+        {% endif %}
+        {% if selected_arkit_alignment_run and selected_arkit_alignment_run.alignment %}
+          {% set selected_alignment = selected_arkit_alignment_run.alignment %}
+          <h3>Selected Run Result</h3>
+          <p class="muted mono">{{ selected_arkit_alignment_run.id }}{% if selected_arkit_alignment_run.mode %} · {{ selected_arkit_alignment_run.mode }}{% endif %}</p>
+          <dl class="stat-list">
+            <dt>Status</dt><dd>{{ selected_alignment.status or "unknown" }}</dd>
+            <dt>Correspondences</dt><dd>{{ selected_alignment.correspondence_count or 0 }}</dd>
+            <dt>Inliers</dt><dd>{{ selected_alignment.inlier_count or 0 }}</dd>
+            <dt>Captures</dt><dd>{{ selected_alignment.completed_capture_count or 0 }} / {{ selected_alignment.capture_count or 0 }}</dd>
+          </dl>
+          {% for capture in selected_alignment.captures or [] %}
+            <h4>{{ capture.capture_id }}</h4>
+            <dl class="stat-list">
+              <dt>Scale</dt><dd>{{ capture.scale_colmap_units_per_meter }} COLMAP units / m</dd>
+              <dt>Position median</dt><dd>{{ capture.position_residual_meters.median if capture.position_residual_meters else "" }} m</dd>
+              <dt>Position p95</dt><dd>{{ capture.position_residual_meters.p95 if capture.position_residual_meters else "" }} m</dd>
+              <dt>Angle median</dt><dd>{{ capture.angular_residual_degrees.median if capture.angular_residual_degrees else "" }}°</dd>
+              <dt>Angle p95</dt><dd>{{ capture.angular_residual_degrees.p95 if capture.angular_residual_degrees else "" }}°</dd>
+            </dl>
+          {% endfor %}
+          <h3>Trajectory Comparison</h3>
+          <p class="muted">Blue is COLMAP, amber is aligned ARKit, purple is the strict hybrid path, red marks rejected pairs, and gray ARKit points were not registered by COLMAP. The view is transformed to the reference ARKit gravity frame so +Y is up.</p>
+          <div
+            class="viewer-surface"
+            data-colmap-viewer-url="/ui/projects/{{ project.id }}/colmap-viewer?colmap_stage_run_id={{ selected_arkit_alignment_run.id }}&amp;include_alignment=true"
+            data-alignment-viewer="true"
+          >
+            <canvas class="viewer-canvas" tabindex="0" aria-label="ARKit and COLMAP trajectory comparison"></canvas>
+            <div class="viewer-overlay">
+              <span class="viewer-status">Loading trajectory comparison...</span>
+              <div class="viewer-selection" data-viewer-selection>Click a trajectory point to inspect its frame.</div>
+            </div>
+            <div class="viewer-legend" data-viewer-legend aria-label="Trajectory colors"></div>
+            <div class="viewer-toolbar viewer-toolbar-layers">
+              <button type="button" class="viewer-button is-active" data-viewer-layer="points">Point cloud</button>
+              <button type="button" class="viewer-button is-active" data-viewer-layer="colmap">COLMAP</button>
+              <button type="button" class="viewer-button is-active" data-viewer-layer="arkit">ARKit</button>
+              <button type="button" class="viewer-button is-active" data-viewer-layer="hybrid">Hybrid</button>
+              <button type="button" class="viewer-button is-active" data-viewer-layer="links">Links</button>
+              <button type="button" class="viewer-button" data-viewer-outliers>Outliers only</button>
+              <button type="button" class="viewer-button is-active" data-viewer-mode="orbit">Orbit</button>
+              <button type="button" class="viewer-button" data-viewer-mode="free">Free View</button>
+              <button type="button" class="viewer-button" data-viewer-reset>Reset</button>
+            </div>
+            <div class="viewer-help">Each camera is the point/apex; its rectangular image plane is in front, so the pyramid opens toward the photographed scene. Orbit: left-drag rotate, right-drag pan, wheel zoom. Purple uses ARKit for missing, rejected, strict-residual, and guarded unstable-sequence poses.</div>
+          </div>
+          <details>
+            <summary>Raw selected-run summary</summary>
+            <pre>{{ selected_alignment|json_pretty }}</pre>
+          </details>
+          <div id="arkit-hybrid">
+            <h3>A_hybrid Camera Set</h3>
+            <p class="muted">Persist the approved purple trajectory as a separate immutable camera artifact. Run A remains unchanged. This downloads small metadata files only and does not start a GPU pod.</p>
+            {% if selected_arkit_alignment_run.hybrid %}
+              {% set selected_hybrid = selected_arkit_alignment_run.hybrid %}
+              <dl class="stat-list">
+                <dt>Status</dt><dd>{{ selected_hybrid.status or "unknown" }}</dd>
+                <dt>Frames</dt><dd>{{ selected_hybrid.frame_count or 0 }}</dd>
+                <dt>COLMAP poses</dt><dd>{{ selected_hybrid.colmap_registered_count or 0 }}</dd>
+                <dt>ARKit replacements</dt><dd>{{ selected_hybrid.arkit_propagated_count or 0 }}</dd>
+                <dt>Source transitions</dt><dd>{{ selected_hybrid.transition_validation.source_transition_count if selected_hybrid.transition_validation else 0 }}</dd>
+                <dt>Transitions requiring review</dt><dd>{{ selected_hybrid.transition_validation.review_required_count if selected_hybrid.transition_validation else 0 }}</dd>
+                <dt>Artifact</dt><dd class="mono">{{ selected_hybrid.artifact_uri or "" }}</dd>
+              </dl>
+            {% endif %}
+            <form method="post" action="/ui/projects/{{ project.id }}/arkit-hybrid" class="stack">
+              <input type="hidden" name="colmap_stage_run_id" value="{{ selected_arkit_alignment_run.id }}">
+              <button type="submit">{% if selected_arkit_alignment_run.hybrid %}Rebuild A_hybrid Camera Set{% else %}Build A_hybrid Camera Set{% endif %}</button>
+            </form>
+          </div>
+          {% if selected_arkit_alignment_run.hybrid %}
+            <div id="depth-diagnostic">
+              <h3>High-confidence Depth Diagnostic</h3>
+              <p class="muted">Back-project high-confidence raw LiDAR samples through the immutable hybrid camera set. The derived cloud is voxel-downsampled and capped for browser inspection; raw depth and confidence objects remain unchanged. This downloads the session depth sidecars but does not start a GPU pod.</p>
+              {% if selected_arkit_alignment_run.depth_diagnostic %}
+                {% set selected_depth = selected_arkit_alignment_run.depth_diagnostic %}
+                {% set overlap = selected_depth.overlap_statistics or {} %}
+                <dl class="stat-list">
+                  <dt>Status</dt><dd>{{ selected_depth.status or "unknown" }}</dd>
+                  <dt>Processed frames</dt><dd>{{ selected_depth.processed_frame_count or 0 }} / {{ selected_depth.frame_count or 0 }}</dd>
+                  <dt>Skipped frames</dt><dd>{{ selected_depth.skipped_frame_count or 0 }}</dd>
+                  <dt>Valid high-confidence samples</dt><dd>{{ selected_depth.valid_high_confidence_sample_count or 0 }}</dd>
+                  <dt>Back-projected samples</dt><dd>{{ selected_depth.sampled_point_count or 0 }}</dd>
+                  <dt>Source voxels</dt><dd>{{ selected_depth.voxel_count or 0 }}</dd>
+                  <dt>Viewer points</dt><dd>{{ selected_depth.viewer_point_count or 0 }}</dd>
+                  <dt>Multi-frame sample coverage</dt><dd>{{ ((overlap.multi_frame_sample_fraction or 0) * 100)|round(2) }}%</dd>
+                  <dt>Frame-centroid spread p95</dt><dd>{% if overlap.frame_centroid_spread_meters and overlap.frame_centroid_spread_meters.p95 is not none %}{{ (overlap.frame_centroid_spread_meters.p95 * 100)|round(2) }} cm{% else %}n/a{% endif %}</dd>
+                  <dt>Surface thickness proxy p95</dt><dd>{% if overlap.local_surface_normal_spread_meters and overlap.local_surface_normal_spread_meters.p95 is not none %}{{ (overlap.local_surface_normal_spread_meters.p95 * 100)|round(2) }} cm{% else %}n/a{% endif %}</dd>
+                  <dt>COLMAP/ARKit source offset p95</dt><dd>{% if overlap.cross_pose_source_centroid_offset_meters and overlap.cross_pose_source_centroid_offset_meters.p95 is not none %}{{ (overlap.cross_pose_source_centroid_offset_meters.p95 * 100)|round(2) }} cm{% else %}n/a{% endif %}</dd>
+                  <dt>Artifact</dt><dd class="mono">{{ selected_depth.artifact_uri or "" }}</dd>
+                </dl>
+                <div
+                  class="viewer-surface"
+                  data-colmap-viewer-url="/ui/projects/{{ project.id }}/colmap-viewer?colmap_stage_run_id={{ selected_arkit_alignment_run.id }}&amp;include_alignment=true&amp;include_depth=true"
+                  data-alignment-viewer="true"
+                >
+                  <canvas class="viewer-canvas" tabindex="0" aria-label="COLMAP, hybrid cameras, and high-confidence LiDAR overlay"></canvas>
+                  <div class="viewer-overlay">
+                    <span class="viewer-status">Loading depth diagnostic...</span>
+                    <div class="viewer-selection" data-viewer-selection>Click a trajectory point to inspect its frame.</div>
+                  </div>
+                  <div class="viewer-legend" data-viewer-legend aria-label="Depth and trajectory colors"></div>
+                  <div class="viewer-toolbar viewer-toolbar-layers">
+                    <button type="button" class="viewer-button is-active" data-viewer-layer="points">COLMAP points</button>
+                    <button type="button" class="viewer-button is-active" data-viewer-layer="depth_colmap">LiDAR · COLMAP pose</button>
+                    <button type="button" class="viewer-button is-active" data-viewer-layer="depth_arkit">LiDAR · ARKit pose</button>
+                    <button type="button" class="viewer-button is-active" data-viewer-layer="hybrid">Hybrid cameras</button>
+                    <button type="button" class="viewer-button" data-viewer-layer="colmap">COLMAP cameras</button>
+                    <button type="button" class="viewer-button" data-viewer-layer="arkit">ARKit cameras</button>
+                    <button type="button" class="viewer-button" data-viewer-layer="links">Alignment links</button>
+                    <button type="button" class="viewer-button is-active" data-viewer-mode="orbit">Orbit</button>
+                    <button type="button" class="viewer-button" data-viewer-mode="free">Free View</button>
+                    <button type="button" class="viewer-button" data-viewer-reset>Reset</button>
+                  </div>
+                  <div class="viewer-help">Cyan depth uses retained COLMAP camera poses; orange depth uses propagated ARKit poses. Toggle either source independently and inspect whether walls, floor, corners, and openings remain continuous.</div>
+                </div>
+              {% endif %}
+              <form method="post" action="/ui/projects/{{ project.id }}/depth-diagnostic" class="stack" data-long-running-form>
+                <input type="hidden" name="colmap_stage_run_id" value="{{ selected_arkit_alignment_run.id }}">
+                <button type="submit">{% if selected_arkit_alignment_run.depth_diagnostic %}Rebuild Depth Diagnostic{% else %}Build Depth Diagnostic{% endif %}</button>
+                <span class="muted">Processing all raw depth maps may take a few minutes. Keep this page open until it returns.</span>
+              </form>
+            </div>
+          {% endif %}
+        {% else %}
+          <p class="empty">The selected run has not been analyzed yet.</p>
+        {% endif %}
+        {% for run in arkit_alignment_run_options if run.alignment and run.id != selected_arkit_alignment_run_id %}
+          <details>
+            <summary>{{ run.id }} alignment result</summary>
+            <pre>{{ run.alignment|json_pretty }}</pre>
+          </details>
+        {% endfor %}
+      {% else %}
+        <p class="empty">Complete a COLMAP run before analyzing ARKit alignment.</p>
+      {% endif %}
     </section>
 
     <section class="panel">
