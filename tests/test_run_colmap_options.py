@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.run_colmap import effective_mapper_options, mapper_name_for_mode
+from scripts.run_colmap import effective_mapper_options
 
 
 class MapperOptionCompatibilityTests(unittest.TestCase):
@@ -64,27 +64,6 @@ class MapperOptionCompatibilityTests(unittest.TestCase):
         )
 
         self.assertEqual(options["GlobalMapper.custom_option"], 7)
-
-    def test_pose_prior_mode_uses_robust_database_covariance(self) -> None:
-        help_text = """
-          --Mapper.ba_use_gpu arg
-          --Mapper.ba_gpu_index arg
-          --overwrite_priors_covariance arg
-          --use_robust_loss_on_prior_position arg
-          --prior_position_loss_scale arg
-        """
-
-        options = effective_mapper_options(
-            {"mode": "pose_prior_incremental", "use_gpu": True, "mapper_options": {}},
-            mapper_help=help_text,
-        )
-
-        self.assertEqual(mapper_name_for_mode("pose_prior_incremental"), "pose_prior_mapper")
-        self.assertEqual(options["overwrite_priors_covariance"], 0)
-        self.assertEqual(options["use_robust_loss_on_prior_position"], 1)
-        self.assertEqual(options["prior_position_loss_scale"], 7.815)
-        self.assertEqual(options["Mapper.ba_use_gpu"], 1)
-
 
 if __name__ == "__main__":
     unittest.main()

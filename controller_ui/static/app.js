@@ -269,17 +269,6 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 function setupColmapFormBehavior(form) {
-  const modeSelect = form.querySelector("[data-colmap-mode-select]");
-  const posePriorSettings = form.querySelector("[data-pose-prior-settings]");
-  const posePriorUncertainty = form.querySelector("[data-pose-prior-uncertainty]");
-  function syncPosePriorState() {
-    const enabled = modeSelect?.value === "pose_prior_incremental";
-    if (posePriorSettings) posePriorSettings.hidden = !enabled;
-    if (posePriorUncertainty) posePriorUncertainty.disabled = !enabled;
-  }
-  modeSelect?.addEventListener("change", syncPosePriorState);
-  syncPosePriorState();
-
   const matcherSelect = form.querySelector("[data-colmap-matcher-select]");
   const loopDetectionInput = form.querySelector("[data-colmap-loop-detection-input]");
   const loopDetectionRow = form.querySelector("[data-colmap-loop-detection-row]");

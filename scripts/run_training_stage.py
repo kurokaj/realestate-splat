@@ -49,6 +49,20 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--colmap-uri", required=True, help="COLMAP current URI, e.g. r2://bucket/projects/id/colmap/current.")
     parser.add_argument(
+        "--camera-source",
+        choices=["visual_colmap", "arkit_hybrid"],
+        default="visual_colmap",
+        help="Camera set used to build Nerfstudio transforms.",
+    )
+    parser.add_argument(
+        "--hybrid-camera-set-uri",
+        help="Immutable A_hybrid camera-set JSON used when --camera-source=arkit_hybrid.",
+    )
+    parser.add_argument(
+        "--colmap-source-run-id",
+        help="Stable COLMAP stage run id expected by the selected camera artifact.",
+    )
+    parser.add_argument(
         "--preprocess-group-output",
         action="append",
         default=[],
@@ -125,6 +139,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     preprocess_dir = work_dir / "preprocess_current"
     colmap_dir = work_dir / "colmap_current"
+    hybrid_camera_set_path = work_dir / "hybrid_camera_set.json"
     local_run_dir = work_dir / "training_run"
     logs_dir = work_dir / "logs"
     current_dir = work_dir / "upload_current"
@@ -157,8 +172,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             sync_directory(args.preprocess_uri, preprocess_dir, endpoint_url=args.endpoint_url)
         sync_directory(args.colmap_uri, colmap_dir, endpoint_url=args.endpoint_url)
+        if args.camera_source == "arkit_hybrid":
+            if not args.hybrid_camera_set_uri:
+                raise ValueError("--hybrid-camera-set-uri is required for arkit_hybrid training")
+            if not args.colmap_source_run_id:
+                raise ValueError("--colmap-source-run-id is required for arkit_hybrid training")
+            copy_file(args.hybrid_camera_set_uri, hybrid_camera_set_path, endpoint_url=args.endpoint_url)
         progress.update(15, "preparing", "Preparing Nerfstudio input data", force=True)
-        prepare_local_run(preprocess_dir, colmap_dir, local_run_dir)
+        prepare_local_run(
+            preprocess_dir,
+            colmap_dir,
+            local_run_dir,
+            hybrid_camera_set_path=hybrid_camera_set_path if args.camera_source == "arkit_hybrid" else None,
+        )
 
         command_results = run_training(args, local_run_dir, logs_dir, progress=progress)
         progress.update(90, "artifacts", "Preparing training outputs", force=True)
@@ -168,6 +194,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             stage_run_id=run_id,
             preprocess_uri=args.preprocess_uri,
             colmap_uri=args.colmap_uri,
+            camera_source=args.camera_source,
+            hybrid_camera_set_uri=args.hybrid_camera_set_uri,
+            colmap_source_run_id=args.colmap_source_run_id,
             output_uri=args.output_uri,
             local_run_dir=local_run_dir,
             logs_dir=logs_dir,
@@ -193,6 +222,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     stage_run_id=run_id,
                     preprocess_uri=args.preprocess_uri,
                     colmap_uri=args.colmap_uri,
+                    camera_source=args.camera_source,
+                    hybrid_camera_set_uri=args.hybrid_camera_set_uri,
+                    colmap_source_run_id=args.colmap_source_run_id,
                     output_uri=args.output_uri,
                     local_run_dir=local_run_dir,
                     logs_dir=logs_dir,
@@ -265,6 +297,8 @@ def print_plan(
     print(f"Stage run id: {run_id}")
     print(f"$ sync {args.preprocess_uri} -> {preprocess_dir}")
     print(f"$ sync {args.colmap_uri} -> {colmap_dir}")
+    if args.camera_source == "arkit_hybrid":
+        print(f"$ copy {args.hybrid_camera_set_uri} -> {local_run_dir / 'reports' / 'hybrid_camera_set.json'}")
     print(f"$ prepare local training run -> {local_run_dir}")
     for command in build_training_commands(args, local_run_dir):
         print("$ " + " ".join(command))
@@ -286,7 +320,13 @@ def print_plan(
     print(f"$ sync {history_dir} -> {args.output_uri.rstrip('/')}/runs/{run_id}")
 
 
-def prepare_local_run(preprocess_dir: Path, colmap_dir: Path, local_run_dir: Path) -> None:
+def prepare_local_run(
+    preprocess_dir: Path,
+    colmap_dir: Path,
+    local_run_dir: Path,
+    *,
+    hybrid_camera_set_path: Optional[Path] = None,
+) -> None:
     frames_dir = preprocess_dir / "frames_selected"
     sparse_txt_dir = colmap_dir / "sparse_txt"
     if not frames_dir.exists():
@@ -305,6 +345,10 @@ def prepare_local_run(preprocess_dir: Path, colmap_dir: Path, local_run_dir: Pat
     copy_if_exists(preprocess_dir / "preprocess_summary.json", reports_dir / "preprocess_summary.json")
     copy_if_exists(colmap_dir / "reconstruction_report.json", reports_dir / "reconstruction_report.json")
     copy_if_exists(colmap_dir / "stage_result.json", reports_dir / "colmap_stage_result.json")
+    if hybrid_camera_set_path is not None:
+        if not hybrid_camera_set_path.exists():
+            raise FileNotFoundError(f"Hybrid camera set is missing: {hybrid_camera_set_path}")
+        copy_if_exists(hybrid_camera_set_path, reports_dir / "hybrid_camera_set.json")
 
 
 def build_training_commands(args: argparse.Namespace, local_run_dir: Path) -> List[List[str]]:
@@ -325,6 +369,15 @@ def build_training_commands(args: argparse.Namespace, local_run_dir: Path) -> Li
         str(args.num_downscales),
         "--overwrite",
     ]
+    if args.camera_source == "arkit_hybrid":
+        prepare_args.extend(
+            [
+                "--hybrid-camera-set",
+                str(local_run_dir / "reports" / "hybrid_camera_set.json"),
+                "--expected-colmap-run-id",
+                str(args.colmap_source_run_id),
+            ]
+        )
     if args.prepare_with_pixi:
         prepare_command = [
             args.pixi_bin,
@@ -465,7 +518,27 @@ def validate_nerfstudio_colmap_initialization(local_run_dir: Path) -> None:
     point_count = parse_ply_vertex_count(point_cloud_path)
     if not point_count:
         raise RuntimeError(f"Nerfstudio COLMAP initialization PLY has no vertices: {point_cloud_path}")
-    print(f"Verified COLMAP sparse initialization: {point_count} points from {point_cloud_path}", flush=True)
+    frames = transforms.get("frames")
+    if not isinstance(frames, list) or not frames:
+        raise RuntimeError("Nerfstudio transforms.json has no camera frames.")
+    buildvision3d = transforms.get("buildvision3d") if isinstance(transforms.get("buildvision3d"), dict) else {}
+    declared_frame_count = int(buildvision3d.get("frame_count") or buildvision3d.get("registered_images") or 0)
+    if declared_frame_count and declared_frame_count != len(frames):
+        raise RuntimeError(
+            f"Nerfstudio camera count mismatch: metadata declares {declared_frame_count}, transforms contain {len(frames)}."
+        )
+    if buildvision3d.get("camera_source") == "arkit_hybrid":
+        colmap_count = int(buildvision3d.get("colmap_registered_count") or 0)
+        arkit_count = int(buildvision3d.get("arkit_propagated_count") or 0)
+        if colmap_count + arkit_count != len(frames):
+            raise RuntimeError("A_hybrid pose-source counts do not equal the prepared frame count.")
+        if not buildvision3d.get("hybrid_selection_sha256"):
+            raise RuntimeError("A_hybrid transforms are missing their selection fingerprint.")
+    print(
+        f"Verified {len(frames)} cameras and COLMAP sparse initialization: "
+        f"{point_count} points from {point_cloud_path}",
+        flush=True,
+    )
 
 
 def prepare_upload_payloads(
@@ -475,6 +548,9 @@ def prepare_upload_payloads(
     stage_run_id: str,
     preprocess_uri: str,
     colmap_uri: str,
+    camera_source: str,
+    hybrid_camera_set_uri: Optional[str],
+    colmap_source_run_id: Optional[str],
     output_uri: str,
     local_run_dir: Path,
     logs_dir: Path,
@@ -505,7 +581,7 @@ def prepare_upload_payloads(
         status="completed",
         started_at=started_at,
         finished_at=finished_at,
-        input_uris=[preprocess_uri.rstrip("/"), colmap_uri.rstrip("/")],
+        input_uris=training_input_uris(preprocess_uri, colmap_uri, hybrid_camera_set_uri),
         output_uris=[
             f"{output_uri.rstrip('/')}/current",
             f"{output_uri.rstrip('/')}/runs/{stage_run_id}",
@@ -513,7 +589,12 @@ def prepare_upload_payloads(
         artifact_manifest_uri=None,
         logs_uri=None,
         metrics_uri=f"{output_uri.rstrip('/')}/current/training_summary.json",
-        metadata={"summary": summary},
+        metadata={
+            "summary": summary,
+            "camera_source": camera_source,
+            "colmap_source_run_id": colmap_source_run_id,
+            "hybrid_camera_set_uri": hybrid_camera_set_uri,
+        },
     )
     write_stage_result(current_dir / "stage_result.json", result)
     write_stage_result(history_dir / "stage_result.json", result)
@@ -533,6 +614,9 @@ def prepare_failed_payloads(
     stage_run_id: str,
     preprocess_uri: str,
     colmap_uri: str,
+    camera_source: str,
+    hybrid_camera_set_uri: Optional[str],
+    colmap_source_run_id: Optional[str],
     output_uri: str,
     local_run_dir: Path,
     logs_dir: Path,
@@ -557,12 +641,16 @@ def prepare_failed_payloads(
         status="failed",
         started_at=started_at,
         finished_at=finished_at,
-        input_uris=[preprocess_uri.rstrip("/"), colmap_uri.rstrip("/")],
+        input_uris=training_input_uris(preprocess_uri, colmap_uri, hybrid_camera_set_uri),
         output_uris=[f"{output_uri.rstrip('/')}/current"],
         logs_uri=f"{output_uri.rstrip('/')}/current/logs",
         metrics_uri=None,
         error_message=str(error),
-        metadata={},
+        metadata={
+            "camera_source": camera_source,
+            "colmap_source_run_id": colmap_source_run_id,
+            "hybrid_camera_set_uri": hybrid_camera_set_uri,
+        },
     )
     write_stage_result(current_dir / "stage_result.json", result)
     write_stage_result(history_dir / "stage_result.json", result)
@@ -588,7 +676,7 @@ def training_summary(local_run_dir: Path, command_results: Sequence[CommandResul
         gaussian_stats=gaussian_stats,
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": utc_now(),
         "method": method,
         "output_dir": relative_or_string(output_dir, local_run_dir),
@@ -602,6 +690,14 @@ def training_summary(local_run_dir: Path, command_results: Sequence[CommandResul
         "colmap_init_ply": relative_or_string(init_ply if init_ply.exists() else None, local_run_dir),
         "colmap_init_point_count": parse_ply_vertex_count(init_ply),
         "colmap_init_stats": buildvision3d.get("point_cloud_stats", {}),
+        "camera_source": buildvision3d.get("camera_source") or "visual_colmap",
+        "prepared_frame_count": len(transforms.get("frames") or []),
+        "colmap_registered_count": buildvision3d.get("colmap_registered_count"),
+        "arkit_propagated_count": buildvision3d.get("arkit_propagated_count"),
+        "hybrid_source_run_id": buildvision3d.get("hybrid_source_run_id"),
+        "hybrid_selection_sha256": buildvision3d.get("hybrid_selection_sha256"),
+        "hybrid_artifact_uri": buildvision3d.get("hybrid_artifact_uri"),
+        "initialization_source": buildvision3d.get("initialization_source") or "colmap_sparse_txt",
         "checkpoint_count": len(checkpoint_files),
         "latest_checkpoint": relative_or_string(checkpoint_files[-1] if checkpoint_files else None, local_run_dir),
         "commands": [
@@ -615,6 +711,17 @@ def training_summary(local_run_dir: Path, command_results: Sequence[CommandResul
             for result in command_results
         ],
     }
+
+
+def training_input_uris(
+    preprocess_uri: str,
+    colmap_uri: str,
+    hybrid_camera_set_uri: Optional[str],
+) -> List[str]:
+    values = [preprocess_uri.rstrip("/"), colmap_uri.rstrip("/")]
+    if hybrid_camera_set_uri:
+        values.append(hybrid_camera_set_uri.rstrip("/"))
+    return values
 
 
 def build_training_diagnostics(

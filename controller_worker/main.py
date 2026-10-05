@@ -375,6 +375,9 @@ def run_runpod_training(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]
     inputs = stage_run["input_uri_json"] or {}
     preprocess_uri = inputs.get("preprocess_uri")
     colmap_uri = inputs.get("colmap_uri")
+    camera_source = inputs.get("camera_source", "visual_colmap")
+    hybrid_camera_set_uri = inputs.get("hybrid_camera_set_uri")
+    colmap_source_run_id = inputs.get("colmap_source_run_id")
     output_base_uri = inputs.get("output_uri")
     if not preprocess_uri:
         raise ValueError("runpod_training requires input_uri_json.preprocess_uri")
@@ -385,6 +388,14 @@ def run_runpod_training(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]
     require_r2_uri(preprocess_uri, "preprocess_uri")
     require_r2_uri(colmap_uri, "colmap_uri")
     require_r2_uri(output_base_uri, "output_uri")
+    if camera_source not in {"visual_colmap", "arkit_hybrid"}:
+        raise ValueError(f"Unsupported training camera_source: {camera_source}")
+    if camera_source == "arkit_hybrid":
+        if not hybrid_camera_set_uri:
+            raise ValueError("arkit_hybrid training requires input_uri_json.hybrid_camera_set_uri")
+        if not colmap_source_run_id:
+            raise ValueError("arkit_hybrid training requires input_uri_json.colmap_source_run_id")
+        require_r2_uri(hybrid_camera_set_uri, "hybrid_camera_set_uri")
 
     remote_command = build_training_stage_shell_command(stage_run, inputs)
     current_uri = f"{output_base_uri.rstrip('/')}/current"
@@ -400,6 +411,8 @@ def run_runpod_training(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]
                 "gpu_type_ids": inputs.get("gpu_type_ids") or runpod_training_gpu_types(),
                 "runpod_api_version": RUNPOD_REST_API_VERSION,
                 "dry_run": bool(inputs.get("dry_run")),
+                "camera_source": camera_source,
+                "colmap_source_run_id": colmap_source_run_id,
             },
         )
         conn.execute(
@@ -428,6 +441,9 @@ def run_runpod_training(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]
                 "dry_run": True,
                 "image": image,
                 "method": inputs.get("method", "splatfacto"),
+                "camera_source": camera_source,
+                "colmap_source_run_id": colmap_source_run_id,
+                "hybrid_camera_set_uri": hybrid_camera_set_uri,
                 "max_steps": inputs.get("max_steps", 100),
                 "stage_result_uri": f"{current_uri}/stage_result.json",
                 "training_summary_uri": f"{current_uri}/training_summary.json",
@@ -496,8 +512,6 @@ def build_colmap_stage_shell_command(stage_run: dict[str, Any], inputs: dict[str
         output_uri,
         "--mode",
         inputs.get("mode", "global"),
-        "--pose-prior-uncertainty",
-        inputs.get("pose_prior_uncertainty", "conservative"),
         "--feature-extractor",
         inputs.get("feature_extractor", "SIFT"),
         "--matcher",
@@ -559,6 +573,8 @@ def build_training_stage_shell_command(stage_run: dict[str, Any], inputs: dict[s
         inputs["preprocess_uri"],
         "--colmap-uri",
         inputs["colmap_uri"],
+        "--camera-source",
+        inputs.get("camera_source", "visual_colmap"),
         "--output-uri",
         output_uri,
         "--method",
@@ -572,6 +588,10 @@ def build_training_stage_shell_command(stage_run: dict[str, Any], inputs: dict[s
         "--num-downscales",
         str(inputs.get("num_downscales", 1)),
     ]
+    if inputs.get("colmap_source_run_id"):
+        command.extend(["--colmap-source-run-id", inputs["colmap_source_run_id"]])
+    if inputs.get("hybrid_camera_set_uri"):
+        command.extend(["--hybrid-camera-set-uri", inputs["hybrid_camera_set_uri"]])
     if inputs.get("export", True):
         command.append("--export")
     else:
@@ -1187,6 +1207,14 @@ def compact_training_summary(
         "stage": "training",
         "status": stage_result.get("status"),
         "method": wrapper_summary.get("method") or training_summary.get("method"),
+        "camera_source": training_summary.get("camera_source") or metadata.get("camera_source") or "visual_colmap",
+        "prepared_frame_count": training_summary.get("prepared_frame_count"),
+        "colmap_registered_count": training_summary.get("colmap_registered_count"),
+        "arkit_propagated_count": training_summary.get("arkit_propagated_count"),
+        "colmap_source_run_id": metadata.get("colmap_source_run_id") or training_summary.get("hybrid_source_run_id"),
+        "hybrid_selection_sha256": training_summary.get("hybrid_selection_sha256"),
+        "hybrid_artifact_uri": training_summary.get("hybrid_artifact_uri") or metadata.get("hybrid_camera_set_uri"),
+        "initialization_source": training_summary.get("initialization_source"),
         "selected_config": training_summary.get("selected_config"),
         "checkpoint_count": training_summary.get("checkpoint_count"),
         "latest_checkpoint": training_summary.get("latest_checkpoint"),

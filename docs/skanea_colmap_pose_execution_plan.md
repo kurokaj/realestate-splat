@@ -25,10 +25,10 @@ The immediate goal is not to force LiDAR into COLMAP. It is to determine, with c
 | A | Visual-only Global mapper — 278/316 registered in the first run | What can the existing verified path reconstruct unaided? |
 | A_hybrid | Run A plus aligned ARKit poses for visually unregistered frames | Can the strongest visual reconstruction safely retain the remaining Skanea RGB-D frames? |
 | B | Visual-only Incremental mapper — 244/316 registered in the first run | What changes because of mapper choice alone? |
-| C | Incremental `pose_prior_mapper` | What do conservative ARKit position priors add over B, and can C match or exceed A? |
+| C | Incremental `pose_prior_mapper` — completed and rejected | Did conservative ARKit position priors improve B? No: C registered 238/316 and retained similar floaters. |
 | E | High-confidence depth overlay | Does the aligned depth agree with the visual model and across frames? |
 
-Compare C against both controls. B versus C isolates the value of pose priors within the Incremental family: C must improve on B's 244/316 to demonstrate that the priors helped. A versus C is the operational benchmark: C must reach or exceed A's 278/316 before replacing Global on registration coverage. A_hybrid is a separate derived result, not another COLMAP mapper run; registered cameras retain COLMAP poses and only missing eligible cameras receive aligned ARKit poses with explicit provenance.
+C was compared against both controls and failed its adoption gate: it registered six fewer images than B and 40 fewer than A, while visual inspection found essentially the same floaters as B. The production UI and wrapper no longer expose the experimental pose-prior mode. Its immutable run and this result record remain for provenance. A_hybrid is a separate derived result, not another COLMAP mapper run; registered cameras retain COLMAP poses and only missing eligible cameras receive aligned ARKit poses with explicit provenance.
 
 ## Step 0 — Freeze the test input and add run provenance
 
@@ -202,55 +202,21 @@ Confirm that Run B completed with an inspectable model and report. Keep both A a
 
 ## Step 4 — Run C: conservative ARKit position priors
 
-### Implementation
+### Completed result and decision — 2026-10-05
 
-Implemented: the COLMAP UI exposes **pose-prior incremental** as a reusable,
-standalone mapper mode using COLMAP's documented `pose_prior_mapper` path for
-the recorded runtime version. It performs a complete fresh feature-extraction
-and matching run with the selected settings, writes ARKit position priors into
-that run's database, and then maps from those inputs. Run C therefore does not
-depend on or mutate Run A, Run B, or either run's preserved database.
+- Stage run: `colmap_run_e611dfe31e49`
+- Immutable artifact prefix: `r2://buildvision3d-pipeline/projects/first_lidar_test/colmap/runs/colmap_run_e611dfe31e49`
+- Provider job: `w1pof82ocj256r`; repository commit `af22b66417f71e45971fd47add4c3beab7087c54`
+- Runtime: COLMAP 4.0.4 in `cuda12.4-colmap-r2-runtime-onnx-cudnn-pycolmap-sm75-sm86-sm89-r1`
+- Input: the same 316 images and manifest SHA-256 `9ae0ebee9f155a4d45693520e583d1ad323f2802d5457e754c873a8b58645054`
+- Mode: full fresh sequential feature extraction and matching followed by `pose_prior_mapper`
+- Position prior: Conservative, isotropic 10 cm standard deviation, position-only Cartesian ARKit translation
+- Registered: 238/316 images, versus B's 244 and A's 278
+- Selected model: 86,674 sparse points
+- Operator visual inspection: floaters were essentially the same as B; no useful geometry improvement was observed
+- Decision: Gate 4 failed. Do not run Strong or Relaxed variants. Retire the active pose-prior implementation and keep this immutable run only as experiment provenance.
 
-- Import only camera positions as formal priors unless the runtime is proven to support another constraint correctly.
-- Preserve the original full ARKit transforms for diagnostics, but do not imply that COLMAP used the rotations as constraints.
-- Use a robust prior loss.
-- Expose a small set of named uncertainty presets rather than an unrestricted raw-number field initially.
-- Make the actual covariance/standard deviation and all COLMAP options visible in the run report.
-- Do not lower visual registration inlier requirements merely to increase the registered-frame count.
-
-The named isotropic position presets are **Strong = 5 cm**, **Conservative =
-10 cm**, and **Relaxed = 25 cm**. The first Run C uses Conservative. Database
-covariance is retained (`overwrite_priors_covariance=0`), the robust prior loss
-is enabled, and its loss scale is recorded as `7.815`. Each prior uses the
-translation from Skanea's column-major ARKit camera-to-world transform in a
-Cartesian, metric coordinate system. Multiple rooms are supported when they
-belong to one continuous Skanea capture; combining unrelated capture origins is
-rejected until cross-capture alignment is implemented.
-
-The first run uses the middle, conservative uncertainty preset. Stronger or weaker presets are only run after inspecting the result.
-
-### Operator action
-
-Use the same sequential matching configuration as Run B and choose
-**pose-prior incremental**. Select the default **Conservative · 10 cm** preset,
-start Run C, and inspect its model and report. Feature extraction and matching
-will run again by design, making C a complete production-usable mode rather than
-a one-off mapper-only experiment.
-
-### Compare B versus C
-
-- registered-image count and exact rescued/lost frame IDs;
-- connected-model count;
-- reprojection error;
-- camera-center residual against the aligned ARKit trajectory;
-- angular residual for diagnosis, even though orientation was not a formal prior;
-- trajectory continuity and loop behavior;
-- sparse geometry quality;
-- runtime.
-
-### Gate 4
-
-Adopt position priors as an available mode only if C improves registration, stability, or metric behavior without visibly degrading reprojection or geometry. Keep visual-only modes available. A truly featureless image is not expected to register from a position prior alone.
+This result does not reject ARKit poses as downstream camera data. It rejects this particular use of position-only priors during incremental COLMAP mapping for the tested room. The accepted path remains A_hybrid, where stable Run A poses are retained and guarded missing or unstable segments use aligned full ARKit poses with explicit provenance.
 
 ## Step 5 — Build A_hybrid: Run A plus aligned ARKit cameras
 
@@ -316,7 +282,7 @@ The first live A_hybrid artifact still requires operator execution and visual in
 - COLMAP-pose versus propagated-ARKit-pose centroid offset p95: 4.62 cm
 - Operator visual inspection: geometry looks coherent and closely matches the known-good ARKit point cloud; no obvious source-transition splitting was reported.
 
-Gate 6 passes provisionally for A_hybrid. The near-complete multi-frame support and centimeter-scale spread are consistent with a usable indoor LiDAR overlay, but the metrics are tied to the configured 10 cm agreement cells and are not absolute sensor-accuracy estimates. Run the identical diagnostic on B_hybrid as a low-cost comparison before choosing between the two hybrid camera sets; this requires no GPU pod. C remains the subsequent pose-prior mapper experiment.
+Gate 6 passes provisionally for A_hybrid. The near-complete multi-frame support and centimeter-scale spread are consistent with a usable indoor LiDAR overlay, but the metrics are tied to the configured 10 cm agreement cells and are not absolute sensor-accuracy estimates. Run the identical diagnostic on B_hybrid as a low-cost comparison before choosing between the two hybrid camera sets; this requires no GPU pod.
 
 ### Run E result for B_hybrid — 2026-10-04
 
@@ -353,6 +319,16 @@ Depth is accepted for later experiments only when scale and orientation are corr
 
 ## Step 7 — First downstream ablation
 
+### Implementation status — 2026-10-05
+
+Implemented, awaiting the first live training smoke: the Training tab now selects a specific approved immutable COLMAP run or that run's completed A_hybrid artifact. It no longer silently consumes `colmap/current`, so the rejected Run C cannot become a training input merely because it is the newest reconstruction.
+
+For A_hybrid, the training stage downloads the immutable camera artifact and the source Run A history prefix, verifies their run identities, and prepares all selected hybrid RGB frames. Stable frames use their retained COLMAP poses and guarded replacements use aligned ARKit poses. Both pose sources are converted from the artifact's COLMAP/OpenCV camera-to-world convention into the same Nerfstudio convention used by the visual-only path.
+
+The first comparison deliberately keeps Run A's COLMAP-calibrated camera intrinsics and Run A's sparse points for every frame. Propagated frames resolve their camera through the manifest camera group. This isolates the effect of camera coverage and trajectory; LiDAR-assisted initialization remains the third ablation.
+
+Preflight rejects unresolved source transitions, a mismatched base run, duplicate or missing frames, non-finite or non-rigid transforms, invalid captured intrinsics, image-size/camera-size mismatches, unresolved camera groups, inconsistent pose-source counts, or a missing sparse initialization. Training summary schema v2 records the selected camera source, prepared frame count, COLMAP/ARKit counts, hybrid fingerprint and artifact URI, base run ID, and initialization source.
+
 Only after Gate 6, create separate training inputs while keeping all other settings fixed:
 
 1. visual COLMAP cameras and normal initialization;
@@ -383,10 +359,10 @@ The practical UI sequence is:
 2. Run and inspect visual Global baseline A.
 3. Analyze ARKit alignment on A.
 4. Run and inspect visual Incremental control B.
-5. Run and compare position-prior reconstruction C.
-6. Choose the accepted visual reconstruction using the comparison evidence.
+5. Record position-prior reconstruction C as completed and rejected.
+6. Keep Run A as the accepted visual reconstruction.
 7. Build and inspect A_hybrid.
 8. Build and inspect high-confidence depth overlay E.
-9. Only then start downstream training ablations.
+9. Select the explicit A/A_hybrid training input and run the controlled smoke tests, then the downstream training ablations.
 
 Each numbered item is a stopping point. The next implementation slice is selected only after the preceding output has been reviewed.

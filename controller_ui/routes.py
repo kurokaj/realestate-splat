@@ -339,17 +339,18 @@ def project_detail(
 ) -> HTMLResponse:
     started_at = perf_counter()
     timing: dict[str, float] = {}
+    active_tab = tab if tab in {"preprocess", "matching", "colmap", "training", "activity"} else "preprocess"
     mark = perf_counter()
     data = load_project_detail(
         project_id,
         show_history=show_history,
         history_page=history_page,
         extra_run_ids=[arkit_alignment_run_id] if arkit_alignment_run_id else None,
+        include_all_colmap_details=active_tab == "training",
     )
     timing["project_load"] = elapsed_ms(mark)
     if data["project"] is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    active_tab = tab if tab in {"preprocess", "matching", "colmap", "training", "activity"} else "preprocess"
     mark = perf_counter()
     gate_state = lightweight_gate_state(data["project"], data["stage_runs"])
     timing["gate_state"] = elapsed_ms(mark)
@@ -433,11 +434,10 @@ def lightweight_gate_state(project: dict[str, Any], stage_runs: list[dict[str, A
     to render navigation.
     """
     colmap_runs = [run for run in stage_runs if run.get("stage") == "colmap"]
-    latest_colmap = colmap_runs[0] if colmap_runs else None
     return {
         "matching_gate_open": None,
         "colmap_gate_open": None,
-        "training_gate_open": bool(latest_colmap and latest_colmap.get("status") == "approved"),
+        "training_gate_open": any(run.get("status") == "approved" for run in colmap_runs),
         "matching_plan_selected": None,
     }
 
@@ -557,7 +557,6 @@ def ui_queue_colmap(
     output_uri: Optional[str] = Form(default=None),
     endpoint_url: Optional[str] = Form(default=None),
     mode: str = Form(default="global"),
-    pose_prior_uncertainty: str = Form(default="conservative"),
     feature_extractor: str = Form(default="SIFT"),
     matcher: Optional[str] = Form(default=None),
     processing_strategy: Optional[str] = Form(default=None),
@@ -606,12 +605,7 @@ def ui_queue_colmap(
         resolved_output_uri = empty_to_none(output_uri) or f"r2://{default_r2_bucket()}/projects/{project_id}/colmap"
         require_r2_uri(resolved_preprocess_uri, "preprocess_uri")
         require_r2_uri(resolved_output_uri, "output_uri")
-        validate_choice(mode, {"global", "incremental", "pose_prior_incremental"}, "mode")
-        validate_choice(
-            pose_prior_uncertainty,
-            {"strong", "conservative", "relaxed"},
-            "pose_prior_uncertainty",
-        )
+        validate_choice(mode, {"global", "incremental"}, "mode")
         validate_choice(feature_extractor, {option["value"] for option in COLMAP_FEATURE_EXTRACTOR_OPTIONS}, "feature_extractor")
         validate_choice(matching_type, {option["value"] for option in COLMAP_FEATURE_MATCHER_OPTIONS}, "matching_type")
         validate_choice(camera_model, {option["value"] for option in COLMAP_CAMERA_MODEL_OPTIONS}, "camera_model")
@@ -672,7 +666,6 @@ def ui_queue_colmap(
             "output_uri": resolved_output_uri,
             "endpoint_url": empty_to_none(endpoint_url),
             "mode": mode,
-            "pose_prior_uncertainty": pose_prior_uncertainty,
             "feature_extractor": feature_extractor,
             "matcher": matcher,
             "processing_strategy": processing_strategy,
@@ -1018,8 +1011,8 @@ def ui_save_matching_strategy(
 @router.post("/projects/{project_id}/training")
 def ui_queue_training(
     project_id: str,
+    training_source: Optional[str] = Form(default=None),
     preprocess_uri: Optional[str] = Form(default=None),
-    colmap_uri: Optional[str] = Form(default=None),
     output_uri: Optional[str] = Form(default=None),
     endpoint_url: Optional[str] = Form(default=None),
     method: str = Form(default="splatfacto"),
@@ -1041,9 +1034,35 @@ def ui_queue_training(
         project = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
-        latest_colmap = latest_stage_run(conn, project_id, "colmap")
-        if not latest_colmap or latest_colmap.get("status") != "approved":
-            raise HTTPException(status_code=400, detail="COLMAP must be approved before training can be queued")
+        selected_source_kind, selected_colmap_run_id = parse_training_source(training_source)
+        selected_colmap = conn.execute(
+            "SELECT * FROM stage_runs WHERE id = %s AND project_id = %s AND stage = 'colmap'",
+            (selected_colmap_run_id, project_id),
+        ).fetchone()
+        if selected_colmap is None or selected_colmap.get("status") != "approved":
+            raise HTTPException(status_code=400, detail="Select an approved COLMAP reconstruction for training")
+        selected_colmap_json = row_to_json(selected_colmap)
+        selected_colmap_run_id = str(selected_colmap_json.get("id") or "")
+        selected_summary = (
+            selected_colmap_json.get("summary_json")
+            if isinstance(selected_colmap_json.get("summary_json"), dict)
+            else {}
+        )
+        hybrid_camera_set_uri = None
+        if selected_source_kind == "arkit_hybrid":
+            hybrid_summary = selected_summary.get("arkit_hybrid") if isinstance(selected_summary.get("arkit_hybrid"), dict) else {}
+            hybrid_camera_set_uri = str(hybrid_summary.get("artifact_uri") or "")
+            transition_validation = (
+                hybrid_summary.get("transition_validation")
+                if isinstance(hybrid_summary.get("transition_validation"), dict)
+                else {}
+            )
+            if hybrid_summary.get("status") != "completed" or not hybrid_camera_set_uri:
+                raise HTTPException(status_code=400, detail="Selected COLMAP run has no completed A_hybrid camera artifact")
+            if str(hybrid_summary.get("source_run_id") or "") != selected_colmap_run_id:
+                raise HTTPException(status_code=400, detail="A_hybrid source run does not match the selected COLMAP run")
+            if int(transition_validation.get("review_required_count") or 0) != 0:
+                raise HTTPException(status_code=400, detail="A_hybrid contains source transitions requiring review")
         preprocess_runs = rows_to_json(
             conn.execute(
                 """
@@ -1067,14 +1086,16 @@ def ui_queue_training(
             or project.get("preprocess_current_uri")
             or assembled_project_preprocess_uri(project_json)
         )
-        resolved_colmap_uri = empty_to_none(colmap_uri) or project.get("colmap_current_uri")
+        resolved_colmap_uri = colmap_history_uri(selected_colmap_json)
         resolved_output_uri = empty_to_none(output_uri) or f"r2://{default_r2_bucket()}/projects/{project_id}/training"
         if not resolved_preprocess_uri:
             raise HTTPException(status_code=400, detail="Approved preprocess output is required to queue training")
         if not resolved_colmap_uri:
-            raise HTTPException(status_code=400, detail="Project colmap_current_uri is required to queue training")
+            raise HTTPException(status_code=400, detail="Selected COLMAP history artifact is required to queue training")
         require_r2_uri(resolved_preprocess_uri, "preprocess_uri")
         require_r2_uri(resolved_colmap_uri, "colmap_uri")
+        if hybrid_camera_set_uri:
+            require_r2_uri(hybrid_camera_set_uri, "hybrid_camera_set_uri")
         require_r2_uri(resolved_output_uri, "output_uri")
         splatfacto_options = {"use_scale_regularization": True}
         if use_scale_regularization in {"true", "false"}:
@@ -1083,6 +1104,10 @@ def ui_queue_training(
             "preprocess_uri": resolved_preprocess_uri,
             "preprocess_group_outputs": preprocess_group_outputs,
             "colmap_uri": resolved_colmap_uri,
+            "training_source": f"{selected_source_kind}:{selected_colmap_run_id}",
+            "camera_source": selected_source_kind,
+            "colmap_source_run_id": selected_colmap_run_id,
+            "hybrid_camera_set_uri": hybrid_camera_set_uri,
             "output_uri": resolved_output_uri,
             "endpoint_url": empty_to_none(endpoint_url),
             "method": method,
@@ -1177,6 +1202,7 @@ def load_project_detail(
     show_history: bool = False,
     history_page: int = 0,
     extra_run_ids: Optional[list[str]] = None,
+    include_all_colmap_details: bool = False,
 ) -> dict[str, Any]:
     with connect() as conn:
         project = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
@@ -1206,6 +1232,12 @@ def load_project_detail(
         ).fetchall()
     stage_run_json = rows_to_json(metadata_rows)
     detailed_ids = required_project_detail_run_ids(stage_run_json, show_history, history_page)
+    if include_all_colmap_details:
+        detailed_ids.extend(
+            str(run["id"])
+            for run in stage_run_json
+            if run.get("stage") == "colmap" and run.get("id")
+        )
     detailed_ids = list(dict.fromkeys([*detailed_ids, *(extra_run_ids or [])]))
     if detailed_ids:
         with connect() as conn:
@@ -1717,8 +1749,7 @@ def colmap_review_context(
             "preprocess_uri": assembled_preprocess_uri,
             "output_uri": input_json.get("output_uri") or colmap_output_base,
             "endpoint_url": input_json.get("endpoint_url") or "",
-            "mode": input_json.get("mode") or "global",
-            "pose_prior_uncertainty": input_json.get("pose_prior_uncertainty") or "conservative",
+            "mode": input_json.get("mode") if input_json.get("mode") in {"global", "incremental"} else "global",
             "feature_extractor": feature_extractor,
             "matcher": input_json.get("matcher") or "exhaustive",
             "processing_strategy": ui_strategy,
@@ -1887,17 +1918,19 @@ def colmap_matching_plan_uri(project: dict[str, Any]) -> str:
 
 def training_review_context(project: dict[str, Any], stage_runs: list[dict[str, Any]]) -> dict[str, Any]:
     colmap_runs = [run for run in stage_runs if run.get("stage") == "colmap"]
-    latest_colmap = colmap_runs[0] if colmap_runs else None
+    source_options = training_camera_source_options(colmap_runs)
     training_runs = [run for run in stage_runs if run.get("stage") == "training"]
     latest_run = training_runs[0] if training_runs else None
     input_json = latest_run.get("input_uri_json") if latest_run and isinstance(latest_run.get("input_uri_json"), dict) else {}
     selected_gpu = first_gpu_type(input_json.get("gpu_type_ids")) or DEFAULT_TRAINING_GPU
     training_output_base = project.get("training_current_uri", "").rsplit("/current", 1)[0] if project.get("training_current_uri") else ""
     return {
-        "training_gate_open": bool(latest_colmap and latest_colmap.get("status") == "approved"),
+        "training_gate_open": bool(source_options),
+        "training_source_options": source_options,
         "latest_training_run": latest_run,
         "training_form_values": {
             "preprocess_uri": input_json.get("preprocess_uri") or project.get("preprocess_current_uri") or "",
+            "training_source": input_json.get("training_source") or "",
             "colmap_uri": input_json.get("colmap_uri") or project.get("colmap_current_uri") or "",
             "output_uri": input_json.get("output_uri") or training_output_base,
             "endpoint_url": input_json.get("endpoint_url") or "",
@@ -1918,6 +1951,59 @@ def training_review_context(project: dict[str, Any], stage_runs: list[dict[str, 
         "training_gpu_options": TRAINING_GPU_OPTIONS,
         "training_summary_rows": training_summary_rows(latest_run),
     }
+
+
+def parse_training_source(value: Optional[str]) -> tuple[str, str]:
+    if not value:
+        raise HTTPException(status_code=400, detail="Select a training camera source")
+    kind, separator, run_id = value.partition(":")
+    if separator != ":" or kind not in {"visual_colmap", "arkit_hybrid"} or not run_id:
+        raise HTTPException(status_code=400, detail="Invalid training camera source")
+    return kind, run_id
+
+
+def training_camera_source_options(colmap_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    options: list[dict[str, Any]] = []
+    for run in colmap_runs:
+        if run.get("status") != "approved" or not run.get("id"):
+            continue
+        run_id = str(run["id"])
+        summary = run.get("summary_json") if isinstance(run.get("summary_json"), dict) else {}
+        registered_images = summary.get("registered_images")
+        mode = str(summary.get("mode") or "COLMAP")
+        options.append(
+            {
+                "value": f"visual_colmap:{run_id}",
+                "kind": "visual_colmap",
+                "run_id": run_id,
+                "label": f"{run_id} · {mode} visual-only",
+                "detail": f"{registered_images} registered cameras" if registered_images is not None else "COLMAP registered cameras",
+            }
+        )
+        hybrid = summary.get("arkit_hybrid") if isinstance(summary.get("arkit_hybrid"), dict) else {}
+        transition_validation = (
+            hybrid.get("transition_validation") if isinstance(hybrid.get("transition_validation"), dict) else {}
+        )
+        if (
+            hybrid.get("status") == "completed"
+            and hybrid.get("artifact_uri")
+            and str(hybrid.get("source_run_id") or "") == run_id
+            and int(transition_validation.get("review_required_count") or 0) == 0
+        ):
+            options.append(
+                {
+                    "value": f"arkit_hybrid:{run_id}",
+                    "kind": "arkit_hybrid",
+                    "run_id": run_id,
+                    "label": f"{run_id} · A_hybrid",
+                    "detail": (
+                        f"{hybrid.get('frame_count')} cameras: "
+                        f"{hybrid.get('colmap_registered_count')} COLMAP + "
+                        f"{hybrid.get('arkit_propagated_count')} ARKit"
+                    ),
+                }
+            )
+    return options
 
 
 def raw_source_summary(project: dict[str, Any]) -> dict[str, Any]:
@@ -2127,6 +2213,14 @@ def training_summary_rows(run: Optional[dict[str, Any]]) -> list[dict[str, Any]]
     add("GPU", first_gpu_type(inputs.get("gpu_type_ids")))
     add("Container disk GB", inputs.get("container_disk_gb"))
     add("Method", summary.get("method") or inputs.get("method"))
+    add("Camera source", summary.get("camera_source") or inputs.get("camera_source"))
+    add("Base COLMAP run", summary.get("colmap_source_run_id") or inputs.get("colmap_source_run_id"))
+    add("Prepared frames", summary.get("prepared_frame_count"))
+    add("COLMAP poses", summary.get("colmap_registered_count"))
+    add("ARKit propagated poses", summary.get("arkit_propagated_count"))
+    add("Hybrid selection SHA-256", summary.get("hybrid_selection_sha256"))
+    add("Hybrid artifact", summary.get("hybrid_artifact_uri") or inputs.get("hybrid_camera_set_uri"))
+    add("Initialization", summary.get("initialization_source"))
     add("Max steps", inputs.get("max_steps"))
     add("Save every", inputs.get("save_every"))
     add("Eval every", inputs.get("eval_every"))

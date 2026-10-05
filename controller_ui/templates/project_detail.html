@@ -531,11 +531,10 @@
             </select>
           </label>
           <label>
-            <span class="label-title">Mode <span class="info-dot" tabindex="0" data-tip="Pose-prior incremental performs a complete fresh feature/matching run, writes Skanea ARKit positions as robust metric priors, and then runs COLMAP's pose_prior_mapper.">i</span></span>
-            <select name="mode" data-colmap-mode-select>
+            <span class="label-title">Mode</span>
+            <select name="mode">
               <option value="global" {% if colmap_form_values.mode == "global" %}selected{% endif %}>global</option>
               <option value="incremental" {% if colmap_form_values.mode == "incremental" %}selected{% endif %}>incremental</option>
-              <option value="pose_prior_incremental" {% if colmap_form_values.mode == "pose_prior_incremental" %}selected{% endif %}>pose-prior incremental</option>
             </select>
           </label>
           <label>
@@ -545,17 +544,6 @@
                 <option value="{{ option.value }}" {% if colmap_form_values.feature_extractor == option.value %}selected{% endif %}>{{ option.label }}</option>
               {% endfor %}
             </select>
-          </label>
-        </div>
-        <div class="grid one tight" data-pose-prior-settings {% if colmap_form_values.mode != "pose_prior_incremental" %}hidden{% endif %}>
-          <label>
-            <span class="label-title">ARKit position uncertainty <span class="info-dot" tabindex="0" data-tip="Controls how strongly COLMAP trusts each ARKit camera position. Conservative is the first Run C preset; rotations are retained for diagnostics but are not constrained by the mapper.">i</span></span>
-            <select name="pose_prior_uncertainty" data-pose-prior-uncertainty>
-              <option value="strong" {% if colmap_form_values.pose_prior_uncertainty == "strong" %}selected{% endif %}>Strong · 5 cm</option>
-              <option value="conservative" {% if colmap_form_values.pose_prior_uncertainty == "conservative" %}selected{% endif %}>Conservative · 10 cm</option>
-              <option value="relaxed" {% if colmap_form_values.pose_prior_uncertainty == "relaxed" %}selected{% endif %}>Relaxed · 25 cm</option>
-            </select>
-            <span class="muted">Position-only Cartesian priors from the continuous Skanea capture. The full feature extraction and selected matching strategy still run normally.</span>
           </label>
         </div>
         <div class="grid three tight">
@@ -925,8 +913,13 @@
       <form method="post" action="/ui/projects/{{ project.id }}/training" class="stack">
         <div class="grid two tight">
           <label>
-            <span class="label-title">COLMAP URI <span class="info-dot" tabindex="0" data-tip="Approved colmap/current input with sparse reconstruction used for training.">i</span></span>
-            <input name="colmap_uri" value="{{ training_form_values.colmap_uri or project.colmap_current_uri or '' }}">
+            <span class="label-title">Camera set <span class="info-dot" tabindex="0" data-tip="Select an immutable approved visual reconstruction or its completed A_hybrid camera artifact. Both use the selected COLMAP run's sparse points for this first comparison.">i</span></span>
+            <select name="training_source" required>
+              <option value="" {% if not training_form_values.training_source %}selected{% endif %} disabled>Select a camera set…</option>
+              {% for option in training_source_options %}
+                <option value="{{ option.value }}" {% if training_form_values.training_source == option.value %}selected{% endif %}>{{ option.label }} — {{ option.detail }}</option>
+              {% endfor %}
+            </select>
           </label>
           <label>
             <span class="label-title">Output URI <span class="info-dot" tabindex="0" data-tip="Base R2 prefix for training outputs. current/ stores the latest exported splat and training summary.">i</span></span>
@@ -1017,7 +1010,7 @@
         </div>
       </form>
       {% else %}
-        <p class="empty">Approve the latest COLMAP run first to unlock manual training queueing.</p>
+        <p class="empty">Approve at least one COLMAP reconstruction to unlock manual training queueing.</p>
       {% endif %}
     </section>
 

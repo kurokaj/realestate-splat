@@ -4,7 +4,11 @@ import os
 import unittest
 from unittest.mock import patch
 
-from controller_worker.main import build_runpod_colmap_pod_payload, guarded_runpod_stage_shell_command
+from controller_worker.main import (
+    build_runpod_colmap_pod_payload,
+    build_training_stage_shell_command,
+    guarded_runpod_stage_shell_command,
+)
 
 
 class WorkerRunpodPayloadTests(unittest.TestCase):
@@ -59,6 +63,28 @@ class WorkerRunpodPayloadTests(unittest.TestCase):
             line for line in shell_command.splitlines() if "already failed" in line
         )
         self.assertNotIn("sleep infinity", failed_restart_line)
+
+    def test_training_command_passes_hybrid_camera_artifact(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"CONTROLLER_REPO_URL": "https://example.invalid/repository.git", "CONTROLLER_GIT_REF": "main"},
+            clear=False,
+        ):
+            command = build_training_stage_shell_command(
+                {"project_id": "project", "id": "training-123"},
+                {
+                    "preprocess_uri": "r2://bucket/preprocess/current",
+                    "colmap_uri": "r2://bucket/colmap/runs/run-a",
+                    "output_uri": "r2://bucket/training/a-hybrid",
+                    "camera_source": "arkit_hybrid",
+                    "colmap_source_run_id": "run-a",
+                    "hybrid_camera_set_uri": "r2://bucket/analyses/hybrid.json",
+                },
+            )
+
+        self.assertIn("--camera-source arkit_hybrid", command)
+        self.assertIn("--colmap-source-run-id run-a", command)
+        self.assertIn("--hybrid-camera-set-uri r2://bucket/analyses/hybrid.json", command)
 
 
 if __name__ == "__main__":

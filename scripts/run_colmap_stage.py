@@ -86,15 +86,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["incremental", "global", "pose_prior_incremental"],
+        choices=["incremental", "global"],
         default="global",
         help="COLMAP mapper mode.",
-    )
-    parser.add_argument(
-        "--pose-prior-uncertainty",
-        choices=["strong", "conservative", "relaxed"],
-        default="conservative",
-        help="Named ARKit position-prior uncertainty preset.",
     )
     parser.add_argument(
         "--feature-extractor",
@@ -247,8 +241,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         progress.update(
             12,
             "feature_extraction",
-            "Starting COLMAP feature extraction"
-            + (" for pose-prior incremental mapping" if args.mode == "pose_prior_incremental" else ""),
+            "Starting COLMAP feature extraction",
             force=True,
         )
         colmap_result = run_colmap(args, local_run_dir, logs_dir, progress)
@@ -431,8 +424,6 @@ def build_colmap_command(args: argparse.Namespace, local_run_dir: Path) -> List[
         str(args.colmap_bin),
         "--mode",
         args.mode,
-        "--pose-prior-uncertainty",
-        args.pose_prior_uncertainty,
         "--feature-extractor",
         args.feature_extractor,
         "--matcher",
@@ -754,7 +745,6 @@ def colmap_stage_summary(report: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "status": report.get("status"),
         "mode": (report.get("settings") or {}).get("mode") if isinstance(report.get("settings"), dict) else None,
-        "pose_prior": (report.get("settings") or {}).get("pose_prior") if isinstance(report.get("settings"), dict) else None,
         "feature_extractor": (report.get("settings") or {}).get("feature_extractor") if isinstance(report.get("settings"), dict) else None,
         "matcher": (report.get("settings") or {}).get("matcher") if isinstance(report.get("settings"), dict) else None,
         "matching_type": (report.get("settings") or {}).get("matching_type") if isinstance(report.get("settings"), dict) else None,
