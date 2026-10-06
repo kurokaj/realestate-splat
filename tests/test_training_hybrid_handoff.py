@@ -31,6 +31,7 @@ class HybridTrainingHandoffTests(unittest.TestCase):
             eval_every=50,
             use_scale_regularization=True,
             train_option=[],
+            lidar_initialization_uri=None,
         )
 
         prepare_command, _train_command = build_training_commands(args, Path("/tmp/training-run"))
@@ -51,6 +52,22 @@ class HybridTrainingHandoffTests(unittest.TestCase):
                 "r2://bucket/preprocess/current",
                 "r2://bucket/colmap/runs/run-a",
                 "r2://bucket/colmap/analyses/hybrid.json",
+            ],
+        )
+
+    def test_stage_inputs_include_lidar_initialization_artifact(self) -> None:
+        self.assertEqual(
+            training_input_uris(
+                "r2://bucket/preprocess/current/",
+                "r2://bucket/colmap/runs/run-a/",
+                "r2://bucket/colmap/analyses/hybrid.json",
+                "r2://bucket/colmap/analyses/lidar.json",
+            ),
+            [
+                "r2://bucket/preprocess/current",
+                "r2://bucket/colmap/runs/run-a",
+                "r2://bucket/colmap/analyses/hybrid.json",
+                "r2://bucket/colmap/analyses/lidar.json",
             ],
         )
 
@@ -77,6 +94,30 @@ class HybridTrainingHandoffTests(unittest.TestCase):
             (data_dir / "transforms.json").write_text(json.dumps(transforms), encoding="utf-8")
 
             validate_nerfstudio_colmap_initialization(run_dir)
+
+    def test_builds_lidar_prepare_command(self) -> None:
+        args = SimpleNamespace(
+            pixi_bin="pixi",
+            nerfstudio_dir="/opt/nerfstudio",
+            python_bin="python3",
+            num_downscales=1,
+            prepare_with_pixi=False,
+            camera_source="arkit_hybrid",
+            colmap_source_run_id="colmap-run-a",
+            project_id="project",
+            experiment_name=None,
+            method="splatfacto",
+            max_steps=100,
+            save_every=50,
+            eval_every=50,
+            use_scale_regularization=True,
+            train_option=[],
+            lidar_initialization_uri="r2://bucket/lidar.json",
+        )
+        prepare_command, _ = build_training_commands(args, Path("/tmp/training-run"))
+        self.assertIn("--lidar-initialization", prepare_command)
+        self.assertIn("/tmp/training-run/reports/lidar_initialization.json", prepare_command)
+        self.assertIn("--lidar-initialization-ply", prepare_command)
 
 
 if __name__ == "__main__":

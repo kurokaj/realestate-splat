@@ -63,6 +63,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Stable COLMAP stage run id expected by the selected camera artifact.",
     )
     parser.add_argument(
+        "--lidar-initialization-uri",
+        help="Immutable LiDAR-initialization metadata JSON. Requires arkit_hybrid cameras.",
+    )
+    parser.add_argument(
         "--preprocess-group-output",
         action="append",
         default=[],
@@ -140,6 +144,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     preprocess_dir = work_dir / "preprocess_current"
     colmap_dir = work_dir / "colmap_current"
     hybrid_camera_set_path = work_dir / "hybrid_camera_set.json"
+    lidar_initialization_path = work_dir / "lidar_initialization.json"
+    lidar_initialization_ply_path = work_dir / "lidar_initialization.ply"
     local_run_dir = work_dir / "training_run"
     logs_dir = work_dir / "logs"
     current_dir = work_dir / "upload_current"
@@ -178,12 +184,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if not args.colmap_source_run_id:
                 raise ValueError("--colmap-source-run-id is required for arkit_hybrid training")
             copy_file(args.hybrid_camera_set_uri, hybrid_camera_set_path, endpoint_url=args.endpoint_url)
+        if args.lidar_initialization_uri:
+            if args.camera_source != "arkit_hybrid":
+                raise ValueError("--lidar-initialization-uri requires arkit_hybrid cameras")
+            copy_file(args.lidar_initialization_uri, lidar_initialization_path, endpoint_url=args.endpoint_url)
+            lidar_metadata = read_json(lidar_initialization_path)
+            lidar_ply_uri = str(lidar_metadata.get("ply_uri") or "")
+            if not lidar_ply_uri:
+                raise ValueError("LiDAR initialization metadata is missing ply_uri")
+            copy_file(lidar_ply_uri, lidar_initialization_ply_path, endpoint_url=args.endpoint_url)
         progress.update(15, "preparing", "Preparing Nerfstudio input data", force=True)
         prepare_local_run(
             preprocess_dir,
             colmap_dir,
             local_run_dir,
             hybrid_camera_set_path=hybrid_camera_set_path if args.camera_source == "arkit_hybrid" else None,
+            lidar_initialization_path=lidar_initialization_path if args.lidar_initialization_uri else None,
+            lidar_initialization_ply_path=lidar_initialization_ply_path if args.lidar_initialization_uri else None,
         )
 
         command_results = run_training(args, local_run_dir, logs_dir, progress=progress)
@@ -196,6 +213,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             colmap_uri=args.colmap_uri,
             camera_source=args.camera_source,
             hybrid_camera_set_uri=args.hybrid_camera_set_uri,
+            lidar_initialization_uri=args.lidar_initialization_uri,
             colmap_source_run_id=args.colmap_source_run_id,
             output_uri=args.output_uri,
             local_run_dir=local_run_dir,
@@ -224,6 +242,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     colmap_uri=args.colmap_uri,
                     camera_source=args.camera_source,
                     hybrid_camera_set_uri=args.hybrid_camera_set_uri,
+                    lidar_initialization_uri=args.lidar_initialization_uri,
                     colmap_source_run_id=args.colmap_source_run_id,
                     output_uri=args.output_uri,
                     local_run_dir=local_run_dir,
@@ -299,6 +318,8 @@ def print_plan(
     print(f"$ sync {args.colmap_uri} -> {colmap_dir}")
     if args.camera_source == "arkit_hybrid":
         print(f"$ copy {args.hybrid_camera_set_uri} -> {local_run_dir / 'reports' / 'hybrid_camera_set.json'}")
+    if args.lidar_initialization_uri:
+        print(f"$ copy {args.lidar_initialization_uri} and referenced PLY -> {local_run_dir / 'reports'}")
     print(f"$ prepare local training run -> {local_run_dir}")
     for command in build_training_commands(args, local_run_dir):
         print("$ " + " ".join(command))
@@ -326,6 +347,8 @@ def prepare_local_run(
     local_run_dir: Path,
     *,
     hybrid_camera_set_path: Optional[Path] = None,
+    lidar_initialization_path: Optional[Path] = None,
+    lidar_initialization_ply_path: Optional[Path] = None,
 ) -> None:
     frames_dir = preprocess_dir / "frames_selected"
     sparse_txt_dir = colmap_dir / "sparse_txt"
@@ -349,6 +372,13 @@ def prepare_local_run(
         if not hybrid_camera_set_path.exists():
             raise FileNotFoundError(f"Hybrid camera set is missing: {hybrid_camera_set_path}")
         copy_if_exists(hybrid_camera_set_path, reports_dir / "hybrid_camera_set.json")
+    if lidar_initialization_path is not None or lidar_initialization_ply_path is not None:
+        if lidar_initialization_path is None or lidar_initialization_ply_path is None:
+            raise FileNotFoundError("LiDAR initialization metadata and PLY must both be supplied")
+        if not lidar_initialization_path.exists() or not lidar_initialization_ply_path.exists():
+            raise FileNotFoundError("LiDAR initialization metadata or PLY is missing")
+        copy_if_exists(lidar_initialization_path, reports_dir / "lidar_initialization.json")
+        copy_if_exists(lidar_initialization_ply_path, reports_dir / "lidar_initialization.ply")
 
 
 def build_training_commands(args: argparse.Namespace, local_run_dir: Path) -> List[List[str]]:
@@ -376,6 +406,15 @@ def build_training_commands(args: argparse.Namespace, local_run_dir: Path) -> Li
                 str(local_run_dir / "reports" / "hybrid_camera_set.json"),
                 "--expected-colmap-run-id",
                 str(args.colmap_source_run_id),
+            ]
+        )
+    if args.lidar_initialization_uri:
+        prepare_args.extend(
+            [
+                "--lidar-initialization",
+                str(local_run_dir / "reports" / "lidar_initialization.json"),
+                "--lidar-initialization-ply",
+                str(local_run_dir / "reports" / "lidar_initialization.ply"),
             ]
         )
     if args.prepare_with_pixi:
@@ -534,8 +573,14 @@ def validate_nerfstudio_colmap_initialization(local_run_dir: Path) -> None:
             raise RuntimeError("A_hybrid pose-source counts do not equal the prepared frame count.")
         if not buildvision3d.get("hybrid_selection_sha256"):
             raise RuntimeError("A_hybrid transforms are missing their selection fingerprint.")
+    if buildvision3d.get("initialization_source") == "high_confidence_lidar":
+        if not buildvision3d.get("lidar_initialization_selection_sha256"):
+            raise RuntimeError("LiDAR initialization transforms are missing their selection fingerprint.")
+        if buildvision3d.get("coordinate_frame") != "reference_arkit_gravity_aligned_nerfstudio_z_up":
+            raise RuntimeError("LiDAR initialization cameras are not in the gravity-aligned coordinate frame.")
+    initialization_source = str(buildvision3d.get("initialization_source") or "colmap_sparse_txt")
     print(
-        f"Verified {len(frames)} cameras and COLMAP sparse initialization: "
+        f"Verified {len(frames)} cameras and {initialization_source} initialization: "
         f"{point_count} points from {point_cloud_path}",
         flush=True,
     )
@@ -550,6 +595,7 @@ def prepare_upload_payloads(
     colmap_uri: str,
     camera_source: str,
     hybrid_camera_set_uri: Optional[str],
+    lidar_initialization_uri: Optional[str],
     colmap_source_run_id: Optional[str],
     output_uri: str,
     local_run_dir: Path,
@@ -570,6 +616,7 @@ def prepare_upload_payloads(
     copy_tree(local_run_dir / "exports", current_dir / "exports")
     copy_if_exists(local_run_dir / "nerfstudio" / "transforms.json", current_dir / "nerfstudio" / "transforms.json")
     copy_if_exists(local_run_dir / "nerfstudio" / "colmap_points3D.ply", current_dir / "nerfstudio" / "colmap_points3D.ply")
+    copy_if_exists(local_run_dir / "nerfstudio" / "lidar_initialization.ply", current_dir / "nerfstudio" / "lidar_initialization.ply")
 
     finished_at = utc_now()
     result = StageResult(
@@ -581,7 +628,9 @@ def prepare_upload_payloads(
         status="completed",
         started_at=started_at,
         finished_at=finished_at,
-        input_uris=training_input_uris(preprocess_uri, colmap_uri, hybrid_camera_set_uri),
+        input_uris=training_input_uris(
+            preprocess_uri, colmap_uri, hybrid_camera_set_uri, lidar_initialization_uri
+        ),
         output_uris=[
             f"{output_uri.rstrip('/')}/current",
             f"{output_uri.rstrip('/')}/runs/{stage_run_id}",
@@ -594,6 +643,7 @@ def prepare_upload_payloads(
             "camera_source": camera_source,
             "colmap_source_run_id": colmap_source_run_id,
             "hybrid_camera_set_uri": hybrid_camera_set_uri,
+            "lidar_initialization_uri": lidar_initialization_uri,
         },
     )
     write_stage_result(current_dir / "stage_result.json", result)
@@ -616,6 +666,7 @@ def prepare_failed_payloads(
     colmap_uri: str,
     camera_source: str,
     hybrid_camera_set_uri: Optional[str],
+    lidar_initialization_uri: Optional[str],
     colmap_source_run_id: Optional[str],
     output_uri: str,
     local_run_dir: Path,
@@ -641,7 +692,9 @@ def prepare_failed_payloads(
         status="failed",
         started_at=started_at,
         finished_at=finished_at,
-        input_uris=training_input_uris(preprocess_uri, colmap_uri, hybrid_camera_set_uri),
+        input_uris=training_input_uris(
+            preprocess_uri, colmap_uri, hybrid_camera_set_uri, lidar_initialization_uri
+        ),
         output_uris=[f"{output_uri.rstrip('/')}/current"],
         logs_uri=f"{output_uri.rstrip('/')}/current/logs",
         metrics_uri=None,
@@ -650,6 +703,7 @@ def prepare_failed_payloads(
             "camera_source": camera_source,
             "colmap_source_run_id": colmap_source_run_id,
             "hybrid_camera_set_uri": hybrid_camera_set_uri,
+            "lidar_initialization_uri": lidar_initialization_uri,
         },
     )
     write_stage_result(current_dir / "stage_result.json", result)
@@ -698,6 +752,13 @@ def training_summary(local_run_dir: Path, command_results: Sequence[CommandResul
         "hybrid_selection_sha256": buildvision3d.get("hybrid_selection_sha256"),
         "hybrid_artifact_uri": buildvision3d.get("hybrid_artifact_uri"),
         "initialization_source": buildvision3d.get("initialization_source") or "colmap_sparse_txt",
+        "coordinate_frame": buildvision3d.get("coordinate_frame"),
+        "lidar_initialization_selection_sha256": buildvision3d.get(
+            "lidar_initialization_selection_sha256"
+        ),
+        "lidar_initialization_artifact_uri": buildvision3d.get(
+            "lidar_initialization_artifact_uri"
+        ),
         "checkpoint_count": len(checkpoint_files),
         "latest_checkpoint": relative_or_string(checkpoint_files[-1] if checkpoint_files else None, local_run_dir),
         "commands": [
@@ -717,10 +778,13 @@ def training_input_uris(
     preprocess_uri: str,
     colmap_uri: str,
     hybrid_camera_set_uri: Optional[str],
+    lidar_initialization_uri: Optional[str] = None,
 ) -> List[str]:
     values = [preprocess_uri.rstrip("/"), colmap_uri.rstrip("/")]
     if hybrid_camera_set_uri:
         values.append(hybrid_camera_set_uri.rstrip("/"))
+    if lidar_initialization_uri:
+        values.append(lidar_initialization_uri.rstrip("/"))
     return values
 
 

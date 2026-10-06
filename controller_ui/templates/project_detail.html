@@ -850,6 +850,31 @@
                 <span class="muted">Processing all raw depth maps may take a few minutes. Keep this page open until it returns.</span>
               </form>
             </div>
+            {% if selected_arkit_alignment_run.depth_diagnostic %}
+              <div id="lidar-initialization">
+                <h3>LiDAR Training Initialization</h3>
+                <p class="muted">Create an immutable RGB-colored, gravity-aligned seed cloud from high-confidence depth. The first implementation supports one continuous ARKit capture, including continuous multi-room scans. It does not start a GPU pod.</p>
+                {% if selected_arkit_alignment_run.lidar_initialization %}
+                  {% set selected_lidar = selected_arkit_alignment_run.lidar_initialization %}
+                  <dl class="stat-list">
+                    <dt>Status</dt><dd>{{ selected_lidar.status or "unknown" }}</dd>
+                    <dt>Processed frames</dt><dd>{{ selected_lidar.processed_frame_count or 0 }} / {{ selected_lidar.frame_count or 0 }}</dd>
+                    <dt>Skipped frames</dt><dd>{{ selected_lidar.skipped_frame_count or 0 }}</dd>
+                    <dt>Back-projected samples</dt><dd>{{ selected_lidar.sampled_point_count or 0 }}</dd>
+                    <dt>Unfiltered voxels</dt><dd>{{ selected_lidar.unfiltered_voxel_count or 0 }}</dd>
+                    <dt>Retained initialization points</dt><dd>{{ selected_lidar.filtered_voxel_count or 0 }}</dd>
+                    <dt>Low-support voxels removed</dt><dd>{{ selected_lidar.removed_low_support_voxel_count or 0 }}</dd>
+                    <dt>Artifact</dt><dd class="mono">{{ selected_lidar.artifact_uri or "" }}</dd>
+                    <dt>PLY</dt><dd class="mono">{{ selected_lidar.ply_uri or "" }}</dd>
+                  </dl>
+                {% endif %}
+                <form method="post" action="/ui/projects/{{ project.id }}/lidar-initialization" class="stack" data-long-running-form>
+                  <input type="hidden" name="colmap_stage_run_id" value="{{ selected_arkit_alignment_run.id }}">
+                  <button type="submit">{% if selected_arkit_alignment_run.lidar_initialization %}Rebuild LiDAR Initialization{% else %}Build LiDAR Initialization{% endif %}</button>
+                  <span class="muted">Downloads RGB, depth, and confidence sidecars and may take several minutes. The resulting artifact is reused by later training runs.</span>
+                </form>
+              </div>
+            {% endif %}
           {% endif %}
         {% else %}
           <p class="empty">The selected run has not been analyzed yet.</p>
@@ -913,7 +938,7 @@
       <form method="post" action="/ui/projects/{{ project.id }}/training" class="stack">
         <div class="grid two tight">
           <label>
-            <span class="label-title">Camera set <span class="info-dot" tabindex="0" data-tip="Select an immutable approved visual reconstruction or its completed A_hybrid camera artifact. Both use the selected COLMAP run's sparse points for this first comparison.">i</span></span>
+            <span class="label-title">Camera and initialization set <span class="info-dot" tabindex="0" data-tip="Select an immutable visual reconstruction, A_hybrid with COLMAP seeds, or A_hybrid with the reviewed gravity-aligned LiDAR initialization.">i</span></span>
             <select name="training_source" required>
               <option value="" {% if not training_form_values.training_source %}selected{% endif %} disabled>Select a camera set…</option>
               {% for option in training_source_options %}

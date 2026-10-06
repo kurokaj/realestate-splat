@@ -72,6 +72,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--expected-colmap-run-id",
         help="Expected source COLMAP stage run id for the hybrid artifact.",
     )
+    parser.add_argument(
+        "--lidar-initialization",
+        type=Path,
+        help="Optional immutable LiDAR-initialization metadata JSON. Requires --hybrid-camera-set.",
+    )
+    parser.add_argument(
+        "--lidar-initialization-ply",
+        type=Path,
+        help="RGB-colored gravity-aligned PLY referenced by --lidar-initialization.",
+    )
     parser.add_argument("--num-downscales", type=int, default=2, help="Number of images_2/images_4/... folders to create.")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output data directory.")
     return parser.parse_args(argv)
@@ -218,6 +228,23 @@ def colmap_camera_to_world_to_nerfstudio_transform(
         opengl_camera_to_world[2],
         [-value for value in opengl_camera_to_world[1]],
         opengl_camera_to_world[3],
+    ]
+
+
+def reference_arkit_camera_to_world_to_nerfstudio_transform(
+    camera_to_world: Sequence[Sequence[float]],
+) -> List[List[float]]:
+    """Rotate ARKit's +Y-up OpenGL world into Nerfstudio's +Z-up world."""
+    matrix = validate_camera_to_world_matrix(camera_to_world)
+    world_rotation = (
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 0.0, -1.0, 0.0),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    return [
+        [sum(world_rotation[row][index] * matrix[index][column] for index in range(4)) for column in range(4)]
+        for row in range(4)
     ]
 
 
@@ -561,6 +588,45 @@ def hybrid_frames(
     return frames
 
 
+def validate_lidar_initialization(
+    artifact: Mapping[str, Any],
+    hybrid_artifact: Mapping[str, Any],
+    ply_path: Path,
+) -> None:
+    if artifact.get("kind") != "buildvision3d_lidar_training_initialization":
+        raise SystemExit("LiDAR initialization artifact has an unsupported kind.")
+    if artifact.get("status") != "completed":
+        raise SystemExit("LiDAR initialization must be completed without skipped frames.")
+    if str(artifact.get("source_run_id") or "") != str(hybrid_artifact.get("source_run_id") or ""):
+        raise SystemExit("LiDAR initialization source run does not match A_hybrid.")
+    if str(artifact.get("source_hybrid_selection_sha256") or "") != str(
+        hybrid_artifact.get("selection_sha256") or ""
+    ):
+        raise SystemExit("LiDAR initialization selection does not match A_hybrid.")
+    captures = [item for item in hybrid_artifact.get("captures") or [] if isinstance(item, Mapping)]
+    if len(captures) != 1 or str(captures[0].get("capture_id") or "") != str(artifact.get("capture_id") or ""):
+        raise SystemExit("LiDAR initialization capture identity does not match A_hybrid.")
+    declared_count = int(artifact.get("filtered_voxel_count") or 0)
+    actual_count = read_ply_vertex_count(ply_path)
+    if declared_count <= 0 or actual_count != declared_count:
+        raise SystemExit(
+            f"LiDAR initialization PLY count mismatch: artifact={declared_count}, ply={actual_count}."
+        )
+
+
+def read_ply_vertex_count(path: Path) -> int:
+    if not path.exists():
+        raise SystemExit(f"Initialization PLY does not exist: {path}")
+    with path.open("rb") as handle:
+        for raw_line in handle:
+            line = raw_line.decode("ascii", errors="strict").strip()
+            if line.startswith("element vertex "):
+                return int(line.rsplit(" ", 1)[-1])
+            if line == "end_header":
+                break
+    raise SystemExit(f"Initialization PLY has no vertex count: {path}")
+
+
 def build_hybrid_transforms(
     *,
     run_dir: Path,
@@ -571,6 +637,7 @@ def build_hybrid_transforms(
     points: Sequence[Point3D],
     point_cloud_path: Path,
     expected_colmap_run_id: Optional[str] = None,
+    lidar_initialization: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     manifest = manifest_by_name(run_dir)
     if not manifest:
@@ -625,12 +692,18 @@ def build_hybrid_transforms(
                 f"camera={camera.width}x{camera.height}, image={actual_width}x{actual_height}"
             )
 
+        if lidar_initialization is not None:
+            transform_matrix = reference_arkit_camera_to_world_to_nerfstudio_transform(
+                selected["camera_to_world_reference_arkit_row_major"]
+            )
+        else:
+            transform_matrix = colmap_camera_to_world_to_nerfstudio_transform(
+                selected["camera_to_world_colmap_opencv_row_major"]
+            )
         output_frames.append(
             {
                 "file_path": f"images/{image_name}",
-                "transform_matrix": colmap_camera_to_world_to_nerfstudio_transform(
-                    selected["camera_to_world_colmap_opencv_row_major"]
-                ),
+                "transform_matrix": transform_matrix,
                 "colmap_image_id": registered_image.image_id if registered_image else None,
                 "colmap_camera_id": camera_id,
                 "intrinsics_source": "base_colmap_camera_group",
@@ -650,13 +723,27 @@ def build_hybrid_transforms(
             }
         )
 
+    if lidar_initialization is not None:
+        initialization_source = "high_confidence_lidar"
+        source = "arkit_hybrid_with_lidar_initialization"
+        coordinate_frame = "reference_arkit_gravity_aligned_nerfstudio_z_up"
+        initialization_stats = (
+            lidar_initialization.get("point_cloud_stats")
+            if isinstance(lidar_initialization.get("point_cloud_stats"), Mapping)
+            else {}
+        )
+    else:
+        initialization_source = "base_colmap_sparse_txt"
+        source = "arkit_hybrid_camera_set"
+        coordinate_frame = "colmap_derived_nerfstudio_axes"
+        initialization_stats = point_cloud_stats(points)
     return {
         "camera_model": "OPENCV",
         "orientation_override": "none",
         "ply_file_path": point_cloud_path.name,
         "frames": output_frames,
         "buildvision3d": {
-            "source": "arkit_hybrid_camera_set",
+            "source": source,
             "camera_source": "arkit_hybrid",
             "hybrid_source_run_id": hybrid_artifact.get("source_run_id"),
             "hybrid_selection_sha256": hybrid_artifact.get("selection_sha256"),
@@ -670,9 +757,16 @@ def build_hybrid_transforms(
             ),
             "camera_count": len(cameras),
             "colmap_sparse_point_count": len(points),
-            "initialization_source": "base_colmap_sparse_txt",
+            "initialization_source": initialization_source,
+            "coordinate_frame": coordinate_frame,
+            "lidar_initialization_selection_sha256": (
+                lidar_initialization.get("selection_sha256") if lidar_initialization is not None else None
+            ),
+            "lidar_initialization_artifact_uri": (
+                lidar_initialization.get("artifact_uri") if lidar_initialization is not None else None
+            ),
             "point_cloud_path": point_cloud_path.name,
-            "point_cloud_stats": point_cloud_stats(points),
+            "point_cloud_stats": initialization_stats,
             "multi_camera": len(cameras) > 1,
             "intrinsics_mode": "base_colmap_camera_group",
         },
@@ -731,6 +825,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     hybrid_camera_set_path = (
         resolve_under_run(run_dir, args.hybrid_camera_set) if args.hybrid_camera_set is not None else None
     )
+    lidar_initialization_path = (
+        resolve_under_run(run_dir, args.lidar_initialization) if args.lidar_initialization is not None else None
+    )
+    lidar_initialization_ply_path = (
+        resolve_under_run(run_dir, args.lidar_initialization_ply)
+        if args.lidar_initialization_ply is not None
+        else None
+    )
+    if (lidar_initialization_path is None) != (lidar_initialization_ply_path is None):
+        raise SystemExit("--lidar-initialization and --lidar-initialization-ply must be supplied together.")
+    if lidar_initialization_path is not None and hybrid_camera_set_path is None:
+        raise SystemExit("LiDAR initialization requires --hybrid-camera-set.")
 
     cameras_path = colmap_text_dir / "cameras.txt"
     images_path = colmap_text_dir / "images.txt"
@@ -763,7 +869,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             expected_colmap_run_id=args.expected_colmap_run_id,
         )
     images_dir = data_dir / "images"
-    point_cloud_path = data_dir / "colmap_points3D.ply"
+    point_cloud_path = data_dir / (
+        "lidar_initialization.ply" if lidar_initialization_path is not None else "colmap_points3D.ply"
+    )
     print(f"Preparing multi-camera Nerfstudio dataset from {colmap_text_dir}")
     print(f"  registered images: {len(images)}")
     if hybrid_artifact is not None:
@@ -778,7 +886,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         copy_registered_images(images, frames_dir, images_dir)
     build_downscales(images_dir, int(args.num_downscales))
-    write_point_cloud_ply(point_cloud_path, points)
+    lidar_initialization = None
+    if lidar_initialization_path is not None and lidar_initialization_ply_path is not None:
+        if not lidar_initialization_path.exists():
+            raise SystemExit(f"LiDAR initialization metadata does not exist: {lidar_initialization_path}")
+        lidar_initialization = json.loads(lidar_initialization_path.read_text(encoding="utf-8"))
+        if not isinstance(lidar_initialization, dict) or hybrid_artifact is None:
+            raise SystemExit("LiDAR initialization metadata root must be an object.")
+        validate_lidar_initialization(lidar_initialization, hybrid_artifact, lidar_initialization_ply_path)
+        shutil.copy2(lidar_initialization_ply_path, point_cloud_path)
+    else:
+        write_point_cloud_ply(point_cloud_path, points)
     print(f"Wrote {point_cloud_path}")
     if hybrid_artifact is not None:
         transforms = build_hybrid_transforms(
@@ -790,6 +908,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             points=points,
             point_cloud_path=point_cloud_path,
             expected_colmap_run_id=args.expected_colmap_run_id,
+            lidar_initialization=lidar_initialization,
         )
     else:
         transforms = build_transforms(

@@ -93,11 +93,13 @@
             <td class="uri-cell">{{ run.output_uri or "" }}</td>
           {% endif %}
           <td>
-            {% if run.is_latest_stage_run and run.status in ["awaiting_preprocess_approval", "awaiting_colmap_approval"] %}
+            {% if run.status in ["awaiting_preprocess_approval", "awaiting_colmap_approval"] and (run.is_latest_stage_run or stage_table_variant == "colmap") %}
               <form method="post" action="/ui/stage-runs/{{ run.id }}/approve" class="inline-form">
                 <input name="notes" placeholder="notes">
-                <button type="submit">Approve</button>
+                <button type="submit">{% if stage_table_variant == "colmap" and not run.is_latest_stage_run %}Approve Historical Run{% else %}Approve{% endif %}</button>
               </form>
+            {% endif %}
+            {% if run.is_latest_stage_run and run.status in ["awaiting_preprocess_approval", "awaiting_colmap_approval"] %}
               <form method="post" action="/ui/stage-runs/{{ run.id }}/reject" class="inline-form">
                 <input name="notes" placeholder="notes">
                 <button type="submit" class="secondary">Reject</button>

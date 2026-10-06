@@ -58,6 +58,11 @@ from src.realestate_splat.depth_diagnostic import (
     build_depth_diagnostic,
     compact_depth_diagnostic_summary,
 )
+from src.realestate_splat.lidar_initialization import (
+    build_lidar_initialization,
+    compact_lidar_initialization_summary,
+    write_lidar_initialization_ply,
+)
 from src.realestate_splat.cli import utc_now
 from scripts.preprocess_video import PROFILE_DEFAULTS
 from controller_common.raw_upload import source_group_key
@@ -921,6 +926,135 @@ def ui_build_depth_diagnostic(
     )
 
 
+@router.post("/projects/{project_id}/lidar-initialization")
+def ui_build_lidar_initialization(
+    project_id: str,
+    colmap_stage_run_id: str = Form(...),
+) -> RedirectResponse:
+    """Build one immutable RGB-colored LiDAR seed cloud for training."""
+    with connect() as conn:
+        run = conn.execute(
+            "SELECT * FROM stage_runs WHERE id = %s AND project_id = %s AND stage = 'colmap'",
+            (colmap_stage_run_id, project_id),
+        ).fetchone()
+        project = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
+    if run is None or project is None:
+        raise HTTPException(status_code=404, detail="Project or COLMAP run not found")
+    run_json = row_to_json(run)
+    project_json = row_to_json(project)
+    summary_json = run_json.get("summary_json") if isinstance(run_json.get("summary_json"), dict) else {}
+    hybrid_summary = summary_json.get("arkit_hybrid") if isinstance(summary_json.get("arkit_hybrid"), dict) else {}
+    depth_summary = summary_json.get("depth_diagnostic") if isinstance(summary_json.get("depth_diagnostic"), dict) else {}
+    hybrid_uri = str(hybrid_summary.get("artifact_uri") or "")
+    if not hybrid_uri or hybrid_summary.get("status") != "completed":
+        raise HTTPException(status_code=400, detail="Build and approve A_hybrid before building LiDAR initialization")
+    if depth_summary.get("status") not in {"completed", "completed_with_skips"}:
+        raise HTTPException(status_code=400, detail="Build and inspect the depth diagnostic before LiDAR initialization")
+    raw_uri = str(project_json.get("raw_uri") or "").rstrip("/")
+    if not raw_uri:
+        raise HTTPException(status_code=400, detail="Project raw source URI is required to color LiDAR points")
+
+    input_json = run_json.get("input_uri_json") if isinstance(run_json.get("input_uri_json"), dict) else {}
+    endpoint_url = empty_to_none(input_json.get("endpoint_url"))
+    with tempfile.TemporaryDirectory(prefix=f"buildvision3d-lidar-init-{colmap_stage_run_id}-") as temp_dir:
+        work_dir = Path(temp_dir)
+        hybrid_path = work_dir / "hybrid_camera_set.json"
+        artifact_path = work_dir / "lidar_initialization.json"
+        preview_path = work_dir / "lidar_initialization_preview.json"
+        ply_path = work_dir / "lidar_initialization.ply"
+        try:
+            copy_file(hybrid_uri, hybrid_path, endpoint_url=endpoint_url, timeout_seconds=60)
+            hybrid_artifact = json.loads(hybrid_path.read_text(encoding="utf-8"))
+            raw_manifest = load_json_uri(f"{raw_uri}/sources_manifest.json")
+            _inject_lidar_rgb_uris(hybrid_artifact, raw_manifest)
+            attachment_paths = _prefetch_lidar_attachments(
+                hybrid_artifact,
+                work_dir / "attachments",
+                endpoint_url=endpoint_url,
+            )
+            artifact, points, colors = build_lidar_initialization(
+                hybrid_artifact,
+                lambda uri: attachment_paths[uri].read_bytes(),
+            )
+            write_lidar_initialization_ply(ply_path, points, colors)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Could not build LiDAR initialization: {exc}") from exc
+
+        selection_sha256 = str(artifact.get("selection_sha256") or "")
+        artifact_id = f"lidar_initialization_{selection_sha256[:12]}"
+        hybrid_id = str(hybrid_summary.get("artifact_id") or "arkit_hybrid")
+        output_base = (
+            f"{colmap_output_base_uri(run_json)}/analyses/lidar_initialization/"
+            f"{colmap_stage_run_id}/{hybrid_id}/{artifact_id}"
+        )
+        artifact_uri = f"{output_base}/lidar_initialization.json"
+        ply_uri = f"{output_base}/lidar_initialization.ply"
+        preview_uri = f"{output_base}/preview.json"
+        preview_points = artifact.pop("preview_points", [])
+        artifact.update(
+            {
+                "artifact_id": artifact_id,
+                "artifact_uri": artifact_uri,
+                "ply_uri": ply_uri,
+                "preview_uri": preview_uri,
+                "source_hybrid_uri": hybrid_uri,
+            }
+        )
+        preview_payload = {
+            "schema_version": 1,
+            "kind": "buildvision3d_lidar_initialization_preview",
+            "source_selection_sha256": selection_sha256,
+            "coordinate_convention": artifact.get("coordinate_convention"),
+            "point_count": len(preview_points),
+            "points": preview_points,
+        }
+        artifact_path.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
+        preview_path.write_text(json.dumps(preview_payload, separators=(",", ":")) + "\n", encoding="utf-8")
+        copy_file(artifact_path, artifact_uri, endpoint_url=endpoint_url)
+        copy_file(ply_path, ply_uri, endpoint_url=endpoint_url)
+        copy_file(preview_path, preview_uri, endpoint_url=endpoint_url)
+
+    lidar_summary = compact_lidar_initialization_summary(artifact)
+    lidar_summary.update({"created_at": utc_now(), "source_hybrid_uri": hybrid_uri})
+    with connect() as conn:
+        merge_stage_run_summary(
+            conn,
+            stage_run_id=colmap_stage_run_id,
+            values={"lidar_initialization": lidar_summary},
+        )
+    return RedirectResponse(
+        url=(
+            f"/ui/projects/{project_id}?tab=colmap&show_history=true"
+            f"&arkit_alignment_run_id={colmap_stage_run_id}#lidar-initialization"
+        ),
+        status_code=303,
+    )
+
+
+def _inject_lidar_rgb_uris(hybrid_artifact: dict[str, Any], raw_manifest: Mapping[str, Any]) -> None:
+    sources = raw_manifest.get("sources") if isinstance(raw_manifest.get("sources"), list) else []
+    uri_by_source_id = {
+        str(item.get("source_id")): str(item.get("uri"))
+        for item in sources
+        if isinstance(item, Mapping) and item.get("source_id") and item.get("uri")
+    }
+    missing: list[str] = []
+    for capture in hybrid_artifact.get("captures") or []:
+        if not isinstance(capture, dict):
+            continue
+        for frame in capture.get("frames") or []:
+            if not isinstance(frame, dict):
+                continue
+            source_id = str(frame.get("source_id") or "")
+            rgb_uri = uri_by_source_id.get(source_id)
+            if not rgb_uri:
+                missing.append(source_id or str(frame.get("image_name") or "<unknown>"))
+            else:
+                frame["rgb_uri"] = rgb_uri
+    if missing:
+        raise ValueError(f"Raw RGB source URIs are missing for {len(missing)} hybrid frames; first={missing[0]}")
+
+
 def _prefetch_depth_attachments(
     hybrid_artifact: Mapping[str, Any],
     destination: Path,
@@ -940,6 +1074,42 @@ def _prefetch_depth_attachments(
                     uris.add(str(attachment["uri"]))
     if not uris:
         raise ValueError("A_hybrid contains no depth/confidence attachments")
+    destination.mkdir(parents=True, exist_ok=True)
+    paths = {
+        uri: destination / f"{hashlib.sha256(uri.encode('utf-8')).hexdigest()}{Path(parse_storage_uri(uri).key).suffix}"
+        for uri in sorted(uris)
+    }
+
+    def download(item: tuple[str, Path]) -> None:
+        uri, path = item
+        copy_file(uri, path, endpoint_url=endpoint_url, timeout_seconds=120)
+
+    with ThreadPoolExecutor(max_workers=min(8, len(paths))) as pool:
+        list(pool.map(download, paths.items()))
+    return paths
+
+
+def _prefetch_lidar_attachments(
+    hybrid_artifact: Mapping[str, Any],
+    destination: Path,
+    *,
+    endpoint_url: Optional[str],
+) -> dict[str, Path]:
+    uris: set[str] = set()
+    for capture in hybrid_artifact.get("captures") or []:
+        if not isinstance(capture, Mapping):
+            continue
+        for frame in capture.get("frames") or []:
+            if not isinstance(frame, Mapping):
+                continue
+            if frame.get("rgb_uri"):
+                uris.add(str(frame["rgb_uri"]))
+            for key in ("depth", "confidence"):
+                attachment = frame.get(key)
+                if isinstance(attachment, Mapping) and attachment.get("uri"):
+                    uris.add(str(attachment["uri"]))
+    if not uris:
+        raise ValueError("A_hybrid contains no RGB-D attachments")
     destination.mkdir(parents=True, exist_ok=True)
     paths = {
         uri: destination / f"{hashlib.sha256(uri.encode('utf-8')).hexdigest()}{Path(parse_storage_uri(uri).key).suffix}"
@@ -1049,7 +1219,11 @@ def ui_queue_training(
             else {}
         )
         hybrid_camera_set_uri = None
-        if selected_source_kind == "arkit_hybrid":
+        lidar_initialization_uri = None
+        camera_source = "visual_colmap"
+        initialization_source = "colmap_sparse_txt"
+        if selected_source_kind in {"arkit_hybrid", "arkit_hybrid_lidar"}:
+            camera_source = "arkit_hybrid"
             hybrid_summary = selected_summary.get("arkit_hybrid") if isinstance(selected_summary.get("arkit_hybrid"), dict) else {}
             hybrid_camera_set_uri = str(hybrid_summary.get("artifact_uri") or "")
             transition_validation = (
@@ -1063,6 +1237,22 @@ def ui_queue_training(
                 raise HTTPException(status_code=400, detail="A_hybrid source run does not match the selected COLMAP run")
             if int(transition_validation.get("review_required_count") or 0) != 0:
                 raise HTTPException(status_code=400, detail="A_hybrid contains source transitions requiring review")
+            if selected_source_kind == "arkit_hybrid_lidar":
+                lidar_summary = (
+                    selected_summary.get("lidar_initialization")
+                    if isinstance(selected_summary.get("lidar_initialization"), dict)
+                    else {}
+                )
+                lidar_initialization_uri = str(lidar_summary.get("artifact_uri") or "")
+                if lidar_summary.get("status") != "completed" or not lidar_initialization_uri:
+                    raise HTTPException(status_code=400, detail="Selected run has no completed LiDAR initialization")
+                if str(lidar_summary.get("source_run_id") or "") != selected_colmap_run_id:
+                    raise HTTPException(status_code=400, detail="LiDAR initialization source run does not match COLMAP")
+                if str(lidar_summary.get("source_hybrid_selection_sha256") or "") != str(
+                    hybrid_summary.get("selection_sha256") or ""
+                ):
+                    raise HTTPException(status_code=400, detail="LiDAR initialization does not match A_hybrid")
+                initialization_source = "high_confidence_lidar"
         preprocess_runs = rows_to_json(
             conn.execute(
                 """
@@ -1096,6 +1286,8 @@ def ui_queue_training(
         require_r2_uri(resolved_colmap_uri, "colmap_uri")
         if hybrid_camera_set_uri:
             require_r2_uri(hybrid_camera_set_uri, "hybrid_camera_set_uri")
+        if lidar_initialization_uri:
+            require_r2_uri(lidar_initialization_uri, "lidar_initialization_uri")
         require_r2_uri(resolved_output_uri, "output_uri")
         splatfacto_options = {"use_scale_regularization": True}
         if use_scale_regularization in {"true", "false"}:
@@ -1105,9 +1297,11 @@ def ui_queue_training(
             "preprocess_group_outputs": preprocess_group_outputs,
             "colmap_uri": resolved_colmap_uri,
             "training_source": f"{selected_source_kind}:{selected_colmap_run_id}",
-            "camera_source": selected_source_kind,
+            "camera_source": camera_source,
+            "initialization_source": initialization_source,
             "colmap_source_run_id": selected_colmap_run_id,
             "hybrid_camera_set_uri": hybrid_camera_set_uri,
+            "lidar_initialization_uri": lidar_initialization_uri,
             "output_uri": resolved_output_uri,
             "endpoint_url": empty_to_none(endpoint_url),
             "method": method,
@@ -1793,6 +1987,7 @@ def colmap_review_context(
                 "alignment": (run.get("summary_json") or {}).get("arkit_alignment") if isinstance(run.get("summary_json"), dict) else None,
                 "hybrid": (run.get("summary_json") or {}).get("arkit_hybrid") if isinstance(run.get("summary_json"), dict) else None,
                 "depth_diagnostic": (run.get("summary_json") or {}).get("depth_diagnostic") if isinstance(run.get("summary_json"), dict) else None,
+                "lidar_initialization": (run.get("summary_json") or {}).get("lidar_initialization") if isinstance(run.get("summary_json"), dict) else None,
             }
             for run in colmap_runs
             if run.get("status") in {"completed", "approved", "awaiting_colmap_approval"}
@@ -1957,7 +2152,7 @@ def parse_training_source(value: Optional[str]) -> tuple[str, str]:
     if not value:
         raise HTTPException(status_code=400, detail="Select a training camera source")
     kind, separator, run_id = value.partition(":")
-    if separator != ":" or kind not in {"visual_colmap", "arkit_hybrid"} or not run_id:
+    if separator != ":" or kind not in {"visual_colmap", "arkit_hybrid", "arkit_hybrid_lidar"} or not run_id:
         raise HTTPException(status_code=400, detail="Invalid training camera source")
     return kind, run_id
 
@@ -2003,6 +2198,26 @@ def training_camera_source_options(colmap_runs: list[dict[str, Any]]) -> list[di
                     ),
                 }
             )
+            lidar = summary.get("lidar_initialization") if isinstance(summary.get("lidar_initialization"), dict) else {}
+            if (
+                lidar.get("status") == "completed"
+                and lidar.get("artifact_uri")
+                and str(lidar.get("source_run_id") or "") == run_id
+                and str(lidar.get("source_hybrid_selection_sha256") or "")
+                == str(hybrid.get("selection_sha256") or "")
+            ):
+                options.append(
+                    {
+                        "value": f"arkit_hybrid_lidar:{run_id}",
+                        "kind": "arkit_hybrid_lidar",
+                        "run_id": run_id,
+                        "label": f"{run_id} · A_hybrid + LiDAR initialization",
+                        "detail": (
+                            f"{hybrid.get('frame_count')} cameras + "
+                            f"{lidar.get('filtered_voxel_count')} gravity-aligned LiDAR seeds"
+                        ),
+                    }
+                )
     return options
 
 
@@ -2221,6 +2436,9 @@ def training_summary_rows(run: Optional[dict[str, Any]]) -> list[dict[str, Any]]
     add("Hybrid selection SHA-256", summary.get("hybrid_selection_sha256"))
     add("Hybrid artifact", summary.get("hybrid_artifact_uri") or inputs.get("hybrid_camera_set_uri"))
     add("Initialization", summary.get("initialization_source"))
+    add("Coordinate frame", summary.get("coordinate_frame"))
+    add("LiDAR initialization SHA-256", summary.get("lidar_initialization_selection_sha256"))
+    add("LiDAR initialization artifact", summary.get("lidar_initialization_artifact_uri") or inputs.get("lidar_initialization_uri"))
     add("Max steps", inputs.get("max_steps"))
     add("Save every", inputs.get("save_every"))
     add("Eval every", inputs.get("eval_every"))
@@ -2231,10 +2449,10 @@ def training_summary_rows(run: Optional[dict[str, Any]]) -> list[dict[str, Any]]
     add("Latest checkpoint", summary.get("latest_checkpoint"))
     add("Exported PLY", summary.get("exported_ply"))
     add("Exported PLY vertices", diagnostics.get("exported_ply_vertices") or summary.get("exported_ply_vertices"))
-    add("COLMAP init points", diagnostics.get("colmap_init_point_count") or summary.get("colmap_init_point_count"))
-    add("COLMAP init XYZ min", diagnostics.get("colmap_init_xyz_min"))
-    add("COLMAP init XYZ max", diagnostics.get("colmap_init_xyz_max"))
-    add("COLMAP init error median", diagnostics.get("colmap_init_error_median"))
+    add("Initialization points", diagnostics.get("colmap_init_point_count") or summary.get("colmap_init_point_count"))
+    add("Initialization XYZ min", diagnostics.get("colmap_init_xyz_min"))
+    add("Initialization XYZ max", diagnostics.get("colmap_init_xyz_max"))
+    add("Initialization reprojection error median", diagnostics.get("colmap_init_error_median"))
     add("Oversized Gaussian", diagnostics.get("oversized_gaussian_detected"))
     add("Oversized Gaussian count", diagnostics.get("oversized_gaussian_count"))
     add("Oversized Gaussian max scene ratio", diagnostics.get("oversized_gaussian_ratio_max"))

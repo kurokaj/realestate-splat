@@ -319,7 +319,7 @@ Depth is accepted for later experiments only when scale and orientation are corr
 
 ## Step 7 — First downstream ablation
 
-### Implementation status — 2026-10-05
+### Implementation and smoke-test status — 2026-10-05
 
 Implemented, awaiting the first live training smoke: the Training tab now selects a specific approved immutable COLMAP run or that run's completed A_hybrid artifact. It no longer silently consumes `colmap/current`, so the rejected Run C cannot become a training input merely because it is the newest reconstruction.
 
@@ -328,6 +328,36 @@ For A_hybrid, the training stage downloads the immutable camera artifact and the
 The first comparison deliberately keeps Run A's COLMAP-calibrated camera intrinsics and Run A's sparse points for every frame. Propagated frames resolve their camera through the manifest camera group. This isolates the effect of camera coverage and trajectory; LiDAR-assisted initialization remains the third ablation.
 
 Preflight rejects unresolved source transitions, a mismatched base run, duplicate or missing frames, non-finite or non-rigid transforms, invalid captured intrinsics, image-size/camera-size mismatches, unresolved camera groups, inconsistent pose-source counts, or a missing sparse initialization. Training summary schema v2 records the selected camera source, prepared frame count, COLMAP/ARKit counts, hybrid fingerprint and artifact URI, base run ID, and initialization source.
+
+The first 100-step handoff smoke tests passed:
+
+- the visual-only Run A input prepared 278 registered cameras and all 84,052 Run A sparse points;
+- training run `training_run_141c3a57a120` prepared the complete A_hybrid input with 316 cameras (193 retained COLMAP poses and 123 aligned ARKit poses) and the same 84,052 sparse points;
+- both runs completed, produced a checkpoint and exported a PLY without falling back to random initialization;
+- both exports retained exactly 84,052 Gaussians, as expected before Splatfacto's refinement warm-up completes, so these runs validate the handoff but do not compare reconstruction quality;
+- the sparse initialization contains little wall or ceiling geometry, and A_hybrid intentionally adds cameras rather than LiDAR points.
+
+Gate 7a, camera and sparse-initialization handoff, passes. The next controlled comparison is a 5,000-step visual-only Run A versus A_hybrid run with identical settings. Keep both in the same COLMAP-derived coordinate frame for this camera-only ablation. Introduce the metric, gravity-aligned ARKit frame together with the filtered LiDAR initialization in the third ablation; apply that coordinate transform consistently to cameras and initialization points. The camera-only splat therefore need not appear floor-level even though the diagnostic viewer does.
+
+### 5,000-step camera-only result — 2026-10-06
+
+The controlled camera-only comparison is complete:
+
+- visual-only Run A used 278 cameras, 84,052 COLMAP seed points, and exported 836,857 Gaussians after 5,000 steps;
+- A_hybrid training run `training_run_db11da179f56` used all 316 cameras (193 COLMAP and 123 propagated ARKit), the same 84,052 seed points, and exported 838,922 Gaussians;
+- neither result retained an oversized Gaussian at export;
+- A_hybrid produced only 2,065 more Gaussians (0.25%) and somewhat larger high-percentile Gaussian scales, but operator inspection found essentially the same floaters, wall structure, and overall quality;
+- blank walls and the ceiling remained difficult in both results.
+
+Gate 7b concludes that the additional/replacement A_hybrid camera poses do not materially improve this room when initialization remains the same sparse visual COLMAP cloud. Retain A_hybrid as the complete 316-frame camera scaffold for the next experiment, but do not claim a camera-only quality gain from this dataset.
+
+The next implementation slice is the third ablation: build a deterministic, filtered high-confidence LiDAR initialization in a metric gravity-aligned ARKit frame, transform every A_hybrid camera into that same frame, color retained LiDAR samples from their source RGB frames, and preserve the COLMAP-only initialization as the control. Do not use the capped browser-viewer sample as training input.
+
+Initial implementation added on 2026-10-06, awaiting live artifact creation: the selected A_hybrid result can now build an immutable LiDAR training initialization after its depth diagnostic has been inspected. The builder re-reads the authoritative RGB, depth, and confidence objects; keeps confidence level 2 and depths from 0.15 to 8 m; samples at stride 2; forms one 3 cm voxel grid across pose sources; requires support from at least two frames; averages real RGB colors; and writes metadata, a full PLY, and a bounded preview artifact. Training exposes a separate **A_hybrid + LiDAR initialization** source and validates the COLMAP run, hybrid fingerprint, capture identity, PLY count, and gravity-aligned coordinate frame before starting Splatfacto.
+
+This first slice deliberately produces LiDAR-only surface seeds instead of retaining unsupported sparse COLMAP points, making the third ablation interpretable and preventing known visual floaters from being copied into the new initialization. It supports exactly one continuous ARKit capture. That capture may cover several rooms because they share one ARKit world. Independently started captures require explicit scene-assembly transforms and are rejected rather than silently merged.
+
+The current COLMAP tab only displays initialization counts and immutable artifact URIs. Preserve the generated preview artifact for a later in-app initialization viewer. After the experiments, redesign the workflow around a scene-assembly UI rather than continuing to enlarge the COLMAP tab: captures/rooms become graph nodes, verified overlap or manual constraints become edges, and camera, sparse, LiDAR, RoomPlan, and training layers become inspectable outputs of the selected assembled scene.
 
 Only after Gate 6, create separate training inputs while keeping all other settings fixed:
 

@@ -86,6 +86,27 @@ class WorkerRunpodPayloadTests(unittest.TestCase):
         self.assertIn("--colmap-source-run-id run-a", command)
         self.assertIn("--hybrid-camera-set-uri r2://bucket/analyses/hybrid.json", command)
 
+    def test_training_command_passes_lidar_initialization_artifact(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"CONTROLLER_REPO_URL": "https://example.invalid/repository.git", "CONTROLLER_GIT_REF": "main"},
+            clear=False,
+        ):
+            command = build_training_stage_shell_command(
+                {"project_id": "project", "id": "training-123"},
+                {
+                    "preprocess_uri": "r2://bucket/preprocess/current",
+                    "colmap_uri": "r2://bucket/colmap/runs/run-a",
+                    "output_uri": "r2://bucket/training/a-hybrid-lidar",
+                    "camera_source": "arkit_hybrid",
+                    "colmap_source_run_id": "run-a",
+                    "hybrid_camera_set_uri": "r2://bucket/analyses/hybrid.json",
+                    "lidar_initialization_uri": "r2://bucket/analyses/lidar.json",
+                },
+            )
+
+        self.assertIn("--lidar-initialization-uri r2://bucket/analyses/lidar.json", command)
+
 
 if __name__ == "__main__":
     unittest.main()
