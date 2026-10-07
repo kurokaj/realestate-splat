@@ -867,6 +867,30 @@
                     <dt>Artifact</dt><dd class="mono">{{ selected_lidar.artifact_uri or "" }}</dd>
                     <dt>PLY</dt><dd class="mono">{{ selected_lidar.ply_uri or "" }}</dd>
                   </dl>
+                  <div
+                    class="viewer-surface"
+                    data-colmap-viewer-url="/ui/projects/{{ project.id }}/colmap-viewer?colmap_stage_run_id={{ selected_arkit_alignment_run.id }}&amp;include_alignment=true&amp;include_lidar_initialization=true"
+                    data-alignment-viewer="true"
+                  >
+                    <canvas class="viewer-canvas" tabindex="0" aria-label="Filtered LiDAR training initialization and hybrid cameras"></canvas>
+                    <div class="viewer-overlay">
+                      <span class="viewer-status">Loading LiDAR initialization...</span>
+                      <div class="viewer-selection" data-viewer-selection>Click a hybrid trajectory point to inspect its source frame.</div>
+                    </div>
+                    <div class="viewer-legend" data-viewer-legend aria-label="LiDAR initialization and trajectory colors"></div>
+                    <div class="viewer-toolbar viewer-toolbar-layers">
+                      <button type="button" class="viewer-button is-active" data-viewer-layer="lidar_initialization">LiDAR initialization</button>
+                      <button type="button" class="viewer-button is-active" data-viewer-layer="hybrid">Hybrid cameras</button>
+                      <button type="button" class="viewer-button" data-viewer-layer="points">COLMAP points</button>
+                      <button type="button" class="viewer-button" data-viewer-layer="colmap">COLMAP cameras</button>
+                      <button type="button" class="viewer-button" data-viewer-layer="arkit">ARKit cameras</button>
+                      <button type="button" class="viewer-button" data-viewer-layer="links">Alignment links</button>
+                      <button type="button" class="viewer-button is-active" data-viewer-mode="orbit">Orbit</button>
+                      <button type="button" class="viewer-button" data-viewer-mode="free">Free View</button>
+                      <button type="button" class="viewer-button" data-viewer-reset>Reset</button>
+                    </div>
+                    <div class="viewer-help">RGB points are the filtered LiDAR seeds that will initialize training. The viewer shows a deterministic preview capped below the full {{ selected_lidar.filtered_voxel_count or 0 }}-point PLY. Purple cameras are the approved A_hybrid trajectory.</div>
+                  </div>
                 {% endif %}
                 <form method="post" action="/ui/projects/{{ project.id }}/lidar-initialization" class="stack" data-long-running-form>
                   <input type="hidden" name="colmap_stage_run_id" value="{{ selected_arkit_alignment_run.id }}">

@@ -732,7 +732,7 @@ async function setupColmapViewer(root) {
     const scene = await response.json();
     let viewer;
     try {
-      const viewerModule = await import("/ui/static/colmap_viewer_three.js?v=20261004-depth-1");
+      const viewerModule = await import("/ui/static/colmap_viewer_three.js?v=20261007-lidar-initialization-1");
       viewer = viewerModule.renderSparseViewer(canvas, scene);
     } catch (viewerError) {
       console.error("Three.js viewer failed; using the legacy Canvas fallback.", viewerError);
@@ -776,7 +776,11 @@ async function setupColmapViewer(root) {
       window.location.reload();
     });
     if (isAlignmentViewer) {
-      renderAlignmentLegend(root.querySelector("[data-viewer-legend]"), Boolean(scene.depth_diagnostic));
+      renderAlignmentLegend(
+        root.querySelector("[data-viewer-legend]"),
+        Boolean(scene.depth_diagnostic),
+        Boolean(scene.lidar_initialization),
+      );
     } else {
       renderViewerLegend(root.querySelector("[data-viewer-legend]"), scene.camera_group_colors || {});
     }
@@ -806,15 +810,17 @@ async function setupColmapViewer(root) {
     const cameraCount = scene.camera_count || (scene.cameras || []).length || 0;
     const alignment = scene.alignment;
     const depthCount = scene.depth_diagnostic?.viewer_point_count || 0;
+    const lidarPreviewCount = scene.lidar_initialization?.preview_point_count || 0;
+    const lidarRetainedCount = scene.lidar_initialization?.retained_point_count || 0;
     status.textContent = alignment
-      ? `${pointCount} COLMAP points${depthCount ? ` · ${depthCount} depth points` : ""} · ${alignment.frame_count || 0} ARKit · ${alignment.registered_count || 0} COLMAP · ${alignment.hybrid_arkit_count || 0} ARKit replacements · ${viewer.rendererName || "viewer"}`
+      ? `${pointCount} COLMAP points${depthCount ? ` · ${depthCount} depth points` : ""}${lidarPreviewCount ? ` · ${lidarPreviewCount}/${lidarRetainedCount || lidarPreviewCount} LiDAR initialization points shown` : ""} · ${alignment.frame_count || 0} ARKit · ${alignment.registered_count || 0} COLMAP · ${alignment.hybrid_arkit_count || 0} ARKit replacements · ${viewer.rendererName || "viewer"}`
       : `${pointCount} sampled points · ${cameraCount} cameras · ${viewer.rendererName || "viewer"}`;
   } catch (error) {
     status.textContent = `Viewer load failed: ${error}`;
   }
 }
 
-function renderAlignmentLegend(legend, includeDepth = false) {
+function renderAlignmentLegend(legend, includeDepth = false, includeLidarInitialization = false) {
   if (!legend) return;
   legend.replaceChildren();
   const entries = [
@@ -828,6 +834,9 @@ function renderAlignmentLegend(legend, includeDepth = false) {
   if (includeDepth) entries.push(
     ["Depth via COLMAP pose", [66, 206, 255]],
     ["Depth via ARKit pose", [255, 158, 64]],
+  );
+  if (includeLidarInitialization) entries.push(
+    ["LiDAR initialization (RGB)", [230, 230, 230]],
   );
   entries.forEach(([text, color]) => {
     const item = document.createElement("span");

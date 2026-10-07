@@ -13,6 +13,15 @@ const COLORS = {
   depthArkit: [255, 158, 64],
 };
 
+// LiDAR initialization artifacts use Nerfstudio's +Z-up world. The browser
+// viewer uses Three.js +Y-up, so display (x, y, z) as (x, z, -y).
+const LIDAR_INITIALIZATION_TO_VIEWER = new THREE.Matrix4().set(
+  1, 0, 0, 0,
+  0, 0, 1, 0,
+  0, -1, 0, 0,
+  0, 0, 0, 1,
+);
+
 function color(values) {
   const [red, green, blue] = values || [190, 200, 210];
   return new THREE.Color(red / 255, green / 255, blue / 255);
@@ -162,22 +171,33 @@ function makeCameraFrustums(rows, positionKey, forwardKey, upKey, transform, len
 
 function calculateBounds(sceneData, transform) {
   const box = new THREE.Box3();
-  (sceneData.points || []).forEach((row) => {
-    const point = vector(row.position, transform);
-    if (point) box.expandByPoint(point);
-  });
-  (sceneData.cameras || []).forEach((row) => {
-    const point = vector(row.position, transform);
-    if (point) box.expandByPoint(point);
-  });
-  (sceneData.depth_diagnostic?.points || []).forEach((row) => {
-    const point = vector(row.position, new THREE.Matrix4());
+  const lidarRows = sceneData.lidar_initialization?.points || [];
+  const hasLidarInitialization = lidarRows.length > 0;
+  if (!hasLidarInitialization) {
+    (sceneData.points || []).forEach((row) => {
+      const point = vector(row.position, transform);
+      if (point) box.expandByPoint(point);
+    });
+    (sceneData.cameras || []).forEach((row) => {
+      const point = vector(row.position, transform);
+      if (point) box.expandByPoint(point);
+    });
+    (sceneData.depth_diagnostic?.points || []).forEach((row) => {
+      const point = vector(row.position, new THREE.Matrix4());
+      if (point) box.expandByPoint(point);
+    });
+  }
+  lidarRows.forEach((row) => {
+    const point = vector(row.position, LIDAR_INITIALIZATION_TO_VIEWER);
     if (point) box.expandByPoint(point);
   });
   const captures = sceneData.alignment?.captures || [];
   captures.forEach((capture) => {
     (capture.frames || []).forEach((frame) => {
-      ["arkit_position", "colmap_position", "hybrid_position"].forEach((key) => {
+      const positionKeys = hasLidarInitialization
+        ? ["hybrid_position"]
+        : ["arkit_position", "colmap_position", "hybrid_position"];
+      positionKeys.forEach((key) => {
         const point = vector(frame[key], transform);
         if (point) box.expandByPoint(point);
       });
@@ -229,6 +249,7 @@ export function renderSparseViewer(canvas, sceneData) {
     points: new THREE.Group(),
     depth_colmap: new THREE.Group(),
     depth_arkit: new THREE.Group(),
+    lidar_initialization: new THREE.Group(),
     colmap: new THREE.Group(),
     arkit: new THREE.Group(),
     links: new THREE.Group(),
@@ -256,6 +277,12 @@ export function renderSparseViewer(canvas, sceneData) {
     layers.depth_arkit,
     depthRows.filter((row) => row.pose_source === "arkit_propagated"),
     identity,
+    radius,
+  );
+  addPointCloud(
+    layers.lidar_initialization,
+    Array.isArray(sceneData.lidar_initialization?.points) ? sceneData.lidar_initialization.points : [],
+    LIDAR_INITIALIZATION_TO_VIEWER,
     radius,
   );
 
@@ -377,6 +404,7 @@ export function renderSparseViewer(canvas, sceneData) {
     points: true,
     depth_colmap: true,
     depth_arkit: true,
+    lidar_initialization: true,
     colmap: true,
     arkit: true,
     links: true,
@@ -390,6 +418,7 @@ export function renderSparseViewer(canvas, sceneData) {
     layers.points.visible = visibleLayers.points;
     layers.depth_colmap.visible = visibleLayers.depth_colmap;
     layers.depth_arkit.visible = visibleLayers.depth_arkit;
+    layers.lidar_initialization.visible = visibleLayers.lidar_initialization;
     layers.colmap.visible = visibleLayers.colmap && !outliersOnly;
     layers.arkit.visible = visibleLayers.arkit && !outliersOnly;
     layers.links.visible = visibleLayers.links && !outliersOnly;

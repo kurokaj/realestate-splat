@@ -213,6 +213,7 @@ def project_colmap_viewer(
     colmap_stage_run_id: Optional[str] = Query(default=None),
     include_alignment: bool = Query(default=False),
     include_depth: bool = Query(default=False),
+    include_lidar_initialization: bool = Query(default=False),
 ) -> JSONResponse:
     with connect() as conn:
         project = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
@@ -272,6 +273,32 @@ def project_colmap_viewer(
                 "source_statistics": depth_artifact.get("source_statistics"),
                 "overlap_statistics": depth_artifact.get("overlap_statistics"),
                 "points": depth_artifact.get("points") or [],
+            }
+        if include_lidar_initialization:
+            lidar_summary = (
+                summary.get("lidar_initialization")
+                if isinstance(summary.get("lidar_initialization"), dict)
+                else {}
+            )
+            preview_uri = str(lidar_summary.get("preview_uri") or "")
+            if not preview_uri:
+                raise HTTPException(status_code=404, detail="LiDAR initialization has not been built for this run")
+            try:
+                lidar_preview = load_json_uri(preview_uri)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"LiDAR initialization preview is unavailable: {exc}",
+                ) from exc
+            if not lidar_preview:
+                raise HTTPException(status_code=404, detail="LiDAR initialization preview is unavailable")
+            payload["lidar_initialization"] = {
+                "status": lidar_summary.get("status"),
+                "retained_point_count": lidar_summary.get("filtered_voxel_count"),
+                "preview_point_count": lidar_preview.get("point_count"),
+                "coordinate_convention": lidar_preview.get("coordinate_convention"),
+                "source_selection_sha256": lidar_preview.get("source_selection_sha256"),
+                "points": lidar_preview.get("points") or [],
             }
     elif not selected_run_json:
         blacklist = load_colmap_blacklist(row_to_json(project))
