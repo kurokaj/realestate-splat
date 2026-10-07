@@ -378,6 +378,7 @@ def run_runpod_training(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]
     camera_source = inputs.get("camera_source", "visual_colmap")
     hybrid_camera_set_uri = inputs.get("hybrid_camera_set_uri")
     lidar_initialization_uri = inputs.get("lidar_initialization_uri")
+    merge_colmap_initialization = bool(inputs.get("merge_colmap_initialization"))
     colmap_source_run_id = inputs.get("colmap_source_run_id")
     output_base_uri = inputs.get("output_uri")
     if not preprocess_uri:
@@ -401,6 +402,8 @@ def run_runpod_training(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]
         if camera_source != "arkit_hybrid":
             raise ValueError("LiDAR initialization requires arkit_hybrid cameras")
         require_r2_uri(lidar_initialization_uri, "lidar_initialization_uri")
+    if merge_colmap_initialization and not lidar_initialization_uri:
+        raise ValueError("Merged COLMAP initialization requires a LiDAR initialization artifact")
 
     remote_command = build_training_stage_shell_command(stage_run, inputs)
     current_uri = f"{output_base_uri.rstrip('/')}/current"
@@ -419,6 +422,7 @@ def run_runpod_training(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]
                 "camera_source": camera_source,
                 "colmap_source_run_id": colmap_source_run_id,
                 "lidar_initialization_uri": lidar_initialization_uri,
+                "merge_colmap_initialization": merge_colmap_initialization,
             },
         )
         conn.execute(
@@ -451,6 +455,7 @@ def run_runpod_training(stage_run: dict[str, Any]) -> tuple[dict[str, Any], str]
                 "colmap_source_run_id": colmap_source_run_id,
                 "hybrid_camera_set_uri": hybrid_camera_set_uri,
                 "lidar_initialization_uri": lidar_initialization_uri,
+                "merge_colmap_initialization": merge_colmap_initialization,
                 "max_steps": inputs.get("max_steps", 100),
                 "stage_result_uri": f"{current_uri}/stage_result.json",
                 "training_summary_uri": f"{current_uri}/training_summary.json",
@@ -601,6 +606,8 @@ def build_training_stage_shell_command(stage_run: dict[str, Any], inputs: dict[s
         command.extend(["--hybrid-camera-set-uri", inputs["hybrid_camera_set_uri"]])
     if inputs.get("lidar_initialization_uri"):
         command.extend(["--lidar-initialization-uri", inputs["lidar_initialization_uri"]])
+    if inputs.get("merge_colmap_initialization"):
+        command.append("--merge-colmap-initialization")
     if inputs.get("export", True):
         command.append("--export")
     else:
@@ -1231,6 +1238,7 @@ def compact_training_summary(
         "lidar_initialization_artifact_uri": training_summary.get(
             "lidar_initialization_artifact_uri"
         ) or metadata.get("lidar_initialization_uri"),
+        "initialization_merge": training_summary.get("initialization_merge"),
         "selected_config": training_summary.get("selected_config"),
         "checkpoint_count": training_summary.get("checkpoint_count"),
         "latest_checkpoint": training_summary.get("latest_checkpoint"),

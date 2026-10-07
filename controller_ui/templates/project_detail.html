@@ -962,7 +962,7 @@
       <form method="post" action="/ui/projects/{{ project.id }}/training" class="stack">
         <div class="grid two tight">
           <label>
-            <span class="label-title">Camera and initialization set <span class="info-dot" tabindex="0" data-tip="Select an immutable visual reconstruction, A_hybrid with COLMAP seeds, or A_hybrid with the reviewed gravity-aligned LiDAR initialization.">i</span></span>
+            <span class="label-title">Camera and initialization set <span class="info-dot" tabindex="0" data-tip="Select visual COLMAP, A_hybrid with COLMAP seeds, A_hybrid with LiDAR seeds, or the final LiDAR plus conservatively filtered COLMAP comparison.">i</span></span>
             <select name="training_source" required>
               <option value="" {% if not training_form_values.training_source %}selected{% endif %} disabled>Select a camera set…</option>
               {% for option in training_source_options %}

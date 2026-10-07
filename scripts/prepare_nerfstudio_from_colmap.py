@@ -47,6 +47,13 @@ class Point3D:
     xyz: Tuple[float, float, float]
     rgb: Tuple[int, int, int]
     error: float
+    track_length: int = 0
+
+
+@dataclass(frozen=True)
+class ColoredPoint:
+    xyz: Tuple[float, float, float]
+    rgb: Tuple[int, int, int]
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -81,6 +88,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--lidar-initialization-ply",
         type=Path,
         help="RGB-colored gravity-aligned PLY referenced by --lidar-initialization.",
+    )
+    parser.add_argument(
+        "--merge-colmap-initialization",
+        action="store_true",
+        help="Merge quality-filtered, metric-aligned COLMAP points into the LiDAR initialization.",
     )
     parser.add_argument("--num-downscales", type=int, default=2, help="Number of images_2/images_4/... folders to create.")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output data directory.")
@@ -159,6 +171,7 @@ def read_points3d(path: Path) -> List[Point3D]:
                 xyz=(float(parts[1]), float(parts[2]), float(parts[3])),
                 rgb=(int(parts[4]), int(parts[5]), int(parts[6])),
                 error=float(parts[7]),
+                track_length=max(0, (len(parts) - 8) // 2),
             )
         )
     if not points:
@@ -627,6 +640,257 @@ def read_ply_vertex_count(path: Path) -> int:
     raise SystemExit(f"Initialization PLY has no vertex count: {path}")
 
 
+def read_colored_ascii_ply(path: Path) -> List[ColoredPoint]:
+    """Read the simple XYZ/RGB ASCII PLY written by the LiDAR initializer."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0].strip() != "ply":
+        raise SystemExit(f"Initialization PLY has an invalid header: {path}")
+    if len(lines) < 2 or lines[1].strip() != "format ascii 1.0":
+        raise SystemExit(f"Merged initialization requires an ASCII PLY: {path}")
+    vertex_count = None
+    properties: List[str] = []
+    data_index = None
+    in_vertex = False
+    for index, raw_line in enumerate(lines[2:], start=2):
+        line = raw_line.strip()
+        if line.startswith("element "):
+            parts = line.split()
+            in_vertex = len(parts) == 3 and parts[1] == "vertex"
+            if in_vertex:
+                vertex_count = int(parts[2])
+            continue
+        if line.startswith("property ") and in_vertex:
+            properties.append(line.split()[-1])
+            continue
+        if line == "end_header":
+            data_index = index + 1
+            break
+    if vertex_count is None or data_index is None:
+        raise SystemExit(f"Initialization PLY is missing vertex metadata: {path}")
+    required = ("x", "y", "z", "red", "green", "blue")
+    if any(name not in properties for name in required):
+        raise SystemExit(f"Initialization PLY must contain XYZ and RGB properties: {path}")
+    property_indexes = {name: properties.index(name) for name in required}
+    rows = lines[data_index : data_index + vertex_count]
+    if len(rows) != vertex_count:
+        raise SystemExit(f"Initialization PLY declares {vertex_count} vertices but contains {len(rows)}")
+    points: List[ColoredPoint] = []
+    for row in rows:
+        values = row.split()
+        try:
+            xyz = tuple(float(values[property_indexes[name]]) for name in ("x", "y", "z"))
+            rgb = tuple(int(values[property_indexes[name]]) for name in ("red", "green", "blue"))
+        except (IndexError, TypeError, ValueError) as exc:
+            raise SystemExit(f"Initialization PLY contains an invalid vertex row: {row}") from exc
+        if not all(math.isfinite(value) for value in xyz):
+            raise SystemExit("Initialization PLY contains a non-finite vertex")
+        points.append(ColoredPoint(xyz=xyz, rgb=rgb))
+    return points
+
+
+def _transpose3(matrix: Sequence[Sequence[float]]) -> List[List[float]]:
+    return [[float(matrix[column][row]) for column in range(3)] for row in range(3)]
+
+
+def _multiply3(left: Sequence[Sequence[float]], right: Sequence[Sequence[float]]) -> List[List[float]]:
+    return [
+        [sum(float(left[row][index]) * float(right[index][column]) for index in range(3)) for column in range(3)]
+        for row in range(3)
+    ]
+
+
+def _transform3(matrix: Sequence[Sequence[float]], vector: Sequence[float]) -> Tuple[float, float, float]:
+    return tuple(sum(float(matrix[row][index]) * float(vector[index]) for index in range(3)) for row in range(3))
+
+
+def colmap_to_reference_similarity(
+    hybrid_artifact: Mapping[str, Any],
+) -> Tuple[float, List[List[float]], Tuple[float, float, float]]:
+    """Recover the COLMAP-world to reference-ARKit similarity from A_hybrid."""
+    captures = [item for item in hybrid_artifact.get("captures") or [] if isinstance(item, Mapping)]
+    if len(captures) != 1:
+        raise SystemExit("Merged initialization currently requires one continuous A_hybrid capture.")
+    capture = captures[0]
+    scale_colmap_per_meter = float(capture.get("scale_colmap_units_per_meter") or 0.0)
+    if not math.isfinite(scale_colmap_per_meter) or scale_colmap_per_meter <= 0:
+        raise SystemExit("A_hybrid capture is missing a valid COLMAP-to-meter scale.")
+    frames = [item for item in capture.get("frames") or [] if isinstance(item, Mapping)]
+    if not frames:
+        raise SystemExit("A_hybrid capture contains no frames.")
+    first_colmap = validate_camera_to_world_matrix(frames[0].get("camera_to_world_colmap_opencv_row_major"))
+    first_reference = validate_camera_to_world_matrix(frames[0].get("camera_to_world_reference_arkit_row_major"))
+    camera_axes = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
+    rotation = _multiply3(
+        _multiply3([row[:3] for row in first_reference[:3]], camera_axes),
+        _transpose3([row[:3] for row in first_colmap[:3]]),
+    )
+    scale = 1.0 / scale_colmap_per_meter
+    rotated_center = _transform3(rotation, [row[3] for row in first_colmap[:3]])
+    translation = tuple(first_reference[row][3] - scale * rotated_center[row] for row in range(3))
+
+    max_center_error = 0.0
+    for frame in frames:
+        colmap_pose = validate_camera_to_world_matrix(frame.get("camera_to_world_colmap_opencv_row_major"))
+        reference_pose = validate_camera_to_world_matrix(frame.get("camera_to_world_reference_arkit_row_major"))
+        predicted_rotation = _transform3(rotation, [row[3] for row in colmap_pose[:3]])
+        predicted = tuple(scale * predicted_rotation[row] + translation[row] for row in range(3))
+        expected = tuple(reference_pose[row][3] for row in range(3))
+        max_center_error = max(
+            max_center_error,
+            math.sqrt(sum((predicted[index] - expected[index]) ** 2 for index in range(3))),
+        )
+    if max_center_error > 1e-3:
+        raise SystemExit(
+            f"Recovered COLMAP-to-ARKit similarity is inconsistent with A_hybrid ({max_center_error:.6f} m)."
+        )
+    return scale, rotation, translation
+
+
+def transform_colmap_point_to_reference_nerfstudio(
+    point: Point3D,
+    *,
+    scale: float,
+    rotation: Sequence[Sequence[float]],
+    translation: Sequence[float],
+) -> ColoredPoint:
+    rotated = _transform3(rotation, point.xyz)
+    reference = tuple(scale * rotated[index] + float(translation[index]) for index in range(3))
+    # Reference ARKit is +Y-up. The training frame is right-handed +Z-up.
+    return ColoredPoint(
+        xyz=(reference[0], -reference[2], reference[1]),
+        rgb=point.rgb,
+    )
+
+
+def _grid_key(position: Sequence[float], cell_size: float) -> Tuple[int, int, int]:
+    return tuple(math.floor(float(value) / cell_size) for value in position)
+
+
+def nearest_point_distance(
+    position: Sequence[float],
+    grid: Mapping[Tuple[int, int, int], Sequence[ColoredPoint]],
+    *,
+    cell_size: float,
+) -> Optional[float]:
+    center = _grid_key(position, cell_size)
+    best_squared: Optional[float] = None
+    for offset_x in (-1, 0, 1):
+        for offset_y in (-1, 0, 1):
+            for offset_z in (-1, 0, 1):
+                for candidate in grid.get(
+                    (center[0] + offset_x, center[1] + offset_y, center[2] + offset_z), ()
+                ):
+                    squared = sum(
+                        (float(position[index]) - candidate.xyz[index]) ** 2 for index in range(3)
+                    )
+                    if best_squared is None or squared < best_squared:
+                        best_squared = squared
+    return math.sqrt(best_squared) if best_squared is not None else None
+
+
+def build_lidar_colmap_initialization(
+    lidar_points: Sequence[ColoredPoint],
+    colmap_points: Sequence[Point3D],
+    hybrid_artifact: Mapping[str, Any],
+    *,
+    min_track_length: int = 3,
+    max_reprojection_error_px: float = 1.0,
+    duplicate_radius_meters: float = 0.03,
+    max_surface_distance_meters: float = 0.15,
+) -> Tuple[List[ColoredPoint], Dict[str, Any]]:
+    """Merge LiDAR seeds with conservative, surface-supported COLMAP points."""
+    if not lidar_points:
+        raise SystemExit("Cannot merge COLMAP points into an empty LiDAR initialization.")
+    scale, rotation, translation = colmap_to_reference_similarity(hybrid_artifact)
+    grid: Dict[Tuple[int, int, int], List[ColoredPoint]] = {}
+    for point in lidar_points:
+        grid.setdefault(_grid_key(point.xyz, max_surface_distance_meters), []).append(point)
+
+    quality_retained = 0
+    surface_supported = 0
+    duplicate_count = 0
+    retained_colmap: List[ColoredPoint] = []
+    retained_errors: List[float] = []
+    retained_tracks: List[int] = []
+    for point in colmap_points:
+        if point.track_length < min_track_length or point.error > max_reprojection_error_px:
+            continue
+        quality_retained += 1
+        transformed = transform_colmap_point_to_reference_nerfstudio(
+            point,
+            scale=scale,
+            rotation=rotation,
+            translation=translation,
+        )
+        distance = nearest_point_distance(
+            transformed.xyz,
+            grid,
+            cell_size=max_surface_distance_meters,
+        )
+        if distance is None or distance > max_surface_distance_meters:
+            continue
+        surface_supported += 1
+        if distance <= duplicate_radius_meters:
+            duplicate_count += 1
+            continue
+        retained_colmap.append(transformed)
+        retained_errors.append(point.error)
+        retained_tracks.append(point.track_length)
+
+    merged = [*lidar_points, *retained_colmap]
+    xs = [point.xyz[0] for point in merged]
+    ys = [point.xyz[1] for point in merged]
+    zs = [point.xyz[2] for point in merged]
+    settings = {
+        "min_colmap_track_length": min_track_length,
+        "max_colmap_reprojection_error_px": max_reprojection_error_px,
+        "duplicate_radius_meters": duplicate_radius_meters,
+        "max_lidar_surface_distance_meters": max_surface_distance_meters,
+    }
+    details = {
+        "policy": "LiDAR seeds plus filtered, LiDAR-surface-supported, non-duplicate COLMAP points",
+        "settings": settings,
+        "lidar_point_count": len(lidar_points),
+        "colmap_input_point_count": len(colmap_points),
+        "colmap_quality_retained_count": quality_retained,
+        "colmap_surface_supported_count": surface_supported,
+        "colmap_duplicate_removed_count": duplicate_count,
+        "colmap_added_point_count": len(retained_colmap),
+        "merged_point_count": len(merged),
+        "colmap_added_reprojection_error_median": _median(retained_errors),
+        "colmap_added_track_length_median": _median([float(value) for value in retained_tracks]),
+        "colmap_units_per_meter": 1.0 / scale,
+        "point_cloud_stats": {
+            "count": len(merged),
+            "xyz_min": [min(xs), min(ys), min(zs)],
+            "xyz_max": [max(xs), max(ys), max(zs)],
+        },
+    }
+    return merged, details
+
+
+def _median(values: Sequence[float]) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    return ordered[midpoint] if len(ordered) % 2 else (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
+
+
+def write_colored_point_cloud_ply(path: Path, points: Sequence[ColoredPoint]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        file.write("ply\nformat ascii 1.0\n")
+        file.write(f"element vertex {len(points)}\n")
+        file.write("property float x\nproperty float y\nproperty float z\n")
+        file.write("property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n")
+        for point in points:
+            file.write(
+                f"{point.xyz[0]:.9g} {point.xyz[1]:.9g} {point.xyz[2]:.9g} "
+                f"{point.rgb[0]} {point.rgb[1]} {point.rgb[2]}\n"
+            )
+
+
 def build_hybrid_transforms(
     *,
     run_dir: Path,
@@ -638,6 +902,7 @@ def build_hybrid_transforms(
     point_cloud_path: Path,
     expected_colmap_run_id: Optional[str] = None,
     lidar_initialization: Optional[Mapping[str, Any]] = None,
+    merged_initialization: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     manifest = manifest_by_name(run_dir)
     if not manifest:
@@ -724,14 +989,29 @@ def build_hybrid_transforms(
         )
 
     if lidar_initialization is not None:
-        initialization_source = "high_confidence_lidar"
-        source = "arkit_hybrid_with_lidar_initialization"
-        coordinate_frame = "reference_arkit_gravity_aligned_nerfstudio_z_up"
-        initialization_stats = (
-            lidar_initialization.get("point_cloud_stats")
-            if isinstance(lidar_initialization.get("point_cloud_stats"), Mapping)
-            else {}
+        initialization_source = (
+            "high_confidence_lidar_plus_filtered_colmap"
+            if merged_initialization is not None
+            else "high_confidence_lidar"
         )
+        source = (
+            "arkit_hybrid_with_lidar_colmap_initialization"
+            if merged_initialization is not None
+            else "arkit_hybrid_with_lidar_initialization"
+        )
+        coordinate_frame = "reference_arkit_gravity_aligned_nerfstudio_z_up"
+        if merged_initialization is not None:
+            initialization_stats = (
+                merged_initialization.get("point_cloud_stats")
+                if isinstance(merged_initialization.get("point_cloud_stats"), Mapping)
+                else {}
+            )
+        else:
+            initialization_stats = (
+                lidar_initialization.get("point_cloud_stats")
+                if isinstance(lidar_initialization.get("point_cloud_stats"), Mapping)
+                else {}
+            )
     else:
         initialization_source = "base_colmap_sparse_txt"
         source = "arkit_hybrid_camera_set"
@@ -765,6 +1045,7 @@ def build_hybrid_transforms(
             "lidar_initialization_artifact_uri": (
                 lidar_initialization.get("artifact_uri") if lidar_initialization is not None else None
             ),
+            "initialization_merge": dict(merged_initialization) if merged_initialization is not None else None,
             "point_cloud_path": point_cloud_path.name,
             "point_cloud_stats": initialization_stats,
             "multi_camera": len(cameras) > 1,
@@ -837,6 +1118,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit("--lidar-initialization and --lidar-initialization-ply must be supplied together.")
     if lidar_initialization_path is not None and hybrid_camera_set_path is None:
         raise SystemExit("LiDAR initialization requires --hybrid-camera-set.")
+    if args.merge_colmap_initialization and lidar_initialization_path is None:
+        raise SystemExit("--merge-colmap-initialization requires LiDAR initialization inputs.")
 
     cameras_path = colmap_text_dir / "cameras.txt"
     images_path = colmap_text_dir / "images.txt"
@@ -869,9 +1152,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             expected_colmap_run_id=args.expected_colmap_run_id,
         )
     images_dir = data_dir / "images"
-    point_cloud_path = data_dir / (
-        "lidar_initialization.ply" if lidar_initialization_path is not None else "colmap_points3D.ply"
+    point_cloud_name = (
+        "lidar_colmap_initialization.ply"
+        if args.merge_colmap_initialization
+        else "lidar_initialization.ply"
+        if lidar_initialization_path is not None
+        else "colmap_points3D.ply"
     )
+    point_cloud_path = data_dir / point_cloud_name
     print(f"Preparing multi-camera Nerfstudio dataset from {colmap_text_dir}")
     print(f"  registered images: {len(images)}")
     if hybrid_artifact is not None:
@@ -887,6 +1175,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         copy_registered_images(images, frames_dir, images_dir)
     build_downscales(images_dir, int(args.num_downscales))
     lidar_initialization = None
+    merged_initialization = None
     if lidar_initialization_path is not None and lidar_initialization_ply_path is not None:
         if not lidar_initialization_path.exists():
             raise SystemExit(f"LiDAR initialization metadata does not exist: {lidar_initialization_path}")
@@ -894,7 +1183,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not isinstance(lidar_initialization, dict) or hybrid_artifact is None:
             raise SystemExit("LiDAR initialization metadata root must be an object.")
         validate_lidar_initialization(lidar_initialization, hybrid_artifact, lidar_initialization_ply_path)
-        shutil.copy2(lidar_initialization_ply_path, point_cloud_path)
+        if args.merge_colmap_initialization:
+            lidar_points = read_colored_ascii_ply(lidar_initialization_ply_path)
+            merged_points, merged_initialization = build_lidar_colmap_initialization(
+                lidar_points,
+                points,
+                hybrid_artifact,
+            )
+            write_colored_point_cloud_ply(point_cloud_path, merged_points)
+            print(
+                "  merged initialization: "
+                f"{merged_initialization['lidar_point_count']} LiDAR + "
+                f"{merged_initialization['colmap_added_point_count']} filtered COLMAP = "
+                f"{merged_initialization['merged_point_count']} points"
+            )
+        else:
+            shutil.copy2(lidar_initialization_ply_path, point_cloud_path)
     else:
         write_point_cloud_ply(point_cloud_path, points)
     print(f"Wrote {point_cloud_path}")
@@ -909,6 +1213,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             point_cloud_path=point_cloud_path,
             expected_colmap_run_id=args.expected_colmap_run_id,
             lidar_initialization=lidar_initialization,
+            merged_initialization=merged_initialization,
         )
     else:
         transforms = build_transforms(

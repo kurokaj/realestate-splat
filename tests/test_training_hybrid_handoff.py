@@ -115,11 +115,13 @@ class HybridTrainingHandoffTests(unittest.TestCase):
             use_scale_regularization=True,
             train_option=[],
             lidar_initialization_uri="r2://bucket/lidar.json",
+            merge_colmap_initialization=True,
         )
         prepare_command, _ = build_training_commands(args, Path("/tmp/training-run"))
         self.assertIn("--lidar-initialization", prepare_command)
         self.assertIn("/tmp/training-run/reports/lidar_initialization.json", prepare_command)
         self.assertIn("--lidar-initialization-ply", prepare_command)
+        self.assertIn("--merge-colmap-initialization", prepare_command)
 
     def test_complete_payload_accepts_lidar_initialization_ply(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

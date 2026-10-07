@@ -102,10 +102,12 @@ class WorkerRunpodPayloadTests(unittest.TestCase):
                     "colmap_source_run_id": "run-a",
                     "hybrid_camera_set_uri": "r2://bucket/analyses/hybrid.json",
                     "lidar_initialization_uri": "r2://bucket/analyses/lidar.json",
+                    "merge_colmap_initialization": True,
                 },
             )
 
         self.assertIn("--lidar-initialization-uri r2://bucket/analyses/lidar.json", command)
+        self.assertIn("--merge-colmap-initialization", command)
 
 
 if __name__ == "__main__":

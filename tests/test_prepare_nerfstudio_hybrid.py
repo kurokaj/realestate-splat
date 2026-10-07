@@ -8,9 +8,11 @@ from unittest.mock import patch
 
 from scripts.prepare_nerfstudio_from_colmap import (
     Camera,
+    ColoredPoint,
     ImagePose,
     Point3D,
     build_hybrid_transforms,
+    build_lidar_colmap_initialization,
     colmap_camera_to_world_to_nerfstudio_transform,
     colmap_pose_to_nerfstudio_transform,
     hybrid_frames,
@@ -198,6 +200,41 @@ class HybridNerfstudioPreparationTests(unittest.TestCase):
             "reference_arkit_gravity_aligned_nerfstudio_z_up",
         )
         self.assertEqual(transforms["buildvision3d"]["point_cloud_stats"]["count"], 4)
+
+    def test_merges_only_surface_supported_nonduplicate_colmap_points(self) -> None:
+        camera_axes = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+        artifact = hybrid_artifact()
+        artifact["captures"][0]["scale_colmap_units_per_meter"] = 2.0
+        artifact["captures"][0]["frames"] = [
+            {
+                **artifact["captures"][0]["frames"][0],
+                "camera_to_world_colmap_opencv_row_major": identity_pose(),
+                "camera_to_world_reference_arkit_row_major": camera_axes,
+            }
+        ]
+        lidar = [ColoredPoint((1.0, 0.0, 0.0), (10, 20, 30))]
+        colmap = [
+            Point3D(1, (2.02, 0.0, 0.0), (255, 0, 0), 0.2, 4),  # duplicate
+            Point3D(2, (2.20, 0.0, 0.0), (0, 255, 0), 0.2, 4),  # useful nearby detail
+            Point3D(3, (4.00, 0.0, 0.0), (0, 0, 255), 0.2, 4),  # unsupported floater
+            Point3D(4, (2.20, 0.0, 0.0), (255, 255, 0), 2.0, 4),  # high error
+            Point3D(5, (2.20, 0.0, 0.0), (255, 0, 255), 0.2, 2),  # short track
+        ]
+
+        merged, details = build_lidar_colmap_initialization(lidar, colmap, artifact)
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(details["colmap_input_point_count"], 5)
+        self.assertEqual(details["colmap_quality_retained_count"], 3)
+        self.assertEqual(details["colmap_surface_supported_count"], 2)
+        self.assertEqual(details["colmap_duplicate_removed_count"], 1)
+        self.assertEqual(details["colmap_added_point_count"], 1)
+        self.assertEqual(merged[1].rgb, (0, 255, 0))
 
 
 if __name__ == "__main__":

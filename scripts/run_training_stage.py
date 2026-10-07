@@ -67,6 +67,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Immutable LiDAR-initialization metadata JSON. Requires arkit_hybrid cameras.",
     )
     parser.add_argument(
+        "--merge-colmap-initialization",
+        action="store_true",
+        help="Merge conservative filtered COLMAP points into the selected LiDAR initialization.",
+    )
+    parser.add_argument(
         "--preprocess-group-output",
         action="append",
         default=[],
@@ -153,6 +158,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     started_at = utc_now()
 
     try:
+        if args.merge_colmap_initialization and not args.lidar_initialization_uri:
+            raise ValueError("--merge-colmap-initialization requires --lidar-initialization-uri")
         if args.dry_run:
             print_plan(args, run_id, preprocess_dir, colmap_dir, local_run_dir, current_dir, history_dir)
             return 0
@@ -335,7 +342,7 @@ def print_plan(
             )
         )
         print(f"$ copy exported .ply -> {local_run_dir / 'exports' / args.export_name}")
-        print(f"$ prepare current payload -> {current_dir}")
+    print(f"$ prepare current payload -> {current_dir}")
     print(f"$ prepare history payload -> {history_dir}")
     print(f"$ sync {current_dir} -> {args.output_uri.rstrip('/')}/current")
     print(f"$ sync {history_dir} -> {args.output_uri.rstrip('/')}/runs/{run_id}")
@@ -417,6 +424,8 @@ def build_training_commands(args: argparse.Namespace, local_run_dir: Path) -> Li
                 str(local_run_dir / "reports" / "lidar_initialization.ply"),
             ]
         )
+    if getattr(args, "merge_colmap_initialization", False):
+        prepare_args.append("--merge-colmap-initialization")
     if args.prepare_with_pixi:
         prepare_command = [
             args.pixi_bin,
@@ -573,7 +582,10 @@ def validate_nerfstudio_colmap_initialization(local_run_dir: Path) -> None:
             raise RuntimeError("A_hybrid pose-source counts do not equal the prepared frame count.")
         if not buildvision3d.get("hybrid_selection_sha256"):
             raise RuntimeError("A_hybrid transforms are missing their selection fingerprint.")
-    if buildvision3d.get("initialization_source") == "high_confidence_lidar":
+    if buildvision3d.get("initialization_source") in {
+        "high_confidence_lidar",
+        "high_confidence_lidar_plus_filtered_colmap",
+    }:
         if not buildvision3d.get("lidar_initialization_selection_sha256"):
             raise RuntimeError("LiDAR initialization transforms are missing their selection fingerprint.")
         if buildvision3d.get("coordinate_frame") != "reference_arkit_gravity_aligned_nerfstudio_z_up":
@@ -615,8 +627,14 @@ def prepare_upload_payloads(
     copy_training_outputs(local_run_dir, current_dir)
     copy_tree(local_run_dir / "exports", current_dir / "exports")
     copy_if_exists(local_run_dir / "nerfstudio" / "transforms.json", current_dir / "nerfstudio" / "transforms.json")
-    copy_if_exists(local_run_dir / "nerfstudio" / "colmap_points3D.ply", current_dir / "nerfstudio" / "colmap_points3D.ply")
-    copy_if_exists(local_run_dir / "nerfstudio" / "lidar_initialization.ply", current_dir / "nerfstudio" / "lidar_initialization.ply")
+    transforms = read_json(local_run_dir / "nerfstudio" / "transforms.json")
+    initialization_name = Path(str(transforms.get("ply_file_path") or "colmap_points3D.ply"))
+    if initialization_name.is_absolute() or ".." in initialization_name.parts:
+        raise ValueError(f"Invalid training initialization PLY path: {initialization_name}")
+    copy_if_exists(
+        local_run_dir / "nerfstudio" / initialization_name,
+        current_dir / "nerfstudio" / initialization_name,
+    )
 
     finished_at = utc_now()
     result = StageResult(
@@ -759,6 +777,7 @@ def training_summary(local_run_dir: Path, command_results: Sequence[CommandResul
         "lidar_initialization_artifact_uri": buildvision3d.get(
             "lidar_initialization_artifact_uri"
         ),
+        "initialization_merge": buildvision3d.get("initialization_merge"),
         "checkpoint_count": len(checkpoint_files),
         "latest_checkpoint": relative_or_string(checkpoint_files[-1] if checkpoint_files else None, local_run_dir),
         "commands": [

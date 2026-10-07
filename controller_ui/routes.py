@@ -1247,9 +1247,14 @@ def ui_queue_training(
         )
         hybrid_camera_set_uri = None
         lidar_initialization_uri = None
+        merge_colmap_initialization = False
         camera_source = "visual_colmap"
         initialization_source = "colmap_sparse_txt"
-        if selected_source_kind in {"arkit_hybrid", "arkit_hybrid_lidar"}:
+        if selected_source_kind in {
+            "arkit_hybrid",
+            "arkit_hybrid_lidar",
+            "arkit_hybrid_lidar_colmap",
+        }:
             camera_source = "arkit_hybrid"
             hybrid_summary = selected_summary.get("arkit_hybrid") if isinstance(selected_summary.get("arkit_hybrid"), dict) else {}
             hybrid_camera_set_uri = str(hybrid_summary.get("artifact_uri") or "")
@@ -1264,7 +1269,7 @@ def ui_queue_training(
                 raise HTTPException(status_code=400, detail="A_hybrid source run does not match the selected COLMAP run")
             if int(transition_validation.get("review_required_count") or 0) != 0:
                 raise HTTPException(status_code=400, detail="A_hybrid contains source transitions requiring review")
-            if selected_source_kind == "arkit_hybrid_lidar":
+            if selected_source_kind in {"arkit_hybrid_lidar", "arkit_hybrid_lidar_colmap"}:
                 lidar_summary = (
                     selected_summary.get("lidar_initialization")
                     if isinstance(selected_summary.get("lidar_initialization"), dict)
@@ -1279,7 +1284,12 @@ def ui_queue_training(
                     hybrid_summary.get("selection_sha256") or ""
                 ):
                     raise HTTPException(status_code=400, detail="LiDAR initialization does not match A_hybrid")
-                initialization_source = "high_confidence_lidar"
+                merge_colmap_initialization = selected_source_kind == "arkit_hybrid_lidar_colmap"
+                initialization_source = (
+                    "high_confidence_lidar_plus_filtered_colmap"
+                    if merge_colmap_initialization
+                    else "high_confidence_lidar"
+                )
         preprocess_runs = rows_to_json(
             conn.execute(
                 """
@@ -1329,6 +1339,7 @@ def ui_queue_training(
             "colmap_source_run_id": selected_colmap_run_id,
             "hybrid_camera_set_uri": hybrid_camera_set_uri,
             "lidar_initialization_uri": lidar_initialization_uri,
+            "merge_colmap_initialization": merge_colmap_initialization,
             "output_uri": resolved_output_uri,
             "endpoint_url": empty_to_none(endpoint_url),
             "method": method,
@@ -2179,7 +2190,12 @@ def parse_training_source(value: Optional[str]) -> tuple[str, str]:
     if not value:
         raise HTTPException(status_code=400, detail="Select a training camera source")
     kind, separator, run_id = value.partition(":")
-    if separator != ":" or kind not in {"visual_colmap", "arkit_hybrid", "arkit_hybrid_lidar"} or not run_id:
+    if separator != ":" or kind not in {
+        "visual_colmap",
+        "arkit_hybrid",
+        "arkit_hybrid_lidar",
+        "arkit_hybrid_lidar_colmap",
+    } or not run_id:
         raise HTTPException(status_code=400, detail="Invalid training camera source")
     return kind, run_id
 
@@ -2242,6 +2258,19 @@ def training_camera_source_options(colmap_runs: list[dict[str, Any]]) -> list[di
                         "detail": (
                             f"{hybrid.get('frame_count')} cameras + "
                             f"{lidar.get('filtered_voxel_count')} gravity-aligned LiDAR seeds"
+                        ),
+                    }
+                )
+                options.append(
+                    {
+                        "value": f"arkit_hybrid_lidar_colmap:{run_id}",
+                        "kind": "arkit_hybrid_lidar_colmap",
+                        "run_id": run_id,
+                        "label": f"{run_id} · A_hybrid + LiDAR + filtered COLMAP",
+                        "detail": (
+                            f"{hybrid.get('frame_count')} cameras + "
+                            f"{lidar.get('filtered_voxel_count')} LiDAR seeds; COLMAP additions are "
+                            "filtered and deduplicated during preparation"
                         ),
                     }
                 )
@@ -2466,6 +2495,13 @@ def training_summary_rows(run: Optional[dict[str, Any]]) -> list[dict[str, Any]]
     add("Coordinate frame", summary.get("coordinate_frame"))
     add("LiDAR initialization SHA-256", summary.get("lidar_initialization_selection_sha256"))
     add("LiDAR initialization artifact", summary.get("lidar_initialization_artifact_uri") or inputs.get("lidar_initialization_uri"))
+    merge = summary.get("initialization_merge") if isinstance(summary.get("initialization_merge"), dict) else {}
+    add("LiDAR seed points", merge.get("lidar_point_count"))
+    add("COLMAP input points", merge.get("colmap_input_point_count"))
+    add("COLMAP quality-retained points", merge.get("colmap_quality_retained_count"))
+    add("COLMAP surface-supported points", merge.get("colmap_surface_supported_count"))
+    add("COLMAP duplicates removed", merge.get("colmap_duplicate_removed_count"))
+    add("COLMAP points added", merge.get("colmap_added_point_count"))
     add("Max steps", inputs.get("max_steps"))
     add("Save every", inputs.get("save_every"))
     add("Eval every", inputs.get("eval_every"))
