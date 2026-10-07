@@ -1086,7 +1086,7 @@ def validate_complete_payload(current_dir: Path) -> None:
         "stage_result.json",
         "training_summary.json",
         "nerfstudio/transforms.json",
-        "nerfstudio/colmap_points3D.ply",
+        initialization_payload_relative_path(current_dir),
     ]
     missing = [relative_path for relative_path in required if not (current_dir / relative_path).is_file()]
     if missing:
@@ -1098,7 +1098,7 @@ def uploaded_objects(current_dir: Path) -> list[str]:
         "stage_result.json",
         "training_summary.json",
         "nerfstudio/transforms.json",
-        "nerfstudio/colmap_points3D.ply",
+        initialization_payload_relative_path(current_dir),
     ]
     optional_patterns = [
         "outputs/**/config.yml",
@@ -1111,6 +1111,17 @@ def uploaded_objects(current_dir: Path) -> list[str]:
         if candidates:
             existing.append(candidates[-1].relative_to(current_dir).as_posix())
     return existing
+
+
+def initialization_payload_relative_path(current_dir: Path) -> str:
+    transforms_path = current_dir / "nerfstudio" / "transforms.json"
+    if not transforms_path.is_file():
+        return "nerfstudio/colmap_points3D.ply"
+    transforms = json.loads(transforms_path.read_text(encoding="utf-8"))
+    relative_ply = Path(str(transforms.get("ply_file_path") or "colmap_points3D.ply"))
+    if relative_ply.is_absolute() or ".." in relative_ply.parts:
+        raise ValueError(f"Invalid training initialization PLY path: {relative_ply}")
+    return (Path("nerfstudio") / relative_ply).as_posix()
 
 
 def copy_if_exists(source: Path, destination: Path) -> None:

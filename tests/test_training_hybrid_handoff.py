@@ -9,6 +9,8 @@ from types import SimpleNamespace
 from scripts.run_training_stage import (
     build_training_commands,
     training_input_uris,
+    uploaded_objects,
+    validate_complete_payload,
     validate_nerfstudio_colmap_initialization,
 )
 
@@ -118,6 +120,43 @@ class HybridTrainingHandoffTests(unittest.TestCase):
         self.assertIn("--lidar-initialization", prepare_command)
         self.assertIn("/tmp/training-run/reports/lidar_initialization.json", prepare_command)
         self.assertIn("--lidar-initialization-ply", prepare_command)
+
+    def test_complete_payload_accepts_lidar_initialization_ply(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            current_dir = Path(temp_dir)
+            data_dir = current_dir / "nerfstudio"
+            data_dir.mkdir()
+            (current_dir / "stage_result.json").write_text(
+                json.dumps({"status": "completed"}), encoding="utf-8"
+            )
+            (current_dir / "training_summary.json").write_text("{}", encoding="utf-8")
+            (data_dir / "transforms.json").write_text(
+                json.dumps({"ply_file_path": "lidar_initialization.ply"}), encoding="utf-8"
+            )
+            (data_dir / "lidar_initialization.ply").write_text(
+                "ply\nformat ascii 1.0\nelement vertex 1\nend_header\n0 0 0\n",
+                encoding="utf-8",
+            )
+
+            validate_complete_payload(current_dir)
+
+            self.assertIn("nerfstudio/lidar_initialization.ply", uploaded_objects(current_dir))
+
+    def test_complete_payload_reports_selected_missing_initialization_ply(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            current_dir = Path(temp_dir)
+            data_dir = current_dir / "nerfstudio"
+            data_dir.mkdir()
+            (current_dir / "stage_result.json").write_text(
+                json.dumps({"status": "completed"}), encoding="utf-8"
+            )
+            (current_dir / "training_summary.json").write_text("{}", encoding="utf-8")
+            (data_dir / "transforms.json").write_text(
+                json.dumps({"ply_file_path": "lidar_initialization.ply"}), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(FileNotFoundError, "nerfstudio/lidar_initialization.ply"):
+                validate_complete_payload(current_dir)
 
 
 if __name__ == "__main__":
